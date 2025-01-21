@@ -617,7 +617,7 @@ export class ReputationManager implements InterfaceReputationManager {
         const status = this.getStatus(entryPoint, stakeInfo.addr as Address)
         if (status === ReputationStatuses.banned) {
             throw new RpcError(
-                `${entityType} ${stakeInfo.addr} is banned from using the pimlico`,
+                `${entityType} ${stakeInfo.addr} is banned from using the ultra-relay`,
                 ValidationErrors.Reputation
             )
         }
@@ -631,7 +631,7 @@ export class ReputationManager implements InterfaceReputationManager {
         const status = this.getStatus(entryPoint, stakeInfo.addr as Address)
         if (status === ReputationStatuses.throttled) {
             throw new RpcError(
-                `${entityType} ${stakeInfo.addr} is throttled by the pimlico`,
+                `${entityType} ${stakeInfo.addr} is throttled by the ultra-relay`,
                 ValidationErrors.Reputation
             )
         }
@@ -654,20 +654,20 @@ export class ReputationManager implements InterfaceReputationManager {
         if (stakeInfo.stake < this.config.minEntityStake) {
             if (stakeInfo.stake === 0n) {
                 throw new RpcError(
-                    `${entityType} ${stakeInfo.addr} is unstaked and must stake minimum ${this.config.minEntityStake} to use pimlico`,
+                    `${entityType} ${stakeInfo.addr} is unstaked and must stake minimum ${this.config.minEntityStake} to use ultra-relay`,
                     ValidationErrors.InsufficientStake
                 )
             }
 
             throw new RpcError(
-                `${entityType} ${stakeInfo.addr} does not have enough stake to use pimlico`,
+                `${entityType} ${stakeInfo.addr} does not have enough stake to use ultra-relay`,
                 ValidationErrors.InsufficientStake
             )
         }
 
         if (stakeInfo.unstakeDelaySec < this.config.minEntityUnstakeDelay) {
             throw new RpcError(
-                `${entityType} ${stakeInfo.addr} does not have enough unstake delay to use pimlico`,
+                `${entityType} ${stakeInfo.addr} does not have enough unstake delay to use ultra-relay`,
                 ValidationErrors.InsufficientStake
             )
         }

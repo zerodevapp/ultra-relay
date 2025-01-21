@@ -1,0 +1,21 @@
+{
+    "network-name": "sepolia",
+    "rpc-url": "https://sepolia.infura.io/v3/78420001e2ab4bc28d1b70b8df83e13d",
+    "min-entity-stake": 1,
+    "min-executor-balance": "200000000000000000",
+    "min-entity-unstake-delay": 1,
+    "max-bundle-wait": 3,
+    "max-bundle-size": 3,
+    "max-block-range": 500,
+    "port": 3000,
+    "executor-private-keys": "0x0778643e3083b92725b3d636df47d956748b35ad40ef8eabf16106e9c07642b3",
+    "utility-private-key": "0x0778643e3083b92725b3d636df47d956748b35ad40ef8eabf16106e9c07642b3",
+    "entrypoints": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789,0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "deploy-simulations-contract": true,
+    "enable-debug-endpoints": true,
+    "safe-mode": false,
+    "mempool-max-parallel-ops": 5,
+    "mempool-max-queued-ops": 5,
+    "enforce-unique-senders-per-bundle": false,
+    "balance-override": true
+}

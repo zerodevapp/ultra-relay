@@ -49,7 +49,6 @@ import {
 } from "@alto/types"
 import type { Logger, Metrics } from "@alto/utils"
 import {
-    calcPreVerificationGas,
     calcVerificationGasAndCallGasLimit,
     deepHexlify,
     getAAError,
@@ -324,7 +323,7 @@ export class RpcHandler implements IRpcEndpoint {
         }
     }
 
-    async preMempoolChecks(
+    preMempoolChecks(
         opHash: Hex,
         userOperation: UserOperation,
         apiVersion: ApiVersion,
@@ -340,12 +339,12 @@ export class RpcHandler implements IRpcEndpoint {
             throw new RpcError(reason)
         }
 
-        if (apiVersion !== "v1") {
-            await this.gasPriceManager.validateGasPrice({
-                maxFeePerGas: userOperation.maxFeePerGas,
-                maxPriorityFeePerGas: userOperation.maxPriorityFeePerGas
-            })
-        }
+        // if (apiVersion !== "v1") {
+        //     await this.gasPriceManager.validateGasPrice({
+        //         maxFeePerGas: userOperation.maxFeePerGas,
+        //         maxPriorityFeePerGas: userOperation.maxPriorityFeePerGas
+        //     })
+        // }
 
         if (userOperation.verificationGasLimit < 10000n) {
             const reason = "verificationGasLimit must be at least 10000"
@@ -356,7 +355,8 @@ export class RpcHandler implements IRpcEndpoint {
         this.logger.trace({ userOperation, entryPoint }, "beginning validation")
 
         if (
-            userOperation.preVerificationGas === 0n ||
+            // userOperation.preVerificationGas === 0n 
+            // ||
             userOperation.verificationGasLimit === 0n
         ) {
             const reason = "user operation gas limits must be larger than 0"
@@ -691,7 +691,7 @@ export class RpcHandler implements IRpcEndpoint {
             this.config.publicClient.chain.id
         )
 
-        await this.preMempoolChecks(
+        this.preMempoolChecks(
             opHash,
             userOperation,
             apiVersion,
@@ -752,12 +752,12 @@ export class RpcHandler implements IRpcEndpoint {
             return "added"
         }
 
-        if (apiVersion !== "v1") {
-            await this.validator.validatePreVerificationGas({
-                userOperation,
-                entryPoint
-            })
-        }
+        // if (apiVersion !== "v1") {
+        //     await this.validator.validatePreVerificationGas({
+        //         userOperation,
+        //         entryPoint
+        //     })
+        // }
 
         let authorizationList: SignedAuthorizationList | undefined
         if (is7702Type(op)) {
@@ -765,7 +765,7 @@ export class RpcHandler implements IRpcEndpoint {
         }
 
         const validationResult = await this.validator.validateUserOperation({
-            shouldCheckPrefund: apiVersion !== "v1",
+            shouldCheckPrefund: false,
             userOperation,
             queuedUserOperations,
             entryPoint,
@@ -875,7 +875,7 @@ export class RpcHandler implements IRpcEndpoint {
             this.config.publicClient.chain.id
         )
 
-        await this.preMempoolChecks(
+        this.preMempoolChecks(
             opHash,
             userOperation,
             apiVersion,
@@ -975,11 +975,11 @@ export class RpcHandler implements IRpcEndpoint {
     }) {
         this.ensureEntryPointIsSupported(entryPoint)
 
-        if (userOperation.maxFeePerGas === 0n) {
-            throw new RpcError(
-                "user operation max fee per gas must be larger than 0 during gas estimation"
-            )
-        }
+        // if (userOperation.maxFeePerGas === 0n) {
+        //     throw new RpcError(
+        //         "user operation max fee per gas must be larger than 0 during gas estimation"
+        //     )
+        // }
 
         // Check if the nonce is valid
         // If the nonce is less than the current nonce, the user operation has already been executed
@@ -1150,20 +1150,21 @@ export class RpcHandler implements IRpcEndpoint {
             )
         }
 
-        let preVerificationGas = await calcPreVerificationGas({
-            config: this.config,
-            userOperation: {
-                ...userOperation,
-                callGasLimit, // use actual callGasLimit
-                verificationGasLimit, // use actual verificationGasLimit
-                paymasterPostOpGasLimit, // use actual paymasterPostOpGasLimit
-                paymasterVerificationGasLimit // use actual paymasterVerificationGasLimit
-            },
-            entryPoint,
-            gasPriceManager: this.gasPriceManager,
-            validate: false
-        })
-        preVerificationGas = scaleBigIntByPercent(preVerificationGas, 110)
+        const preVerificationGas = 0n
+        // let preVerificationGas = await calcPreVerificationGas({
+        //     config: this.config,
+        //     userOperation: {
+        //         ...userOperation,
+        //         callGasLimit, // use actual callGasLimit
+        //         verificationGasLimit, // use actual verificationGasLimit
+        //         paymasterPostOpGasLimit, // use actual paymasterPostOpGasLimit
+        //         paymasterVerificationGasLimit // use actual paymasterVerificationGasLimit
+        //     },
+        //     entryPoint,
+        //     gasPriceManager: this.gasPriceManager,
+        //     validate: false
+        // })
+        // preVerificationGas = scaleBigIntByPercent(preVerificationGas, 110)
 
         // Check if userOperation passes without estimation balance overrides
         if (isVersion06(simulationUserOperation)) {

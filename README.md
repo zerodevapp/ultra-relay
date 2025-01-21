@@ -20,6 +20,7 @@ To find a list of all options, run:
 ```bash
 ./alto help
 ```
+<!-- 0xb052D58410a2C54e27D3D62F99bf8b2BB27a8D23 -->
 
 A helper script for running Alto locally with an Anvil node can be found at [scripts/run-local-instance.sh](scripts/README.md).
 
