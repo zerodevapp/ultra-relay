@@ -1,6 +1,14 @@
 import type { Logger } from "@alto/utils"
+import dotenv from "dotenv"
 import logger, { pino, type SerializerFn } from "pino"
 import { toHex } from "viem"
+
+// Load environment variables from .env file
+if (process.env.DOTENV_CONFIG_PATH) {
+    dotenv.config({ path: process.env.DOTENV_CONFIG_PATH })
+} else {
+    dotenv.config()
+}
 
 // customFormatter.ts
 // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
@@ -78,12 +86,20 @@ export const initDebugLogger = (level = "debug"): Logger => {
     return l
 }
 
-const transport = pino.transport({
-    target: "@logtail/pino",
-    options: { sourceToken: "xLfntV7bsEfhmkFy8KE94gbM" }
-})
+// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+let  transport: any
+
+if (process.env.BETTER_STACK_TOKEN) {
+    transport = pino.transport({
+        target: "@logtail/pino",
+        options: { sourceToken: process.env.BETTER_STACK_TOKEN }
+    })
+}
 
 export const initProductionLogger = (level: string): Logger => {
+    if (!transport) {
+        return initDebugLogger(level)
+    }
     const l = pino(transport)
     l.level = level
     return l
