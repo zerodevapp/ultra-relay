@@ -1,5 +1,5 @@
 import type { Logger } from "@alto/utils"
-import logger, { type SerializerFn } from "pino"
+import logger, { pino, type SerializerFn } from "pino"
 import { toHex } from "viem"
 
 // customFormatter.ts
@@ -78,14 +78,13 @@ export const initDebugLogger = (level = "debug"): Logger => {
     return l
 }
 
+const transport = pino.transport({
+    target: "@logtail/pino",
+    options: { sourceToken: "xLfntV7bsEfhmkFy8KE94gbM" }
+})
+
 export const initProductionLogger = (level: string): Logger => {
-    const l = logger({
-        base: undefined, // do not log pid and hostname, we don't need it
-        formatters: {
-            level: logLevel,
-            log: customSerializer
-        }
-    })
+    const l = pino(transport)
     l.level = level
     return l
 }

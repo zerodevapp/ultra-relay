@@ -355,7 +355,7 @@ export class RpcHandler implements IRpcEndpoint {
         this.logger.trace({ userOperation, entryPoint }, "beginning validation")
 
         if (
-            // userOperation.preVerificationGas === 0n 
+            // userOperation.preVerificationGas === 0n
             // ||
             userOperation.verificationGasLimit === 0n
         ) {
@@ -691,12 +691,7 @@ export class RpcHandler implements IRpcEndpoint {
             this.config.publicClient.chain.id
         )
 
-        this.preMempoolChecks(
-            opHash,
-            userOperation,
-            apiVersion,
-            entryPoint
-        )
+        this.preMempoolChecks(opHash, userOperation, apiVersion, entryPoint)
 
         const currentNonceValue = await this.getNonceValue(
             userOperation,
@@ -875,12 +870,7 @@ export class RpcHandler implements IRpcEndpoint {
             this.config.publicClient.chain.id
         )
 
-        this.preMempoolChecks(
-            opHash,
-            userOperation,
-            apiVersion,
-            entryPoint
-        )
+        this.preMempoolChecks(opHash, userOperation, apiVersion, entryPoint)
 
         const result = (
             await this.executor.bundle(entryPoint, [userOperation])
