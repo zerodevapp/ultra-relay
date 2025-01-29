@@ -94,6 +94,13 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             public: { http: [args.rpcUrl] }
         }
     }
+    const fetchOptions = args.rpcUrl.includes("tenderly")
+        ? {
+              headers: {
+                  "Accept-Encoding": "gzip"
+              }
+          }
+        : {}
 
     let publicClient = createPublicClient({
         transport: customTransport(args.rpcUrl, {
@@ -102,7 +109,8 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                 {
                     level: args.publicClientLogLevel || args.logLevel
                 }
-            )
+            ),
+            fetchOptions
         }),
         chain
     })
