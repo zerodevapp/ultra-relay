@@ -49,6 +49,7 @@ import {
 } from "@alto/types"
 import type { Logger, Metrics } from "@alto/utils"
 import {
+    calcPreVerificationGas,
     calcVerificationGasAndCallGasLimit,
     deepHexlify,
     getAAError,
@@ -1140,20 +1141,20 @@ export class RpcHandler implements IRpcEndpoint {
             )
         }
 
-        const preVerificationGas = 0n
-        // let preVerificationGas = await calcPreVerificationGas({
-        //     config: this.config,
-        //     userOperation: {
-        //         ...userOperation,
-        //         callGasLimit, // use actual callGasLimit
-        //         verificationGasLimit, // use actual verificationGasLimit
-        //         paymasterPostOpGasLimit, // use actual paymasterPostOpGasLimit
-        //         paymasterVerificationGasLimit // use actual paymasterVerificationGasLimit
-        //     },
-        //     entryPoint,
-        //     gasPriceManager: this.gasPriceManager,
-        //     validate: false
-        // })
+        // const preVerificationGas = 0n
+        const preVerificationGas = await calcPreVerificationGas({
+            config: this.config,
+            userOperation: {
+                ...userOperation,
+                callGasLimit, // use actual callGasLimit
+                verificationGasLimit, // use actual verificationGasLimit
+                paymasterPostOpGasLimit, // use actual paymasterPostOpGasLimit
+                paymasterVerificationGasLimit // use actual paymasterVerificationGasLimit
+            },
+            entryPoint,
+            gasPriceManager: this.gasPriceManager,
+            validate: false
+        })
         // preVerificationGas = scaleBigIntByPercent(preVerificationGas, 110)
 
         // Check if userOperation passes without estimation balance overrides

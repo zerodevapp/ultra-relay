@@ -84,8 +84,8 @@ export interface GasOverheads {
 }
 
 export const DefaultGasOverheads: GasOverheads = {
-    fixed: 21000,
-    perUserOp: 18300,
+    fixed: 11000,
+    perUserOp: 8300,
     perUserOpWord: 4,
     zeroByte: 4,
     nonZeroByte: 16,
