@@ -1142,7 +1142,7 @@ export class RpcHandler implements IRpcEndpoint {
         }
 
         // const preVerificationGas = 0n
-        const preVerificationGas = await calcPreVerificationGas({
+        let preVerificationGas = await calcPreVerificationGas({
             config: this.config,
             userOperation: {
                 ...userOperation,
@@ -1155,7 +1155,7 @@ export class RpcHandler implements IRpcEndpoint {
             gasPriceManager: this.gasPriceManager,
             validate: false
         })
-        // preVerificationGas = scaleBigIntByPercent(preVerificationGas, 110)
+        preVerificationGas = scaleBigIntByPercent(preVerificationGas, 110)
 
         // Check if userOperation passes without estimation balance overrides
         if (isVersion06(simulationUserOperation)) {
