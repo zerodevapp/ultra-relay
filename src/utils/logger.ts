@@ -87,7 +87,7 @@ export const initDebugLogger = (level = "debug"): Logger => {
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-let  transport: any
+let transport: any
 
 if (process.env.BETTER_STACK_TOKEN) {
     transport = pino.transport({
