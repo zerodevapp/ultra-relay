@@ -1,16 +1,28 @@
-<p align="center"><a href="https://docs.pimlico/reference/bundler"><img width="1000" title="Alto" src='https://i.imgur.com/qgVAdjN.png' /></a></p>
-
-# ⛰️ Alto ⛰️
+# 🚀 Ultra Relay (Modified from Alto) 🚀
 
 ![Node Version](https://img.shields.io/badge/node-20.x-green)
 
-Alto is a Typescript implementation of the [ERC-4337 bundler specification](https://eips.ethereum.org/EIPS/eip-4337) developed by [Pimlico](https://pimlico.io), focused on transaction inclusion reliability.
+**Ultra Relay** is a **modified version** of [Alto](https://github.com/Pimlico/alto), originally developed by [Pimlico](https://pimlico.io).  
+It is a **TypeScript implementation** of the [ERC-4337 bundler specification](https://eips.ethereum.org/EIPS/eip-4337), focused on transaction inclusion reliability.
+
+> ⚠️ **DISCLAIMER:** This project contains modifications made by **ZeroDev Inc.** It is **not** affiliated with or endorsed by Pimlico.
+
+## Modifications by ZeroDev Inc.
+
+Ultra Relay has been modified from the original **Alto** to support **relayer functionality without requiring a paymaster**.
+
+### **Key Changes**
+- Accepting zeroed out `maxFeePerGas` and `maxPriorityFeePerGas` in the User Operation to be sent on-chain
+- Other general improvements related to relayer/bundler (non-paymaster) sponsored user operations
+
+These modifications were first made on **[Jan 22, 2025]** and continue to be updated.
 
 ## Getting started
 
-For a full explanation of Alto, please visit our [docs page](https://docs.pimlico.io/infra/bundler)
+For a full explanation of Alto, please visit Pimlico's [docs page](https://docs.pimlico.io/infra/bundler)
 
-#### Run an instance of Alto with the following commands:
+#### Run an instance of Ultra Relay (Command remains `alto` for compatibility):
+
 ```bash
 pnpm install
 pnpm build
@@ -49,9 +61,10 @@ Distributed under the GPL-3.0 License. See [LICENSE](./LICENSE) for more informa
 
 ## Contact
 
-Feel free to ask any questions in our [Telegram group](https://t.me/pimlicoHQ)
+- Email: contact@zerodev.app
 
 ## Acknowledgements
 
 - [Eth-Infinitism bundler](https://github.com/eth-infinitism/bundler)
 - [Lodestar](https://github.com/ChainSafe/lodestar)
+- [Pimlico Alto Bundler](https://github.com/Pimlico/alto), the original implementation from which Ultra Relay is derived.
