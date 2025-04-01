@@ -29,6 +29,7 @@ import {
     type TransactionReceipt,
     TransactionReceiptNotFoundError,
     type WatchBlocksReturnType,
+    formatEther,
     getAbiItem
 } from "viem"
 import type { Executor, ReplaceTransactionResult } from "./executor"
@@ -404,6 +405,53 @@ export class ExecutorManager {
         }
     }
 
+    private async updateTransactionCostMetrics(
+        transactionHash: HexData32,
+        userOperationHashes: HexData32[],
+        transactionStatus: string
+    ) {
+        try {
+            const receipt =
+                await this.config.publicClient.getTransactionReceipt({
+                    hash: transactionHash
+                })
+
+            const l2GasCostTx = receipt.gasUsed * receipt.effectiveGasPrice
+
+            // Handle L1 fee if present (for L2 chains like Optimism)
+            let l1Fee = BigInt(0)
+            if (
+                "l1Fee" in receipt &&
+                receipt.l1Fee !== undefined &&
+                receipt.l1Fee !== null
+            ) {
+                l1Fee = BigInt(receipt.l1Fee.toString())
+            }
+
+            const actualCost = l2GasCostTx + l1Fee
+            // Convert wei to ETH using viem's formatEther
+            const actualCostInEth = Number(formatEther(actualCost))
+
+            // Record cost for each userOp in the bundle since they share the transaction
+            for (const userOpHash of userOperationHashes) {
+                this.metrics.transactionCosts.set(
+                    {
+                        userOpHash,
+                        transactionHash,
+                        executor_wallet: receipt.from,
+                        transaction_status: transactionStatus
+                    },
+                    actualCostInEth
+                )
+            }
+        } catch (error) {
+            this.logger.error(
+                { error, transactionHash },
+                "Failed to update transaction cost metrics"
+            )
+        }
+    }
+
     // update the current status of the bundling transaction/s
     private async refreshTransactionStatus(
         entryPoint: Address,
@@ -462,6 +510,18 @@ export class ExecutorManager {
                 blockNumber: bigint // block number is undefined only if transaction is not found
                 transactionHash: `0x${string}`
             }
+
+        // Track transaction costs for both included and reverted transactions
+        if (
+            bundlingStatus.status === "included" ||
+            bundlingStatus.status === "reverted"
+        ) {
+            await this.updateTransactionCostMetrics(
+                transactionHash,
+                opInfos.map((op) => op.userOperationHash),
+                bundlingStatus.status
+            )
+        }
 
         if (bundlingStatus.status === "included") {
             this.metrics.userOperationsOnChain
