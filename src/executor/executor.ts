@@ -485,7 +485,7 @@ export class Executor {
         data = encodeFunctionData({
             abi: isUserOpVersion06 ? EntryPointV06Abi : EntryPointV07Abi,
             functionName: "handleOps",
-            args: [ops, "0x000000000000000000000000000000000000dead"]
+            args: [ops, opts.account.address]
         })
         to = entryPoint
 
