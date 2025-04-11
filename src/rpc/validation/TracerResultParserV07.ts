@@ -18,12 +18,13 @@ import {
     type Hex,
     decodeErrorResult,
     decodeFunctionResult,
-    getFunctionSelector,
     hexToBigInt,
     keccak256,
-    pad
+    pad,
+    toFunctionSelector
 } from "viem"
 import type { BundlerTracerResult } from "./BundlerCollectorTracerV07"
+import { areAddressesEqual, isVersion08 } from "@alto/utils"
 
 interface CallEntry {
     to: string
@@ -49,7 +50,7 @@ const abi = [...SenderCreatorAbi, ...EntryPointV07Abi, ...PaymasterAbi] as Abi
 const functionSignatureToMethodName = (hash: any) => {
     let functionName: string | undefined = undefined
     for (const item of abi) {
-        const signature = getFunctionSelector(item as AbiFunction)
+        const signature = toFunctionSelector(item as AbiFunction)
         if (signature === hash) {
             functionName = (item as AbiFunction).name
         }
@@ -234,7 +235,7 @@ export function parseEntitySlots(
 
 // method-signature for calls from entryPoint
 const callsFromEntryPointMethodSigs: { [key: string]: string } = {
-    factory: getFunctionSelector({
+    factory: toFunctionSelector({
         inputs: [
             {
                 internalType: "bytes",
@@ -253,7 +254,7 @@ const callsFromEntryPointMethodSigs: { [key: string]: string } = {
         stateMutability: "nonpayable",
         type: "function"
     }),
-    account: getFunctionSelector({
+    account: toFunctionSelector({
         inputs: [
             {
                 components: [
@@ -329,7 +330,7 @@ const callsFromEntryPointMethodSigs: { [key: string]: string } = {
         stateMutability: "nonpayable",
         type: "function"
     }),
-    paymaster: getFunctionSelector({
+    paymaster: toFunctionSelector({
         inputs: [
             {
                 components: [
@@ -429,27 +430,42 @@ export function tracerResultParserV07(
     // todo: block access to no-code addresses (might need update to tracer)
 
     // opcodes from [OP-011]
-    const bannedOpCodes = new Set([
-        "GASPRICE",
-        "GASLIMIT",
-        "DIFFICULTY",
-        "TIMESTAMP",
-        "BASEFEE",
-        "BLOCKHASH",
-        "NUMBER",
-        "SELFBALANCE",
-        "BALANCE",
-        "ORIGIN",
-        "GAS",
-        "CREATE",
-        "COINBASE",
-        "SELFDESTRUCT",
-        "RANDOM",
-        "PREVRANDAO",
-        "INVALID",
-        "TSTORE",
-        "TLOAD"
-    ])
+    const bannedOpCodes = isVersion08(userOperation, entryPointAddress)
+        ? new Set([
+              "GAS",
+              "NUMBER",
+              "TIMESTAMP",
+              "COINBASE",
+              "DIFFICULTY",
+              "BASEFEE",
+              "GASLIMIT",
+              "GASPRICE",
+              "SELFBALANCE",
+              "BALANCE",
+              "ORIGIN",
+              "BLOCKHASH",
+              "SELFDESTRUCT",
+              "BLOBHASH",
+              "BLOBBASEFEE"
+          ])
+        : new Set([
+              "GASPRICE",
+              "GASLIMIT",
+              "DIFFICULTY",
+              "TIMESTAMP",
+              "BASEFEE",
+              "BLOCKHASH",
+              "NUMBER",
+              "ORIGIN",
+              "GAS",
+              "COINBASE",
+              "SELFDESTRUCT",
+              "RANDOM",
+              "PREVRANDAO",
+              "INVALID",
+              "SELFBALANCE",
+              "BALANCE"
+          ])
 
     // eslint-disable-next-line @typescript-eslint/no-base-to-string
     if (Object.values(tracerResults.callsFromEntryPoint).length < 1) {
@@ -506,6 +522,8 @@ export function tracerResultParserV07(
         tracerResults.keccak as Hex[]
     )
 
+    let isCreateOpcodeUsed = false
+
     for (const [title, entStakes] of Object.entries(stakeInfoEntities)) {
         const entityTitle = title as keyof StakeInfoEntities
         const entityAddr = (entStakes?.addr ?? "").toLowerCase()
@@ -523,6 +541,7 @@ export function tracerResultParserV07(
             continue
         }
         const opcodes = currentNumLevel.opcodes
+
         const access = currentNumLevel.access // address => { reads, writes }
 
         // [OP-020]
@@ -535,37 +554,59 @@ export function tracerResultParserV07(
 
         // opcodes from [OP-011]
         for (const opcode of Object.keys(opcodes)) {
-            if (
-                bannedOpCodes.has(opcode) &&
-                !(
-                    (opcode === "BALANCE" || opcode === "SELFBALANCE") &&
-                    isStaked(entStakes)
-                )
-            ) {
+            if (bannedOpCodes.has(opcode) && !isStaked(entStakes)) {
                 throw new RpcError(
                     `${entityTitle} uses banned opcode: ${opcode}`,
                     ValidationErrors.OpcodeValidation
                 )
             }
         }
-        // [OP-031]
-        if (entityTitle === "factory") {
-            if ((opcodes.CREATE2 ?? 0) > 1) {
-                throw new RpcError(
-                    `${entityTitle} with too many CREATE2`,
-                    ValidationErrors.OpcodeValidation
-                )
-            }
-        } else if (opcodes.CREATE2) {
+
+        const createOpcode = (opcodes.CREATE2 ?? 0) + (opcodes.CREATE ?? 0)
+        const create2Opcode = opcodes.CREATE2 ?? 0
+
+        if (isCreateOpcodeUsed && createOpcode > 1) {
             throw new RpcError(
                 `${entityTitle} uses banned opcode: CREATE2`,
                 ValidationErrors.OpcodeValidation
             )
         }
 
+        // [OP-031]
+        if (entityTitle === "factory") {
+            if ((createOpcode ?? 0) > 2) {
+                throw new RpcError(
+                    `${entityTitle} with too many CREATE2`,
+                    ValidationErrors.OpcodeValidation
+                )
+            }
+            if ((create2Opcode ?? 0) >= 2) {
+                throw new RpcError(
+                    `${entityTitle} with too many CREATE2`,
+                    ValidationErrors.OpcodeValidation
+                )
+            }
+        } else if (createOpcode) {
+            const isFactoryStaked =
+                stakeInfoEntities.factory && isStaked(stakeInfoEntities.factory)
+
+            const skip = stakeInfoEntities.factory && opcodes.CREATE
+
+            if (!(isFactoryStaked || skip)) {
+                throw new RpcError(
+                    `${entityTitle} uses banned opcode: CREATE2`,
+                    ValidationErrors.OpcodeValidation
+                )
+            }
+        }
+
+        if (createOpcode > 0) {
+            isCreateOpcodeUsed = true
+        }
+
         for (const [addr, { reads, writes }] of Object.entries(access)) {
             // testing read/write access on contract "addr"
-            if (addr === sender) {
+            if (areAddressesEqual(addr, userOperation.sender)) {
                 // allowed to access sender's storage
                 // [STO-010]
                 continue
@@ -595,9 +636,17 @@ export function tracerResultParserV07(
                     if (userOperation.factory) {
                         // special case: account.validateUserOp is allowed to use assoc storage if factory is staked.
                         // [STO-022], [STO-021]
+
                         if (
                             !(
-                                entityAddr === sender &&
+                                (areAddressesEqual(
+                                    entityAddr,
+                                    userOperation.sender
+                                ) ||
+                                    areAddressesEqual(
+                                        entityAddr,
+                                        userOperation.paymaster ?? ""
+                                    )) &&
                                 isStaked(stakeInfoEntities.factory)
                             )
                         ) {
@@ -640,9 +689,8 @@ export function tracerResultParserV07(
             // otherwise, return addr as-is
             function nameAddr(addr: string, _currentEntity: string): string {
                 const [title] =
-                    Object.entries(stakeInfoEntities).find(
-                        ([_title, info]) =>
-                            info?.addr?.toLowerCase() === addr.toLowerCase()
+                    Object.entries(stakeInfoEntities).find(([_title, info]) =>
+                        areAddressesEqual(info?.addr ?? "", addr)
                     ) ?? []
 
                 return title ?? addr

@@ -21,7 +21,6 @@ import {
     type UserOperation,
     ValidationErrors,
     type ValidationResultWithAggregation,
-    entryPointErrorsSchema,
     entryPointExecutionErrorSchemaV06,
     entryPointExecutionErrorSchemaV07
 } from "@alto/types"
@@ -46,7 +45,6 @@ import { fromZodError } from "zod-validation-error"
 import { GasEstimationHandler } from "../estimation/gasEstimationHandler"
 import type { SimulateHandleOpResult } from "../estimation/types"
 import type { AltoConfig } from "../../createConfig"
-import { SignedAuthorizationList } from "viem/experimental"
 
 export class UnsafeValidator implements InterfaceValidator {
     config: AltoConfig
@@ -80,8 +78,7 @@ export class UnsafeValidator implements InterfaceValidator {
         isVersion06: boolean,
         errorResult: unknown,
         logger: Logger,
-        simulationType: "validation" | "execution",
-        usingTenderly = false
+        simulationType: "validation" | "execution"
     ): Promise<
         ValidationResult | ValidationResultWithAggregation | ExecutionResult
     > {
@@ -89,9 +86,8 @@ export class UnsafeValidator implements InterfaceValidator {
             ? entryPointExecutionErrorSchemaV06
             : entryPointExecutionErrorSchemaV07
 
-        const entryPointErrorSchemaParsing = usingTenderly
-            ? entryPointErrorsSchema.safeParse(errorResult)
-            : entryPointExecutionErrorSchema.safeParse(errorResult)
+        const entryPointErrorSchemaParsing =
+            entryPointExecutionErrorSchema.safeParse(errorResult)
 
         if (!entryPointErrorSchemaParsing.success) {
             try {
@@ -155,27 +151,20 @@ export class UnsafeValidator implements InterfaceValidator {
         return simulationResult
     }
 
-    async getExecutionResult({
+    async validateHandleOp({
         userOperation,
         entryPoint,
         queuedUserOperations,
-        addSenderBalanceOverride,
-        authorizationList,
         stateOverrides
     }: {
         userOperation: UserOperation
         entryPoint: Address
         queuedUserOperations: UserOperation[]
-        addSenderBalanceOverride: boolean
-        authorizationList?: SignedAuthorizationList
         stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult<"execution">> {
-        const error = await this.gasEstimationHandler.simulateHandleOp({
-            authorizationList,
+        const error = await this.gasEstimationHandler.validateHandleOp({
             userOperation,
             queuedUserOperations,
-            addSenderBalanceOverride,
-            balanceOverrideEnabled: this.config.balanceOverride,
             entryPoint,
             targetAddress: zeroAddress,
             targetCallData: "0x",
@@ -183,9 +172,51 @@ export class UnsafeValidator implements InterfaceValidator {
         })
 
         if (error.result === "failed") {
+            let errorCode: number = ExecutionErrors.UserOperationReverted
+
+            if (error.data.toString().includes("AA23")) {
+                errorCode = ValidationErrors.SimulateValidation
+            }
+
             throw new RpcError(
                 `UserOperation reverted during simulation with reason: ${error.data}`,
-                ExecutionErrors.UserOperationReverted
+                errorCode
+            )
+        }
+
+        return error as SimulateHandleOpResult<"execution">
+    }
+
+    async getExecutionResult({
+        userOperation,
+        entryPoint,
+        queuedUserOperations,
+        stateOverrides
+    }: {
+        userOperation: UserOperation
+        entryPoint: Address
+        queuedUserOperations: UserOperation[]
+        stateOverrides?: StateOverrides
+    }): Promise<SimulateHandleOpResult<"execution">> {
+        const error = await this.gasEstimationHandler.simulateHandleOp({
+            userOperation,
+            queuedUserOperations,
+            entryPoint,
+            targetAddress: zeroAddress,
+            targetCallData: "0x",
+            stateOverrides
+        })
+
+        if (error.result === "failed") {
+            let errorCode: number = ExecutionErrors.UserOperationReverted
+
+            if (error.data.toString().includes("AA23")) {
+                errorCode = ValidationErrors.SimulateValidation
+            }
+
+            throw new RpcError(
+                `UserOperation reverted during simulation with reason: ${error.data}`,
+                errorCode
             )
         }
 
@@ -194,12 +225,10 @@ export class UnsafeValidator implements InterfaceValidator {
 
     async getValidationResultV06({
         userOperation,
-        entryPoint,
-        authorizationList
+        entryPoint
     }: {
         userOperation: UserOperationV06
         entryPoint: Address
-        authorizationList?: SignedAuthorizationList
         codeHashes?: ReferencedCodeHashes
     }): Promise<
         (ValidationResultV06 | ValidationResultWithAggregationV06) & {
@@ -230,7 +259,6 @@ export class UnsafeValidator implements InterfaceValidator {
                 userOperation,
                 useCodeOverride: false, // disable code override so that call phase reverts aren't caught
                 targetAddress: zeroAddress,
-                authorizationList,
                 targetCallData: "0x"
             })
 
@@ -243,8 +271,7 @@ export class UnsafeValidator implements InterfaceValidator {
                 isVersion06(userOperation),
                 simulateValidationResult,
                 this.logger,
-                "validation",
-                this.config.tenderly
+                "validation"
             )) as ValidationResultV06 | ValidationResultWithAggregationV06),
             storageMap: {}
         }
@@ -275,8 +302,8 @@ export class UnsafeValidator implements InterfaceValidator {
         }
 
         if (
-            validationResult.returnInfo.validUntil < now + 5 &&
-            this.config.expirationCheck
+            this.config.expirationCheck &&
+            validationResult.returnInfo.validUntil < now + 5
         ) {
             throw new RpcError(
                 "expires too soon",
@@ -368,14 +395,12 @@ export class UnsafeValidator implements InterfaceValidator {
     async getValidationResultV07({
         userOperation,
         queuedUserOperations,
-        entryPoint,
-        authorizationList
+        entryPoint
     }: {
         userOperation: UserOperationV07
         queuedUserOperations: UserOperationV07[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (ValidationResultV07 | ValidationResultWithAggregationV07) & {
             storageMap: StorageMap
@@ -386,8 +411,7 @@ export class UnsafeValidator implements InterfaceValidator {
             await this.gasEstimationHandler.gasEstimatorV07.simulateValidation({
                 entryPoint,
                 userOperation,
-                queuedUserOperations,
-                authorizationList
+                queuedUserOperations
             })
 
         if (simulateValidationResult.status === "failed") {
@@ -463,8 +487,9 @@ export class UnsafeValidator implements InterfaceValidator {
         }
 
         if (
-            res.returnInfo.validUntil == null ||
-            res.returnInfo.validUntil < now + 5
+            this.config.expirationCheck &&
+            (res.returnInfo.validUntil == null ||
+                res.returnInfo.validUntil < now + 5)
         ) {
             throw new RpcError(
                 `UserOperation expires too soon, validUntil=${res.returnInfo.validUntil}, now=${now}`,
@@ -479,14 +504,12 @@ export class UnsafeValidator implements InterfaceValidator {
         userOperation,
         queuedUserOperations,
         entryPoint,
-        codeHashes,
-        authorizationList
+        codeHashes
     }: {
         userOperation: UserOperation
         queuedUserOperations: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (ValidationResult | ValidationResultWithAggregation) & {
             storageMap: StorageMap
@@ -503,8 +526,7 @@ export class UnsafeValidator implements InterfaceValidator {
         return this.getValidationResultV07({
             userOperation,
             queuedUserOperations: queuedUserOperations as UserOperationV07[],
-            entryPoint,
-            authorizationList
+            entryPoint
         })
     }
 
@@ -535,14 +557,12 @@ export class UnsafeValidator implements InterfaceValidator {
         shouldCheckPrefund,
         userOperation,
         queuedUserOperations,
-        entryPoint,
-        authorizationList
+        entryPoint
     }: {
         shouldCheckPrefund: boolean
         userOperation: UserOperation
         queuedUserOperations: UserOperation[]
         entryPoint: Address
-        authorizationList?: SignedAuthorizationList
         _referencedContracts?: ReferencedCodeHashes
     }): Promise<
         (ValidationResult | ValidationResultWithAggregation) & {
@@ -554,8 +574,7 @@ export class UnsafeValidator implements InterfaceValidator {
             const validationResult = await this.getValidationResult({
                 userOperation,
                 queuedUserOperations,
-                entryPoint,
-                authorizationList
+                entryPoint
             })
 
             if (shouldCheckPrefund) {
@@ -568,7 +587,7 @@ export class UnsafeValidator implements InterfaceValidator {
                             preOpGas: validationResult.returnInfo.preOpGas,
                             paid: validationResult.returnInfo.prefund
                         },
-                        this.config.publicClient.chain.id
+                        this.config.chainId
                     )
 
                 let mul = 1n

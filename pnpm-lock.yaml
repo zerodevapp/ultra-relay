@@ -62,9 +62,6 @@ importers:
 
   src:
     dependencies:
-      '@fastify/cors':
-        specifier: ^9.0.1
-        version: 9.0.1
       '@fastify/websocket':
         specifier: ^10.0.1
         version: 10.0.1
@@ -104,6 +101,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.25.1
         version: 1.25.1
+      '@pimlico/opentelemetry-instrumentation-viem':
+        specifier: ^0.0.4
+        version: 0.0.4(@opentelemetry/api@1.9.0)
       '@sentry/node':
         specifier: ^8.51.0
         version: 8.51.0
@@ -146,9 +146,12 @@ importers:
       prom-client:
         specifier: ^14.2.0
         version: 14.2.0
+      type-fest:
+        specifier: ^4.35.0
+        version: 4.35.0
       viem:
-        specifier: ^2.19.0
-        version: 2.21.12(typescript@5.3.3)(zod@3.22.4)
+        specifier: ^2.24.3
+        version: 2.24.3(typescript@5.3.3)(zod@3.22.4)
       yargs:
         specifier: ^17.7.1
         version: 17.7.2
@@ -206,7 +209,7 @@ importers:
         version: 10.9.2(@swc/core@1.3.105)(@types/node@18.16.3)(typescript@5.3.3)
       viem:
         specifier: ^2.9.5
-        version: 2.21.12(typescript@5.3.3)(zod@3.22.4)
+        version: 2.21.12(typescript@5.3.3)
       vitest:
         specifier: ^1.6.0
         version: 1.6.0(@types/node@18.16.3)
@@ -5419,6 +5422,20 @@ snapshots:
   abitype@1.0.5(typescript@5.3.3)(zod@3.22.4):
     optionalDependencies:
       typescript: 5.3.3
+    dev: false
+
+  /abitype@1.0.8(typescript@5.3.3)(zod@3.22.4):
+    resolution: {integrity: sha512-ZeiI6h3GnW06uYDLx0etQtX/p8E24UaHHBj57RSjK7YBFe7iuVn07EDpOeP451D06sF27VOz9JJPlIKJmXgkEg==}
+    peerDependencies:
+      typescript: '>=5.0.4'
+      zod: ^3 >=3.22.0
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+      zod:
+        optional: true
+    dependencies:
+      typescript: 5.3.3
       zod: 3.22.4
 
   abort-controller@3.0.0:
@@ -5805,6 +5822,7 @@ snapshots:
       ms: 2.1.2
     optionalDependencies:
       supports-color: 5.5.0
+    dev: true
 
   debug@4.3.4(supports-color@8.1.1):
     dependencies:
@@ -6367,8 +6385,8 @@ snapshots:
 
   import-in-the-middle@1.10.0:
     dependencies:
-      acorn: 8.12.1
-      acorn-import-attributes: 1.9.5(acorn@8.12.1)
+      acorn: 8.14.0
+      acorn-import-attributes: 1.9.5(acorn@8.14.0)
       cjs-module-lexer: 1.3.1
       module-details-from-path: 1.0.3
 
@@ -7009,7 +7027,7 @@ snapshots:
 
   permissionless@0.2.24(viem@2.21.12(typescript@5.3.3)(zod@3.22.4))(webauthn-p256@0.0.10):
     dependencies:
-      viem: 2.21.12(typescript@5.3.3)(zod@3.22.4)
+      viem: 2.21.12(typescript@5.3.3)
       webauthn-p256: 0.0.10
 
   pg-int8@1.0.1: {}
@@ -7605,6 +7623,7 @@ snapshots:
   supports-color@5.5.0:
     dependencies:
       has-flag: 3.0.0
+    dev: true
 
   supports-color@7.2.0:
     dependencies:
@@ -7831,7 +7850,7 @@ snapshots:
       '@noble/hashes': 1.4.0
       '@scure/bip32': 1.4.0
       '@scure/bip39': 1.4.0
-      abitype: 1.0.5(typescript@5.3.3)(zod@3.22.4)
+      abitype: 1.0.5(typescript@5.3.3)
       isows: 1.0.4(ws@8.17.1)
       webauthn-p256: 0.0.5
       ws: 8.17.1

@@ -4,11 +4,13 @@ import type {
     IBundlerArgsInput,
     ICompatibilityArgsInput,
     IDebugArgsInput,
+    IExecutorArgsInput,
     IGasEstimationArgsInput,
     ILogArgsInput,
     IOptionsInput,
     IRpcArgsInput,
-    IServerArgsInput
+    IServerArgsInput,
+    IMempoolArgsInput
 } from "./bundler"
 
 export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
@@ -25,56 +27,6 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: "0x4e59b44847b379578588920ca78fbf26c0b4956c"
     },
-    "entrypoint-simulation-contract": {
-        description: "Address of the EntryPoint simulations contract",
-        type: "string",
-        alias: "c",
-        require: false
-    },
-    "refill-helper-contract": {
-        description: "Address of the Executor refill helper contract",
-        type: "string",
-        require: false
-    },
-    "executor-private-keys": {
-        description: "Private keys of the executor accounts split by commas",
-        type: "string",
-        alias: "x",
-        require: true
-    },
-    "utility-private-key": {
-        description: "Private key of the utility account",
-        type: "string",
-        alias: "u",
-        require: false
-    },
-    "utility-wallet-monitor": {
-        description: "Either to enable utility wallet monitor or not",
-        type: "boolean",
-        default: true
-    },
-    "utility-wallet-monitor-interval": {
-        description: "Interval for checking utility wallet balance",
-        type: "number",
-        default: 15 * 1000 // 15 seconds
-    },
-    "max-executors": {
-        description:
-            "Maximum number of executor accounts to use from the list of executor private keys",
-        type: "number",
-        require: false
-    },
-    "min-executor-balance": {
-        description:
-            "Minimum balance required for each executor account (below which the utility account will refill)",
-        type: "string"
-    },
-    "executor-refill-interval": {
-        description: "Interval to refill the signer balance (seconds)",
-        type: "number",
-        require: true,
-        default: 60 * 20
-    },
     "min-entity-stake": {
         description: "Minimum stake required for a relay (in 10e18)",
         type: "number",
@@ -87,19 +39,6 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: true,
         default: 1
     },
-    "max-bundle-wait": {
-        description: "Maximum time to wait for a bundle to be submitted (ms)",
-        type: "number",
-        require: true,
-        default: 1000
-    },
-    "max-bundle-size": {
-        description:
-            "Maximum number of operations allowed in the mempool before a bundle is submitted",
-        type: "number",
-        require: true,
-        default: 10
-    },
     "safe-mode": {
         description: "Enable safe mode (enforcing all ERC-4337 rules)",
         type: "boolean",
@@ -111,19 +50,6 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         type: "string",
         require: false,
         default: "100"
-    },
-    "no-profit-bundling": {
-        description:
-            "Bundle tx such that all beneficiary fees are spent on gas fees",
-        type: "boolean",
-        default: false
-    },
-    "gas-price-floor-percent": {
-        description:
-            "The minimum percentage of incoming user operation gas prices compared to the gas price used by the bundler to submit bundles",
-        type: "number",
-        require: true,
-        default: 101
     },
     "gas-price-expiry": {
         description:
@@ -179,35 +105,102 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: null
     },
-    "refilling-wallets": {
-        description: "Enable refilling wallets",
-        type: "boolean",
-        require: false,
-        default: true
-    },
-    "aa95-gas-multiplier": {
-        description:
-            "Amount to multiply the current gas limit by if the bundling tx fails due to AA95",
-        type: "string",
-        require: false,
-        default: "125"
-    },
     "enable-instant-bundling-endpoint": {
         description:
             "Should the bundler enable the pimlico_sendUserOperationNow endpoint",
         type: "boolean",
         default: false
     },
-    "enable-experimental-7702-endpoints": {
+    "should-check-prefund": {
         description:
-            "Should the bundler enable the pimlico_experimental_sendUserOperation7702 and pimlico_experimental_estimateUserOperationGas7702 endpoint",
+            "Should the bundler check userOp's prefund before accepting it",
         type: "boolean",
-        default: false
+        default: true
+    }
+}
+
+export const mempoolOptions: CliCommandOptions<IMempoolArgsInput> = {
+    "redis-mempool-url": {
+        description:
+            "Redis connection URL (required if redis-mempool is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-mempool-concurrency": {
+        description: "Number of concurrent jobs to process",
+        type: "number",
+        require: false,
+        default: 10
+    },
+    "redis-mempool-queue-name": {
+        description: "Redis mempool queue name",
+        type: "string",
+        require: false,
+        default: "outstanding-mempool"
+    },
+    "redis-gas-price-queue-url": {
+        description:
+            "Redis connection URL (required if redis-gas-price-queue is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-gas-price-queue-name": {
+        description: "Queue name to store gas prices",
+        type: "string",
+        require: false,
+        default: "gas-price"
+    },
+    "redis-sender-manager-url": {
+        description:
+            "Redis connection URL (required if redis-sender-manager is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-sender-manager-queue-name": {
+        description: "Queue name to executors",
+        type: "string",
+        require: false,
+        default: "sender-manager"
+    },
+    "mempool-max-parallel-ops": {
+        description:
+            "Maximum amount of parallel user ops to keep in the mempool (same sender, different nonce keys)",
+        type: "number",
+        require: false,
+        default: 10
+    },
+    "mempool-max-queued-ops": {
+        description:
+            "Maximum amount of sequential user ops to keep in the mempool (same sender and nonce key, different nonce values)",
+        type: "number",
+        require: false,
+        default: 0
+    },
+    "enforce-unique-senders-per-bundle": {
+        description:
+            "Include user ops with the same sender in the single bundle",
+        type: "boolean",
+        require: false,
+        default: true
     }
 }
 
 export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
     {
+        "entrypoint-simulation-contract-v7": {
+            description:
+                "Address of the EntryPoint simulations contract for v7",
+            type: "string",
+            alias: "c",
+            require: false
+        },
+        "entrypoint-simulation-contract-v8": {
+            description:
+                "Address of the EntryPoint simulations contract for v8",
+            type: "string",
+            alias: "c",
+            require: false
+        },
         "binary-search-tolerance-delta": {
             description:
                 "Defines the threshold for when to stop the gas estimation binary search",
@@ -225,6 +218,13 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
         "v6-call-gas-limit-multiplier": {
             description:
                 "Amount to multiply the callGasLimits fetched from simulations for v6 userOperations",
+            type: "string",
+            require: true,
+            default: "100"
+        },
+        "v6-verification-gas-limit-multiplier": {
+            description:
+                "Amount to multiply the verificationGasLimit fetched from simulations for v6 userOperations",
             type: "string",
             require: true,
             default: "100"
@@ -249,6 +249,13 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
             type: "string",
             require: true,
             default: "130"
+        },
+        "v7-paymaster-post-op-gas-limit-multiplier": {
+            description:
+                "Amount to multiply the paymasterPostOp limits fetched from simulations for v7 userOperations",
+            type: "string",
+            require: true,
+            default: "120"
         },
         "paymaster-gas-limit-multiplier": {
             description:
@@ -284,8 +291,110 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
             type: "string",
             require: true,
             default: "2000000"
+        },
+        "eth-call-sender-address": {
+            description:
+                "For permissioned chains, eth_call simulations require a whitelisted address as the sender",
+            type: "string"
+        },
+        "split-simulation-calls": {
+            description:
+                "Should the bundler split estimation simulations into smaller calls.",
+            type: "boolean",
+            default: false
         }
     }
+
+export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
+    "enable-fastlane": {
+        description:
+            "Enable bundling v0.6 userOperations using the pfl_sendRawTransactionConditional endpoint",
+        type: "boolean",
+        default: false
+    },
+    "resubmit-stuck-timeout": {
+        description:
+            "Amount of time before retrying a failed userOperation (in ms)",
+        type: "number",
+        require: true,
+        default: 10_000
+    },
+    "aa95-gas-multiplier": {
+        description:
+            "Amount to multiply the current gas limit by if the bundling tx fails due to AA95",
+        type: "string",
+        require: false,
+        default: "125"
+    },
+    "resubmit-multiplier-ceiling": {
+        description:
+            "Maximum multiplier for gasPrice when resubmitting transactions",
+        type: "string",
+        require: false,
+        default: "300"
+    },
+    "refilling-wallets": {
+        description: "Enable refilling wallets",
+        type: "boolean",
+        require: false,
+        default: true
+    },
+    "executor-gas-multiplier": {
+        description: "Amount to scale the gas estimations used for bundling",
+        type: "string",
+        default: "100"
+    },
+    "no-profit-bundling": {
+        description:
+            "Bundle tx such that all beneficiary fees are spent on gas fees",
+        type: "boolean",
+        default: false
+    },
+    "refill-helper-contract": {
+        description: "Address of the Executor refill helper contract",
+        type: "string",
+        require: false
+    },
+    "executor-private-keys": {
+        description: "Private keys of the executor accounts split by commas",
+        type: "string",
+        alias: "x",
+        require: true
+    },
+    "utility-private-key": {
+        description: "Private key of the utility account",
+        type: "string",
+        alias: "u",
+        require: false
+    },
+    "utility-wallet-monitor": {
+        description: "Either to enable utility wallet monitor or not",
+        type: "boolean",
+        default: true
+    },
+    "utility-wallet-monitor-interval": {
+        description: "Interval for checking utility wallet balance",
+        type: "number",
+        default: 15 * 1000 // 15 seconds
+    },
+    "max-executors": {
+        description:
+            "Maximum number of executor accounts to use from the list of executor private keys",
+        type: "number",
+        require: false
+    },
+    "min-executor-balance": {
+        description:
+            "Minimum balance required for each executor account (below which the utility account will refill)",
+        type: "string"
+    },
+    "executor-refill-interval": {
+        description: "Interval to refill the signer balance (seconds)",
+        type: "number",
+        require: true,
+        default: 60 * 20
+    }
+}
 
 export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
     {
@@ -293,14 +402,7 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             description:
                 "Indicates what type of chain the bundler is running on",
             type: "string",
-            choices: [
-                "default",
-                "op-stack",
-                "arbitrum",
-                "hedera",
-                "mantle",
-                "skale"
-            ],
+            choices: ["default", "op-stack", "arbitrum", "hedera", "mantle"],
             default: "default"
         },
         "legacy-transactions": {
@@ -316,13 +418,6 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             type: "boolean",
             require: true,
             default: true
-        },
-        "local-gas-limit-calculation": {
-            description:
-                "Calculate the bundle transaction gas limits locally instead of using the RPC gas limit estimation",
-            type: "boolean",
-            require: true,
-            default: false
         },
         "flush-stuck-transactions-during-startup": {
             description:
@@ -343,6 +438,12 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             type: "string",
             require: true,
             default: "v1,v2"
+        },
+        "is-gas-free-chain": {
+            description:
+                "Indicates if the chain uses 0 for maxFee/maxPriorityFee",
+            type: "boolean",
+            default: false
         },
         "default-api-version": {
             description: "Default API version",
@@ -398,6 +499,7 @@ export const rpcOptions: CliCommandOptions<IRpcArgsInput> = {
     "max-block-range": {
         description: "Max block range for getLogs calls",
         type: "number",
+        default: 2000,
         require: false
     },
     "block-tag-support": {
@@ -411,7 +513,7 @@ export const rpcOptions: CliCommandOptions<IRpcArgsInput> = {
         description: "Does the RPC support code overrides",
         type: "boolean",
         require: false,
-        default: false
+        default: true
     }
 }
 
@@ -432,12 +534,6 @@ export const logOptions: CliCommandOptions<ILogArgsInput> = {
         type: "boolean",
         require: true,
         default: false
-    },
-    "network-name": {
-        description: "Name of the network (used for metrics)",
-        type: "string",
-        require: true,
-        default: "localhost"
     },
     "log-level": {
         description: "Default log level",
@@ -523,12 +619,6 @@ export const debugOptions: CliCommandOptions<IDebugArgsInput> = {
         type: "boolean",
         require: true,
         default: true
-    },
-    tenderly: {
-        description: "RPC url follows the tenderly format",
-        type: "boolean",
-        require: true,
-        default: false
     }
 }
 

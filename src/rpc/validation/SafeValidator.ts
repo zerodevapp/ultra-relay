@@ -27,11 +27,13 @@ import {
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import {
+    getAuthorizationStateOverrides,
     calcVerificationGasAndCallGasLimit,
     getAddressFromInitCodeOrPaymasterAndData,
     isVersion06,
     isVersion07,
-    toPackedUserOperation
+    toPackedUserOperation,
+    isVersion08
 } from "@alto/utils"
 import {
     type ExecutionRevertedError,
@@ -114,7 +116,7 @@ export class SafeValidator
                             preOpGas: validationResult.returnInfo.preOpGas,
                             paid: validationResult.returnInfo.prefund
                         },
-                        this.config.publicClient.chain.id
+                        this.config.chainId
                     )
 
                 let mul = 1n
@@ -179,7 +181,7 @@ export class SafeValidator
             hash = (error.walk() as any).data
         }
 
-        this.senderManager.pushWallet(wallet)
+        this.senderManager.markWalletProcessed(wallet)
 
         return {
             hash,
@@ -203,14 +205,6 @@ export class SafeValidator
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        if (this.config.tenderly) {
-            return super.getValidationResultV07({
-                userOperation,
-                queuedUserOperations,
-                entryPoint
-            })
-        }
-
         if (preCodeHashes && preCodeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(preCodeHashes.addresses)
             if (hash !== preCodeHashes.hash) {
@@ -223,6 +217,7 @@ export class SafeValidator
 
         const [res, tracerResult] = await this.getValidationResultWithTracerV07(
             userOperation,
+            queuedUserOperations,
             entryPoint
         )
 
@@ -278,10 +273,6 @@ export class SafeValidator
             storageMap: StorageMap
         }
     > {
-        if (this.config.tenderly) {
-            return super.getValidationResultV06({ userOperation, entryPoint })
-        }
-
         if (preCodeHashes && preCodeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(preCodeHashes.addresses)
             if (hash !== preCodeHashes.hash) {
@@ -355,6 +346,10 @@ export class SafeValidator
         userOperation: UserOperationV06,
         entryPoint: Address
     ): Promise<[ValidationResultV06, BundlerTracerResult]> {
+        const stateOverrides = getAuthorizationStateOverrides({
+            userOperations: [userOperation]
+        })
+
         const tracerResult = await debug_traceCall(
             this.config.publicClient,
             {
@@ -367,7 +362,8 @@ export class SafeValidator
                 })
             },
             {
-                tracer: bundlerCollectorTracer
+                tracer: bundlerCollectorTracer,
+                stateOverrides
             }
         )
 
@@ -498,14 +494,18 @@ export class SafeValidator
 
     async getValidationResultWithTracerV07(
         userOperation: UserOperationV07,
+        queuedUserOperations: UserOperationV07[],
         entryPoint: Address
     ): Promise<[ValidationResultV07, BundlerTracerResult]> {
         const packedUserOperation = toPackedUserOperation(userOperation)
+        const packedQueuedUserOperations = queuedUserOperations.map((uop) =>
+            toPackedUserOperation(uop)
+        )
 
         const entryPointSimulationsCallData = encodeFunctionData({
             abi: EntryPointV07SimulationsAbi,
             functionName: "simulateValidationLast",
-            args: [[packedUserOperation]]
+            args: [[...packedQueuedUserOperations, packedUserOperation]]
         })
 
         const callData = encodeFunctionData({
@@ -514,8 +514,15 @@ export class SafeValidator
             args: [entryPoint, [entryPointSimulationsCallData]]
         })
 
-        const entryPointSimulationsAddress =
-            this.config.entrypointSimulationContract
+        const isV8 = isVersion08(userOperation, entryPoint)
+
+        const entryPointSimulationsAddress = isV8
+            ? this.config.entrypointSimulationContractV8
+            : this.config.entrypointSimulationContractV7
+
+        const stateOverrides = getAuthorizationStateOverrides({
+            userOperations: [userOperation]
+        })
 
         const tracerResult = await debug_traceCall(
             this.config.publicClient,
@@ -525,7 +532,8 @@ export class SafeValidator
                 data: callData
             },
             {
-                tracer: bundlerCollectorTracer
+                tracer: bundlerCollectorTracer,
+                stateOverrides
             }
         )
 
@@ -549,6 +557,10 @@ export class SafeValidator
 
             if (errorMessage.includes("AA24")) {
                 errorCode = ValidationErrors.InvalidSignature
+            }
+
+            if (errorMessage.includes("AA31")) {
+                errorCode = ValidationErrors.PaymasterDepositTooLow
             }
 
             throw new RpcError(errorMessage, errorCode)

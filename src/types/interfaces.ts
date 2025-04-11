@@ -1,22 +1,26 @@
 import type { Address } from "viem"
 import type { SimulateHandleOpResult } from "../rpc/estimation/types"
-import type { ReferencedCodeHashes } from "./mempool"
 import type {
+    ReferencedCodeHashes,
     StateOverrides,
     UserOperation,
     UserOperationV06,
     UserOperationV07
 } from "./schemas"
 import type * as validation from "./validation"
-import { SignedAuthorizationList } from "viem/experimental"
 
 export interface InterfaceValidator {
-    getExecutionResult(args: {
-        authorizationList?: SignedAuthorizationList
+    validateHandleOp(args: {
         userOperation: UserOperation
         entryPoint: Address
         queuedUserOperations: UserOperation[]
-        addSenderBalanceOverride: boolean
+        stateOverrides?: StateOverrides
+    }): Promise<SimulateHandleOpResult<"execution">>
+
+    getExecutionResult(args: {
+        userOperation: UserOperation
+        entryPoint: Address
+        queuedUserOperations: UserOperation[]
         stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult<"execution">>
 
@@ -24,7 +28,6 @@ export interface InterfaceValidator {
         userOperation: UserOperationV06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (
             | validation.ValidationResult
@@ -40,7 +43,6 @@ export interface InterfaceValidator {
         queuedUserOperations: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (
             | validation.ValidationResult
@@ -56,7 +58,6 @@ export interface InterfaceValidator {
         queuedUserOperations: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (
             | validation.ValidationResult
@@ -78,7 +79,6 @@ export interface InterfaceValidator {
         queuedUserOperations: UserOperation[]
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
-        authorizationList?: SignedAuthorizationList
     }): Promise<
         (
             | validation.ValidationResult
