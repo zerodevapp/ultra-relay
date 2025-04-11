@@ -18,8 +18,6 @@ export function createMetrics(registry: Registry, register = true) {
         help: "Total number of requests",
         labelNames: [
             "route",
-            "network",
-            "chainId",
             "rpc_method",
             "rpc_status",
             "code",
@@ -33,8 +31,6 @@ export function createMetrics(registry: Registry, register = true) {
         help: "Duration of requests in seconds",
         labelNames: [
             "route",
-            "network",
-            "chainId",
             "rpc_method",
             "rpc_status",
             "code",
@@ -47,7 +43,7 @@ export function createMetrics(registry: Registry, register = true) {
     const userOperationsInMempool = new Gauge({
         name: "ultra_relay_user_operations_in_mempool_count",
         help: "Number of user operations in mempool",
-        labelNames: ["network", "chainId", "status"] as const,
+        labelNames: ["status"] as const,
         registers
     })
 
@@ -155,6 +151,13 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const userOperationsSubmissionAttempts = new Histogram({
+        name: "ultra_relay_user_operations_attempts_before_inclusion",
+        help: "Number of submission attempts needed before a user operation was included on-chain",
+        labelNames: [] as const,
+        registers
+    })
+
     const utilityWalletBalance = new Gauge({
         name: "ultra_relay_utility_wallet_balance",
         help: "Balance of the utility wallet",
@@ -233,6 +236,7 @@ export function createMetrics(registry: Registry, register = true) {
         executorWalletsMinBalance,
         emittedOpEvents,
         walletsProcessingTime,
-        transactionCosts
+        transactionCosts,
+        userOperationsSubmissionAttempts
     }
 }

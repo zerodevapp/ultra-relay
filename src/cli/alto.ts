@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as sentry from "@sentry/node"
 import dotenv from "dotenv"
 import yargs from "yargs"
@@ -7,8 +8,10 @@ import {
     bundlerOptions,
     compatibilityOptions,
     debugOptions,
+    executorOptions,
     gasEstimationOptions,
     logOptions,
+    mempoolOptions,
     rpcOptions,
     serverOptions
 } from "./config"
@@ -32,12 +35,18 @@ if (process.env.SENTRY_DSN) {
     sentry.init({
         dsn: process.env.SENTRY_DSN,
         environment: process.env.ENVIRONMENT,
+        tracesSampleRate: 0,
+        profilesSampleRate: 0,
         beforeSend(event, hint) {
-            if (
-                SENTRY_IGNORE_ERRORS.some(
-                    (error) => hint.originalException instanceof error
-                )
-            ) {
+            const errorType = event.exception?.values?.[0]?.type
+
+            const shouldIgnore = SENTRY_IGNORE_ERRORS.some(
+                (error) =>
+                    hint.originalException instanceof error ||
+                    errorType === error.name
+            )
+
+            if (shouldIgnore) {
                 return null
             }
 
@@ -71,6 +80,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(compatibilityOptions), "Compatibility Options:")
         .options(serverOptions)
         .group(Object.keys(serverOptions), "Server Options:")
+        .options(executorOptions)
+        .group(Object.keys(executorOptions), "Executor Options:")
         .options(rpcOptions)
         .group(Object.keys(rpcOptions), "RPC Options:")
         .options(logOptions)
@@ -79,6 +90,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(debugOptions), "Debug Options:")
         .options(gasEstimationOptions)
         .group(Object.keys(gasEstimationOptions), "Gas Estimation Options:")
+        .options(mempoolOptions)
+        .group(Object.keys(mempoolOptions), "Mempool Options:")
         // blank scriptName so that help text doesn't display the cli name before each command
         .scriptName("")
         .demandCommand(1)

@@ -1,4 +1,3 @@
-import { SenderManager } from "@alto/executor"
 import { GasPriceManager } from "@alto/handlers"
 import {
     createMetrics,
@@ -12,17 +11,17 @@ import {
     createWalletClient,
     formatEther,
     fallback,
-    CallParameters,
+    type CallParameters,
     publicActions
 } from "viem"
-import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
 import type { IOptionsInput } from "./config"
 import { customTransport } from "./customTransport"
 import { setupServer } from "./setupServer"
 import { type AltoConfig, createConfig } from "../createConfig"
 import { parseArgs } from "./parseArgs"
 import { deploySimulationsContract } from "./deploySimulationsContract"
-import { eip7702Actions } from "viem/experimental"
+import { getSenderManager } from "../executor/senderManager/index"
+import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
 
 const preFlightChecks = async (config: AltoConfig): Promise<void> => {
     for (const entrypoint of config.entrypoints) {
@@ -34,17 +33,29 @@ const preFlightChecks = async (config: AltoConfig): Promise<void> => {
         }
     }
 
-    if (config.entrypointSimulationContract) {
-        const simulations = config.entrypointSimulationContract
+    if (config.entrypointSimulationContractV7) {
+        const simulations = config.entrypointSimulationContractV7
         const simulationsCode = await config.publicClient.getCode({
             address: simulations
         })
         if (simulationsCode === undefined || simulationsCode === "0x") {
             throw new Error(
-                `EntryPointSimulations contract ${simulations} does not exist`
+                `EntryPointSimulationsV7 contract ${simulations} does not exist`
             )
         }
     }
+
+    // if (config.entrypointSimulationContractV8) {
+    //     const simulations = config.entrypointSimulationContractV8
+    //     const simulationsCode = await config.publicClient.getCode({
+    //         address: simulations
+    //     })
+    //     if (simulationsCode === undefined || simulationsCode === "0x") {
+    //         throw new Error(
+    //             `EntryPointSimulationsV8 contract ${simulations} does not exist`
+    //         )
+    //     }
+    // }
 
     if (config.refillHelperContract) {
         const refillHelper = config.refillHelperContract
@@ -83,7 +94,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
 
     const chain: Chain = {
         id: chainId,
-        name: args.networkName,
+        name: "chain-name", // isn't important, never used
         nativeCurrency: {
             name: "ETH",
             symbol: "ETH",
@@ -115,12 +126,14 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         chain
     })
 
-    if (args.chainType === "skale") {
-        // SKALE only allows white listed addresses to deploy contracts.
+    // Some permissioned chains require a whitelisted address to make deployments.
+    // In order for simulations to work, we need to make our eth_call's from a whitelisted address.
+    if (args.ethCallSenderAddress) {
+        const whitelistedSender = args.ethCallSenderAddress
         publicClient = publicClient
             .extend((client) => ({
                 async call(args: CallParameters) {
-                    args.account = "0x4337000c2828F5260d8921fD25829F606b9E8680"
+                    args.account = whitelistedSender
                     return await client.call(args)
                 }
             }))
@@ -146,14 +159,19 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
               )
             : createWalletTransport(args.rpcUrl),
         chain
-    }).extend(eip7702Actions())
+    })
 
     // if flag is set, use utility wallet to deploy the simulations contract
     if (args.deploySimulationsContract) {
-        args.entrypointSimulationContract = await deploySimulationsContract({
+        const deployedContracts = await deploySimulationsContract({
+            logger,
             args,
             publicClient
         })
+        args.entrypointSimulationContractV7 =
+            deployedContracts.entrypointSimulationContractV7
+        args.entrypointSimulationContractV8 =
+            deployedContracts.entrypointSimulationContractV8
     }
 
     const config = createConfig({ ...args, logger, publicClient, walletClient })
@@ -163,18 +181,13 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     await gasPriceManager.init()
 
     const registry = new Registry()
-    registry.setDefaultLabels({
-        network: chain.name,
-        chainId
-    })
     const metrics = createMetrics(registry)
 
     await preFlightChecks(config)
 
-    const senderManager = new SenderManager({
+    const senderManager = await getSenderManager({
         config,
-        metrics,
-        gasPriceManager
+        metrics
     })
 
     const utilityWalletAddress = config.utilityPrivateKey?.address

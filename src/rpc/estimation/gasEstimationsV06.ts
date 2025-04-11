@@ -19,10 +19,8 @@ import {
 import { z } from "zod"
 import type { SimulateHandleOpResult } from "./types"
 import type { AltoConfig } from "../../createConfig"
-import { deepHexlify } from "../../utils/userop"
 import { parseFailedOpWithRevert } from "./gasEstimationsV07"
-import { SignedAuthorizationList } from "viem/experimental"
-import { addAuthorizationStateOverrides } from "@alto/utils"
+import { deepHexlify, getAuthorizationStateOverrides } from "@alto/utils"
 
 export class GasEstimatorV06 {
     private config: AltoConfig
@@ -116,14 +114,12 @@ export class GasEstimatorV06 {
         targetCallData,
         entryPoint,
         useCodeOverride = true,
-        authorizationList,
         stateOverrides = undefined
     }: {
         userOperation: UserOperationV06
         targetAddress: Address
         targetCallData: Hex
         entryPoint: Address
-        authorizationList?: SignedAuthorizationList
         useCodeOverride?: boolean
         stateOverrides?: StateOverrides | undefined
     }): Promise<SimulateHandleOpResult> {
@@ -146,16 +142,13 @@ export class GasEstimatorV06 {
             }
         }
 
-        if (authorizationList) {
-            stateOverrides = await addAuthorizationStateOverrides({
-                stateOverrides,
-                authorizationList,
-                publicClient
-            })
-        }
+        stateOverrides = getAuthorizationStateOverrides({
+            userOperations: [userOperation],
+            stateOverrides
+        })
 
         // Remove state override if not supported by network.
-        if (!this.config.balanceOverride) {
+        if (!this.config.balanceOverride && !this.config.codeOverrideSupport) {
             stateOverrides = undefined
         }
 
@@ -200,37 +193,18 @@ export class GasEstimatorV06 {
             const cause = err.walk((err) => err instanceof RpcRequestError)
 
             const causeParseResult = z
-                .union([
-                    z.object({
-                        code: z.literal(3),
-                        message: z.string(),
-                        data: hexDataSchema
-                    }),
-                    /* Fuse RPCs return in this format. */
-                    z.object({
-                        code: z.number(),
-                        message: z.string().regex(/VM execution error.*/),
-                        data: z
-                            .string()
-                            .transform((data) => data.replace("Reverted ", ""))
-                            .pipe(hexDataSchema)
-                    }),
-                    z.object({
-                        code: z.number(),
-                        message: z
-                            .string()
-                            .regex(
-                                /VM Exception while processing transaction:.*/
-                            ),
-                        data: hexDataSchema
-                    }),
-                    /* Monad devnet RPC return in this format */
-                    z.object({
-                        code: z.literal(-32603),
-                        message: z.string().regex(/execution reverted.*/),
-                        data: hexDataSchema
-                    })
-                ])
+                .object({
+                    code: z.union([
+                        z.literal(3),
+                        z.literal(-32603),
+                        z.literal(-32015)
+                    ]),
+                    message: z.string(),
+                    data: z
+                        .string()
+                        .transform((data) => data.replace("Reverted ", ""))
+                        .pipe(hexDataSchema)
+                })
                 .safeParse(cause?.cause)
 
             if (!causeParseResult.success) {
