@@ -286,8 +286,8 @@ export class RpcHandler {
         )
 
         // V1 api doesn't check prefund.
-        const shouldCheckPrefund =
-            apiVersion !== "v1" && this.config.shouldCheckPrefund
+        // const shouldCheckPrefund =
+        //     apiVersion !== "v1" && this.config.shouldCheckPrefund
         const validationResult = await this.validator.validateUserOperation({
             shouldCheckPrefund: false,
             userOperation,
@@ -543,8 +543,8 @@ export class RpcHandler {
 
         const simulationUserOperation = {
             ...userOperation,
-            maxFeePerGas: 1n,
-            maxPriorityFeePerGas: 1n,
+            // maxFeePerGas: 1n,
+            // maxPriorityFeePerGas: 1n,
             preVerificationGas: 0n,
             verificationGasLimit: simulationVerificationGasLimit,
             callGasLimit: simulationCallGasLimit
