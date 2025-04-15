@@ -314,7 +314,7 @@ export async function calcPreVerificationGas({
         overheads
     )
 
-    if (config.publicClient.chain.id === lineaSepolia.id) {
+    if (config.chainId == lineaSepolia.id) {
         return preVerificationGas * 2n
     }
 
@@ -368,7 +368,7 @@ export function calcVerificationGasAndCallGasLimit(
         gasLimits?.verificationGasLimit ??
         scaleBigIntByPercent(
             executionResult.preOpGas - userOperation.preVerificationGas,
-            150
+            150n
         )
 
     const calculatedCallGasLimit =
@@ -387,7 +387,7 @@ export function calcVerificationGasAndCallGasLimit(
         chainId === baseSepolia.id ||
         chainId === base.id
     ) {
-        callGasLimit = scaleBigIntByPercent(callGasLimit, 110)
+        callGasLimit = scaleBigIntByPercent(callGasLimit, 110n)
     }
 
     return {
@@ -426,8 +426,14 @@ export function calcDefaultPreVerificationGas(
     const callDataCost = packed
         .map((x) => (x === 0 ? ov.zeroByte : ov.nonZeroByte))
         .reduce((sum, x) => sum + x)
+
+    const authorizationCost = userOperation.eip7702Auth
+        ? 37500 // overhead for PER_EMPTY_ACCOUNT_COST + PER_AUTH_BASE_COST
+        : 0
+
     const ret = Math.round(
-        callDataCost +
+        authorizationCost +
+            callDataCost +
             ov.fixed / ov.bundleSize +
             ov.perUserOp +
             ov.perUserOpWord * lengthInWord
@@ -485,7 +491,7 @@ export async function calcMantlePreVerificationGas(
     const mantleManager = gasPriceManager.mantleManager
 
     if (verify) {
-        const minValues = mantleManager.getMinMantleOracleValues()
+        const minValues = await mantleManager.getMinMantleOracleValues()
 
         tokenRatio = minValues.minTokenRatio
         scalar = minValues.minScalar
@@ -531,7 +537,10 @@ export async function calcMantlePreVerificationGas(
         (rollupDataGasAndOverhead * l1GasPrice * tokenRatio * scalar) /
         mantleL1RollUpFeeDivisionFactor
 
-    const l2MaxFee = BigInt(op.maxFeePerGas)
+    const maxFeePerGas = await (verify
+        ? gasPriceManager.getHighestMaxFeePerGas()
+        : gasPriceManager.getGasPrice().then((res) => res.maxFeePerGas))
+    const l2MaxFee = BigInt(maxFeePerGas)
 
     return staticFee + l1RollupFee / l2MaxFee
 }
@@ -695,17 +704,13 @@ export async function calcArbitrumPreVerificationGas(
     arbitrumManager.saveL2BaseFee(l2BaseFee)
 
     if (validate) {
-        if (l1BaseFeeEstimate === 0n) {
-            l1BaseFeeEstimate = arbitrumManager.getMaxL1BaseFee()
-        }
+        const [maxL1Fee, minL1Fee, maxL2Fee] = await Promise.all([
+            l1BaseFeeEstimate || arbitrumManager.getMaxL1BaseFee(),
+            arbitrumManager.getMinL1BaseFee(),
+            arbitrumManager.getMaxL2BaseFee()
+        ])
 
-        // gasEstimateL1Component source: https://github.com/OffchainLabs/nitro/blob/5cd7d6913eb6b4dedb08f6ea49d7f9802d2cc5b9/execution/nodeInterface/NodeInterface.go#L515-L551
-        const feesForL1 = (gasForL1 * l2BaseFee) / l1BaseFeeEstimate
-
-        const minL1BaseFeeEstimate = arbitrumManager.getMinL1BaseFee()
-        const maxL2BaseFee = arbitrumManager.getMaxL2BaseFee()
-
-        gasForL1 = (feesForL1 * minL1BaseFeeEstimate) / maxL2BaseFee
+        gasForL1 = (gasForL1 * l2BaseFee * minL1Fee) / (maxL1Fee * maxL2Fee)
     }
 
     return staticFee + gasForL1

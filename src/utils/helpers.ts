@@ -1,29 +1,24 @@
-import { StateOverrides } from "@alto/types"
-import {
-    type Address,
-    BaseError,
-    type RawContractError,
-    getAddress,
-    PublicClient
-} from "viem"
-import {
-    SignedAuthorizationList,
-    recoverAuthorizationAddress
-} from "viem/experimental"
+import type { StateOverrides, UserOperation } from "@alto/types"
+import { BaseError, type RawContractError, getAddress, concat } from "viem"
+import type { SignedAuthorization } from "viem"
 
 /// Ensure proper equality by converting both addresses into their checksum type
-export const areAddressesEqual = (a: Address, b: Address) => {
-    return getAddress(a) === getAddress(b)
+export const areAddressesEqual = (a: string, b: string) => {
+    try {
+        return getAddress(a) === getAddress(b)
+    } catch {
+        return false
+    }
 }
 
 export function getRevertErrorData(err: unknown) {
-    // biome-ignore lint/style/useBlockStatements:
-    if (!(err instanceof BaseError)) return undefined
+    if (!(err instanceof BaseError)) {
+        return undefined
+    }
     const error = err.walk() as RawContractError
     return typeof error?.data === "object" ? error.data?.data : error.data
 }
 
-// biome-ignore lint/style/useNamingConvention:
 export function getAAError(errorMsg: string) {
     const uppercase = errorMsg.toUpperCase()
     const match = uppercase.match(/AA\d{2}/)
@@ -31,24 +26,45 @@ export function getAAError(errorMsg: string) {
 }
 
 // authorizationList is not currently supported in viem's sendTransaction, this is a temporary solution
-export async function addAuthorizationStateOverrides({
-    publicClient,
-    authorizationList,
+function getAuthorizationStateOverride({
+    authorization
+}: {
+    authorization: SignedAuthorization
+}) {
+    const code = concat(["0xef0100", authorization.address])
+    return { code }
+}
+
+export function getAuthorizationStateOverrides({
+    userOperations,
     stateOverrides
 }: {
-    publicClient: PublicClient
-    authorizationList: SignedAuthorizationList
+    userOperations: UserOperation[]
     stateOverrides?: StateOverrides
 }) {
-    if (!stateOverrides) stateOverrides = {}
+    const overrides: StateOverrides = { ...(stateOverrides ?? {}) }
 
-    for (const authorization of authorizationList) {
-        const sender = await recoverAuthorizationAddress({ authorization })
-        const code = await publicClient.getCode({
-            address: authorization.contractAddress
-        })
-        stateOverrides[sender] = { ...stateOverrides?.[sender], code }
+    for (const op of userOperations) {
+        if (op.eip7702Auth) {
+            overrides[op.sender] = {
+                ...(overrides[op.sender] || {}),
+                ...getAuthorizationStateOverride({
+                    authorization: {
+                        address:
+                            "address" in op.eip7702Auth
+                                ? op.eip7702Auth.address
+                                : op.eip7702Auth.contractAddress,
+                        chainId: op.eip7702Auth.chainId,
+                        nonce: op.eip7702Auth.nonce,
+                        r: op.eip7702Auth.r,
+                        s: op.eip7702Auth.s,
+                        v: op.eip7702Auth.v,
+                        yParity: op.eip7702Auth.yParity
+                    }
+                })
+            }
+        }
     }
 
-    return stateOverrides
+    return overrides
 }
