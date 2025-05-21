@@ -43,6 +43,7 @@ import { isVersion06, isVersion07, toPackedUserOperation } from "./userop"
 import type { AltoConfig } from "../createConfig"
 import { ArbitrumL1FeeAbi } from "../types/contracts/ArbitrumL1FeeAbi"
 import crypto from "crypto"
+import { ceilDiv } from "./helpers";
 
 export interface GasOverheads {
     /**
@@ -339,6 +340,15 @@ export async function calcPreVerificationGas({
             )
         case "mantle":
             return await calcMantlePreVerificationGas(
+                config.publicClient,
+                userOperation,
+                entryPoint,
+                preVerificationGas,
+                gasPriceManager,
+                validate
+            )
+        case "abstract":
+            return await calcAbstractPreVerificationGas(
                 config.publicClient,
                 userOperation,
                 entryPoint,
@@ -714,6 +724,73 @@ export async function calcArbitrumPreVerificationGas(
     }
 
     return staticFee + gasForL1
+}
+
+/* ------------------------------------------------------------------ */
+/* calcAbstractPreVerificationGas.ts  –  interpreter-aware version    */
+/* ------------------------------------------------------------------ */
+
+/** Constants from zkSync fee-model */
+const OFFCHAIN_FIXED_GAS  = 10_000n;  // TX_OVERHEAD_GAS
+const MEMORY_GAS_PER_BYTE = 10n;      // TX_MEMORY_OVERHEAD_GAS
+
+/** Local knob for Interpreter premium (numerator, denominator)       *
+ *  Example:  { num: 3n, den: 1n }  ==>   +200 % extra compute        */
+const INTERPRETER_FACTOR = { num: 8n, den: 1n };   // <-- tweak here
+
+
+export async function calcAbstractPreVerificationGas(
+  publicClient: PublicClient<Transport, Chain>,
+  op: UserOperation,
+  entryPoint: Address,
+  staticFee: bigint,               // from calcDefaultPreVerificationGas(...)
+  gasPriceManager: GasPriceManager,
+  validate: boolean
+): Promise<bigint> {
+
+  /* ① count bytes copied into bootloader memory */
+  const data  = getHandleOpsCallData(op, entryPoint);
+  const serTx = serializeTransaction(
+    { to: entryPoint, chainId: publicClient.chain.id,
+      gasLimit: maxUint64, maxFeePerGas: maxUint256, data },
+    {
+        r: "0x123451234512345123451234512345123451234512345123451234512345",
+        s: "0x123451234512345123451234512345123451234512345123451234512345",
+        v: 28n
+    }
+  );
+  const bytes = BigInt((serTx.length - 2) / 2);
+
+  /* ② l1_pubdata_price (wei / byte) */
+  let l1PriceWei: bigint;
+  if (!validate) {
+    // @ts-ignore
+    const fp: any = await publicClient.request({ method: "zks_getFeeParams", params: [] });
+    l1PriceWei = BigInt(fp.V2.l1_pubdata_price);
+    gasPriceManager.abstractManager.savePubdataPrice(l1PriceWei);
+  } else {
+    l1PriceWei = await gasPriceManager.abstractManager.getMinPubdataPrice();
+  }
+
+  /* ③ pub-data gas component */
+  const baseFee     = await gasPriceManager.getBaseFee();            // wei / gas
+  const gasPerPub   = ceilDiv(l1PriceWei, baseFee);                  // ceil()
+  const pubdataGas  = bytes * gasPerPub;
+
+  /* ④ bootloader memory copy */
+  const memoryGas = bytes * MEMORY_GAS_PER_BYTE;
+
+  /* ⑤ interpreter premium  (local bump) */
+  const computeGas        = staticFee + memoryGas;                   // compute part
+  const extraInterpreter  = (computeGas * (INTERPRETER_FACTOR.num - INTERPRETER_FACTOR.den))
+                            / INTERPRETER_FACTOR.den;                // e.g. ×2 or ×3
+
+  /* ⑥ return full PVG */
+  return  staticFee
+        + memoryGas
+        + OFFCHAIN_FIXED_GAS
+        + pubdataGas
+        + extraInterpreter;
 }
 
 export function parseViemError(err: unknown) {

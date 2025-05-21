@@ -19,6 +19,7 @@ import { MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 import { ArbitrumManager } from "./arbitrumGasPriceManager"
 import { MantleManager } from "./mantleGasPriceManager"
 import { OptimismManager } from "./optimismManager"
+import { AbstractManager } from "./abstractGasPriceManager";
 
 enum ChainId {
     Goerli = 5,
@@ -50,6 +51,7 @@ export class GasPriceManager {
     public arbitrumManager: ArbitrumManager
     public mantleManager: MantleManager
     public optimismManager: OptimismManager
+    public abstractManager: AbstractManager
 
     constructor(config: AltoConfig) {
         this.config = config
@@ -95,6 +97,7 @@ export class GasPriceManager {
         this.arbitrumManager = new ArbitrumManager({ config })
         this.mantleManager = new MantleManager({ config })
         this.optimismManager = new OptimismManager({ config })
+        this.abstractManager = new AbstractManager({ config })
     }
 
     public async init() {
