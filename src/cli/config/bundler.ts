@@ -54,6 +54,7 @@ export const bundlerArgsSchema = z.object({
         .string()
         .transform((val) => BigInt(val))
         .default("20000000"),
+    "max-bundle-count": z.number().int().optional(),
     "rpc-methods": z
         .string()
         .nullable()

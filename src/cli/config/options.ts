@@ -99,6 +99,11 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: "20000000"
     },
+    "max-bundle-count": {
+        description: "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+        type: "number",
+        require: false
+    },
     "rpc-methods": {
         description: "Supported RPC methods split by commas",
         type: "string",
