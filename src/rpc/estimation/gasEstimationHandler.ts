@@ -56,7 +56,7 @@ export class GasEstimationHandler {
     }): Promise<SimulateHandleOpResult> {
         const finalStateOverride = getStateOverrides({
             userOperation,
-            addSenderBalanceOverride: true,
+            addSenderBalanceOverride: false,
             stateOverrides
         })
         if (isVersion06(userOperation)) {
@@ -94,7 +94,7 @@ export class GasEstimationHandler {
     }): Promise<SimulateHandleOpResult> {
         const finalStateOverride = getStateOverrides({
             userOperation,
-            addSenderBalanceOverride: true,
+            addSenderBalanceOverride: false,
             stateOverrides
         })
         if (isVersion06(userOperation)) {
