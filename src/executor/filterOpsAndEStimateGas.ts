@@ -212,16 +212,22 @@ export async function filterOpsAndEstimateGas({
                     const failingUserOp = userOpsToBundle[failingOpIndex]
                     userOpsToBundle.splice(failingOpIndex, 1)
 
+                    const innerError = (errorData as FailedOpWithRevert)?.inner
+                    const revertReason = innerError ? `${errorData.reason} - ${innerError}` : errorData.reason
+                    logger.warn({
+                        event: "userOpSimulationFailedInBundle",
+                        userOpHash: failingUserOp.userOpHash,
+                        sender: failingUserOp.userOp.sender,
+                        reason: revertReason,
+                        opIndex: failingOpIndex,
+                        bundleSize: userOpsToBundle.length + 1 // size before removal
+                    }, `UserOp ${failingUserOp.userOpHash} failed simulation in bundle: ${revertReason}`);
+
                     reputationManager.crashedHandleOps(
                         failingUserOp.userOp,
                         epContract.address,
                         errorData.reason
                     )
-
-                    const innerError = (errorData as FailedOpWithRevert)?.inner
-                    const revertReason = innerError
-                        ? `${errorData.reason} - ${innerError}`
-                        : errorData.reason
 
                     rejectedUserOps.push(
                         rejectUserOp(failingUserOp, revertReason)
