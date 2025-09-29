@@ -35,6 +35,7 @@ import {
     randomBigInt,
     unscaleBigIntByPercent
 } from "./bigInt"
+import { ceilDiv } from "./helpers"
 import { isVersion06, isVersion07, toPackedUserOp } from "./userop"
 
 // Encodes a user operation into bytes for gas calculation
@@ -388,6 +389,15 @@ export async function calcL2PvgComponent({
                 gasPriceManager,
                 validate
             )
+        case "abstract":
+            return await calcAbstractPvg(
+                config.publicClient,
+                simulationUserOp,
+                entryPoint,
+                gasPriceManager,
+                validate,
+                config
+            )
         default:
             return 0n
     }
@@ -666,4 +676,80 @@ async function calcArbitrumPvg(
     }
 
     return gasForL1
+}
+
+async function calcAbstractPvg(
+    publicClient: PublicClient<Transport, Chain | undefined>,
+    op: UserOperation,
+    entryPoint: Address,
+    gasPriceManager: GasPriceManager,
+    validate: boolean,
+    config: AltoConfig
+) {
+    // zkSync-based Abstract chain constants (from original implementation)
+    const OFFCHAIN_FIXED_GAS = 10_000n // TX_OVERHEAD_GAS
+    const MEMORY_GAS_PER_BYTE = 10n // TX_MEMORY_OVERHEAD_GAS
+    const INTERPRETER_FACTOR = { num: 8n, den: 1n } // 8x interpreter premium
+
+    // Serialize the handleOps transaction (equivalent to original getHandleOpsCallData)
+    const data = encodeHandleOpsCalldata({
+        userOps: [op],
+        beneficiary: entryPoint
+    })
+
+    const serializedTx = serializeTransaction(
+        {
+            to: entryPoint,
+            chainId: publicClient.chain?.id ?? 10,
+            gasLimit: maxUint64,
+            maxFeePerGas: maxUint256,
+            data
+        },
+        {
+            r: "0x123451234512345123451234512345123451234512345123451234512345",
+            s: "0x123451234512345123451234512345123451234512345123451234512345",
+            yParity: 1
+        }
+    )
+
+    // Calculate bytes copied into bootloader memory
+    const bytes = BigInt((serializedTx.length - 2) / 2)
+
+    // Get L1 pubdata price (wei per byte)
+    let l1PriceWei: bigint
+    if (!validate) {
+        // Fetch current pubdata price from zkSync RPC
+        const feeParams: any = await (publicClient.request as any)({
+            method: "zks_getFeeParams"
+        })
+        l1PriceWei = BigInt(feeParams.V2.l1_pubdata_price)
+        gasPriceManager.abstractManager.savePubdataPrice(l1PriceWei)
+    } else {
+        // Use cached minimum for validation
+        l1PriceWei = await gasPriceManager.abstractManager.getMinPubdataPrice()
+    }
+
+    // Calculate pubdata gas component
+    const baseFee = await gasPriceManager.getBaseFee()
+    const gasPerPub = ceilDiv(l1PriceWei, baseFee)
+    const pubdataGas = bytes * gasPerPub
+
+    // Calculate bootloader memory copy cost
+    const memoryGas = bytes * MEMORY_GAS_PER_BYTE
+
+    // Calculate base execution gas (staticFee in original implementation)
+    const staticFee = calcExecutionPvgComponent({
+        userOp: op,
+        supportsEip7623: false,
+        config
+    })
+
+    // Calculate interpreter premium (execution overhead for zkSync VM)
+    const computeGas = staticFee + memoryGas
+    const extraInterpreter =
+        (computeGas * (INTERPRETER_FACTOR.num - INTERPRETER_FACTOR.den)) /
+        INTERPRETER_FACTOR.den
+
+    // Return ONLY L2-specific components (staticFee is added separately in new structure)
+    return memoryGas + OFFCHAIN_FIXED_GAS + pubdataGas + extraInterpreter
 }
