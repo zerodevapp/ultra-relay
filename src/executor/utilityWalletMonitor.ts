@@ -1,12 +1,12 @@
 import type { Logger, Metrics } from "@alto/utils"
+import type { Address } from "abitype"
 import { type Hex, formatEther } from "viem"
 import type { AltoConfig } from "../createConfig"
-import type { Address } from "abitype"
 
 export class UtilityWalletMonitor {
     private config: AltoConfig
     private utilityWalletAddress: Hex
-    private timer: NodeJS.Timer | undefined
+    private timer: NodeJS.Timeout | undefined
     private metrics: Metrics
     private logger: Logger
 
@@ -57,7 +57,7 @@ export class UtilityWalletMonitor {
         this.timer = setInterval(
             this.updateMetrics.bind(this),
             this.config.utilityWalletMonitorInterval
-        ) as NodeJS.Timer
+        ) as NodeJS.Timeout
     }
 
     public stop() {

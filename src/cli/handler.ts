@@ -6,24 +6,39 @@ import {
 } from "@alto/utils"
 import { Registry } from "prom-client"
 import {
+    type CallParameters,
     type Chain,
     createPublicClient,
     createWalletClient,
-    formatEther,
     fallback,
-    type CallParameters,
+    formatEther,
     publicActions
 } from "viem"
-import type { IOptionsInput } from "./config"
-import { customTransport } from "./customTransport"
-import { setupServer } from "./setupServer"
+import * as chains from "viem/chains"
 import { type AltoConfig, createConfig } from "../createConfig"
-import { parseArgs } from "./parseArgs"
-import { deploySimulationsContract } from "./deploySimulationsContract"
 import { getSenderManager } from "../executor/senderManager/index"
 import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
+import type { IOptionsInput } from "./config"
+import { customTransport } from "./customTransport"
+import { deploySimulationsContract } from "./deploySimulationsContract"
+import { parseArgs } from "./parseArgs"
+import { setupServer } from "./setupServer"
 
 const preFlightChecks = async (config: AltoConfig): Promise<void> => {
+    // Check horizontal scaling configuration
+    if (config.enableHorizontalScaling && !config.redisEndpoint) {
+        throw new Error(
+            "Horizontal scaling is enabled but redis-endpoint is not configured."
+        )
+    }
+
+    // Check Redis receipt cache configuration
+    if (config.enableRedisReceiptCache && !config.redisEndpoint) {
+        throw new Error(
+            "Redis receipt cache is enabled but redis-endpoint is not configured."
+        )
+    }
+
     for (const entrypoint of config.entrypoints) {
         const entryPointCode = await config.publicClient.getCode({
             address: entrypoint
@@ -33,14 +48,26 @@ const preFlightChecks = async (config: AltoConfig): Promise<void> => {
         }
     }
 
-    if (config.entrypointSimulationContractV7) {
-        const simulations = config.entrypointSimulationContractV7
-        const simulationsCode = await config.publicClient.getCode({
-            address: simulations
+    if (config.pimlicoSimulationContract) {
+        const address = config.pimlicoSimulationContract
+        const code = await config.publicClient.getCode({
+            address: address
         })
-        if (simulationsCode === undefined || simulationsCode === "0x") {
+        if (code === undefined || code === "0x") {
             throw new Error(
-                `EntryPointSimulationsV7 contract ${simulations} does not exist`
+                `PimlicoSimulations contract ${address} does not exist`
+            )
+        }
+    }
+
+    if (config.entrypointSimulationContractV7) {
+        const address = config.entrypointSimulationContractV7
+        const code = await config.publicClient.getCode({
+            address
+        })
+        if (code === undefined || code === "0x") {
+            throw new Error(
+                `EntryPointSimulationsV7 contract ${address} does not exist`
             )
         }
     }
@@ -70,6 +97,25 @@ const preFlightChecks = async (config: AltoConfig): Promise<void> => {
     }
 }
 
+const getViemChain = ({
+    chainId,
+    args
+}: { chainId: number; args: ReturnType<typeof parseArgs> }) => {
+    for (const chain of Object.values(chains)) {
+        if (chain.id === chainId) {
+            return {
+                ...chain,
+                blockTime: chain.blockTime ?? args.blockTime,
+                rpcUrls: {
+                    default: { http: [args.rpcUrl] },
+                    public: { http: [args.rpcUrl] }
+                }
+            }
+        }
+    }
+    return null
+}
+
 export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     const args = parseArgs(args_)
     const logger = args.json
@@ -92,7 +138,10 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
 
     const chainId = await getChainId()
 
-    const chain: Chain = {
+    // let us assume that the block time is at least 2x the polling interval
+    const viemChain = getViemChain({ chainId, args })
+
+    const chain: Chain = viemChain ?? {
         id: chainId,
         name: "chain-name", // isn't important, never used
         nativeCurrency: {
@@ -100,10 +149,12 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             symbol: "ETH",
             decimals: 18
         },
+        blockTime: args.blockTime,
         rpcUrls: {
             default: { http: [args.rpcUrl] },
             public: { http: [args.rpcUrl] }
-        }
+        },
+        experimental_preconfirmationTime: args.flashblocksPreconfirmationTime
     }
     const fetchOptions = args.rpcUrl.includes("tenderly")
         ? {
@@ -123,6 +174,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             ),
             fetchOptions
         }),
+        pollingInterval: args.blockTime / 4,
         chain
     })
 
@@ -148,18 +200,24 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             )
         })
 
-    const walletClient = createWalletClient({
-        transport: args.sendTransactionRpcUrl
-            ? fallback(
-                  [
-                      createWalletTransport(args.sendTransactionRpcUrl),
-                      createWalletTransport(args.rpcUrl)
-                  ],
-                  { rank: false }
-              )
-            : createWalletTransport(args.rpcUrl),
-        chain
-    })
+    const walletClients = {
+        private: args.sendTransactionRpcUrl
+            ? createWalletClient({
+                  transport: fallback(
+                      [
+                          createWalletTransport(args.sendTransactionRpcUrl),
+                          createWalletTransport(args.rpcUrl)
+                      ],
+                      { rank: false }
+                  ),
+                  chain
+              })
+            : undefined,
+        public: createWalletClient({
+            transport: createWalletTransport(args.rpcUrl),
+            chain
+        })
+    }
 
     // if flag is set, use utility wallet to deploy the simulations contract
     if (args.deploySimulationsContract) {
@@ -172,9 +230,27 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             deployedContracts.entrypointSimulationContractV7
         args.entrypointSimulationContractV8 =
             deployedContracts.entrypointSimulationContractV8
+        args.pimlicoSimulationContract =
+            deployedContracts.pimlicoSimulationContract
+        logger.info(
+            {
+                entrypointSimulationContractV7:
+                    deployedContracts.entrypointSimulationContractV7,
+                entrypointSimulationContractV8:
+                    deployedContracts.entrypointSimulationContractV8,
+                pimlicoSimulationContract:
+                    deployedContracts.pimlicoSimulationContract
+            },
+            "Contracts used for simulation"
+        )
     }
 
-    const config = createConfig({ ...args, logger, publicClient, walletClient })
+    const config = createConfig({
+        ...args,
+        logger,
+        publicClient,
+        walletClients
+    })
 
     const gasPriceManager = new GasPriceManager(config)
 

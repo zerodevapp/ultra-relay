@@ -1,5 +1,5 @@
 {
-    "$schema": "https://biomejs.dev/schemas/1.0.0/schema.json",
+    "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
     "files": {
         "ignore": [
             "node_modules",
@@ -14,8 +14,10 @@
             "pnpm-lock.yaml",
             "src/lib",
             ".nyc_output",
-            "test/spec-tests",
-            "contracts"
+            "contracts",
+            "src/esm",
+            "src/contracts",
+            "localDeployer"
         ]
     },
     "organizeImports": {
@@ -30,6 +32,9 @@
             },
             "style": {
                 "useNamingConvention": "off"
+            },
+            "correctness": {
+                "noUndeclaredDependencies": "warn"
             }
         }
     },
@@ -43,7 +48,7 @@
     "javascript": {
         "formatter": {
             "semicolons": "asNeeded",
-            "trailingComma": "none"
+            "trailingCommas": "none"
         }
     }
 }

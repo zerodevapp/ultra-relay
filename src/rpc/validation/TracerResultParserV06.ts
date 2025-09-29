@@ -5,7 +5,7 @@ import {
     SenderCreatorAbi,
     type StakeInfo,
     type StorageMap,
-    type UserOperationV06,
+    type UserOperation06,
     ValidationErrors,
     type ValidationResult
 } from "@alto/types"
@@ -47,7 +47,7 @@ const abi = [...SenderCreatorAbi, ...EntryPointV06Abi, ...PaymasterAbi] as Abi
 
 // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
 const functionSignatureToMethodName = (hash: any) => {
-    let functionName: string | undefined = undefined
+    let functionName: string | undefined
     for (const item of abi) {
         const signature = getFunctionSelector(item as AbiFunction)
         if (signature === hash) {
@@ -399,14 +399,14 @@ const callsFromEntryPointMethodSigs: { [key: string]: string } = {
 
 /**
  * parse collected simulation traces and revert if they break our rules
- * @param userOperation the userOperation that was used in this simulation
+ * @param userOp the userOperation that was used in this simulation
  * @param tracerResults the tracer return value
  * @param validationResult output from simulateValidation
  * @param entryPoint the entryPoint that hosted the "simulatedValidation" traced call.
  * @return list of contract addresses referenced by this UserOp
  */
 export function tracerResultParserV06(
-    userOperation: UserOperationV06,
+    userOp: UserOperation06,
     tracerResults: BundlerTracerResult,
     validationResult: ValidationResult,
     entryPointAddress: Address
@@ -472,7 +472,7 @@ export function tracerResultParserV06(
         )
     }
 
-    const sender = userOperation.sender.toLowerCase()
+    const sender = userOp.sender.toLowerCase()
     // stake info per "number" level (factory, sender, paymaster)
     // we only use stake info if we notice a memory reference that require stake
     const stakeInfoEntities: StakeInfoEntities = {
@@ -591,7 +591,7 @@ export function tracerResultParserV06(
                 // slot associated with sender is allowed (e.g. token.balanceOf(sender)
                 // but during initial UserOp (where there is an initCode), it is allowed only for staked entity
                 if (associatedWith(slot, sender, entitySlots)) {
-                    if (userOperation.initCode.length > 2) {
+                    if (userOp.initCode.length > 2) {
                         // special case: account.validateUserOp is allowed to use assoc storage if factory is staked.
                         // [STO-022], [STO-021]
                         if (
@@ -679,8 +679,8 @@ export function tracerResultParserV06(
         function isStaked(entStake?: StakeInfo): boolean {
             return Boolean(
                 entStake &&
-                    1n <= entStake.stake &&
-                    1n <= entStake.unstakeDelaySec
+                    entStake.stake >= 1n &&
+                    entStake.unstakeDelaySec >= 1n
             )
         }
 
@@ -737,7 +737,7 @@ export function tracerResultParserV06(
             )
         }
 
-        let illegalEntryPointCodeAccess: string | undefined = undefined
+        let illegalEntryPointCodeAccess: string | undefined
         for (const addr of Object.keys(currentNumLevel.extCodeAccessInfo)) {
             if (addr === entryPointAddress) {
                 illegalEntryPointCodeAccess =

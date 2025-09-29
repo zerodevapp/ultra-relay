@@ -1,9 +1,9 @@
-import { Address, formatEther, getContract } from "viem"
-import { AltoConfig } from "../../createConfig"
-import { Metrics } from "@alto/utils"
-import { GasPriceManager } from "../../handlers/gasPriceManager"
-import { CallEngineAbi, HexData } from "@alto/types"
-import { SenderManager } from "."
+import { CallEngineAbi, type HexData } from "@alto/types"
+import type { Metrics } from "@alto/utils"
+import { type Address, formatEther, getContract } from "viem"
+import type { SenderManager } from "."
+import type { AltoConfig } from "../../createConfig"
+import type { GasPriceManager } from "../../handlers/gasPriceManager"
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: <explanation>
 export const validateAndRefillWallets = async ({
@@ -97,7 +97,11 @@ export const validateAndRefillWallets = async ({
         }
 
         if (config.refillHelperContract) {
-            const instructions = []
+            const instructions: {
+                to: Address
+                value: bigint
+                data: HexData
+            }[] = []
             for (const [address, missingBalance] of Object.entries(
                 balancesMissing
             )) {
@@ -113,7 +117,7 @@ export const validateAndRefillWallets = async ({
                 address: config.refillHelperContract,
                 client: {
                     public: config.publicClient,
-                    wallet: config.walletClient
+                    wallet: config.walletClients.public
                 }
             })
             const tx = await callEngine.write.execute([instructions], {
@@ -137,7 +141,7 @@ export const validateAndRefillWallets = async ({
             for (const [address, missingBalance] of Object.entries(
                 balancesMissing
             )) {
-                const tx = await config.walletClient.sendTransaction({
+                const tx = await config.walletClients.public.sendTransaction({
                     account: utilityAccount,
                     // @ts-ignore
                     to: address,

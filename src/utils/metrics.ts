@@ -9,7 +9,13 @@ import {
 export type Metrics = ReturnType<typeof createMetrics>
 
 export function createMetrics(registry: Registry, register = true) {
-    collectDefaultMetrics({ register: registry })
+    // Skip default metrics collection in development mode or when running in Bun
+    // to avoid compatibility issues
+    const isBun = typeof (globalThis as any).Bun !== "undefined"
+
+    if (!isBun) {
+        collectDefaultMetrics({ register: registry })
+    }
 
     const registers = register ? [registry] : []
 
@@ -40,7 +46,7 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOperationsInMempool = new Gauge({
+    const userOpsInMempool = new Gauge({
         name: "ultra_relay_user_operations_in_mempool_count",
         help: "Number of user operations in mempool",
         labelNames: ["status"] as const,
@@ -61,14 +67,14 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOperationsOnChain = new Counter({
+    const userOpsOnChain = new Counter({
         name: "ultra_relay_user_operations_on_chain_total",
         help: "Number of user operations on-chain by status",
         labelNames: ["status"] as const,
         registers
     })
 
-    const userOperationsSubmitted = new Counter({
+    const userOpsSubmitted = new Counter({
         name: "ultra_relay_user_operations_submitted_total",
         help: "Number of user operations bundles submitted on-chain",
         labelNames: ["status"] as const,
@@ -88,29 +94,41 @@ export function createMetrics(registry: Registry, register = true) {
         labelNames: ["status"] as const,
         registers
     })
+    const transactionCosts = new Gauge({
+        name: "ultra_relay_transaction_costs_eth",
+        help: "Cost of transactions in ETH (gas_used * effective_gas_price)",
+        labelNames: [
+            "userOpHash",
+            "transactionHash",
+            "executor_wallet",
+            "transaction_status"
+        ] as const,
+        registers
+    })
 
-    const userOperationsReceived = new Counter({
+
+    const userOpsReceived = new Counter({
         name: "ultra_relay_user_operations_received_total",
         help: "Number of user operations received",
         labelNames: ["status", "type"] as const,
         registers
     })
 
-    const userOperationsValidationSuccess = new Counter({
+    const userOpsValidationSuccess = new Counter({
         name: "ultra_relay_user_operations_validation_success_total",
         help: "Number of user operations successfully validated",
         labelNames: [] as const,
         registers
     })
 
-    const userOperationsValidationFailure = new Counter({
+    const userOpsValidationFailure = new Counter({
         name: "ultra_relay_user_operations_validation_failure_total",
         help: "Number of user operations failed to validate",
         labelNames: [] as const,
         registers
     })
 
-    const userOperationInclusionDuration = new Histogram({
+    const userOpInclusionDuration = new Histogram({
         name: "ultra_relay_user_operation_inclusion_duration_seconds",
         help: "Duration of user operation inclusion from first submission to inclusion on-chain",
         labelNames: [] as const,
@@ -144,14 +162,14 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOperationsResubmitted = new Counter({
+    const userOpsResubmitted = new Counter({
         name: "ultra_relay_user_operations_resubmitted_total",
         help: "Number of user operations resubmitted",
         labelNames: [] as const,
         registers
     })
 
-    const userOperationsSubmissionAttempts = new Histogram({
+    const userOpsSubmissionAttempts = new Histogram({
         name: "ultra_relay_user_operations_attempts_before_inclusion",
         help: "Number of submission attempts needed before a user operation was included on-chain",
         labelNames: [] as const,
@@ -200,43 +218,39 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const transactionCosts = new Gauge({
-        name: "ultra_relay_transaction_costs_eth",
-        help: "Cost of transactions in ETH (gas_used * effective_gas_price)",
-        labelNames: [
-            "userOpHash",
-            "transactionHash",
-            "executor_wallet",
-            "transaction_status"
-        ] as const,
+    const altoSecondValidationFailed = new Counter({
+        name: "ultra_relay_second_validation_failed",
+        help: "Number of times alto's second estimation failed during eth_estimateUserOperationGas and we returned 2x gas limits",
+        labelNames: [] as const,
         registers
     })
 
     return {
         httpRequests,
         httpRequestsDuration,
-        userOperationsInMempool,
+        userOpsInMempool,
         walletsAvailable,
         walletsTotal,
-        userOperationsOnChain,
-        userOperationsSubmitted,
+        userOpsOnChain,
+        userOpsSubmitted,
         bundlesIncluded,
         bundlesSubmitted,
-        userOperationsReceived,
-        userOperationsValidationSuccess,
-        userOperationsValidationFailure,
-        userOperationInclusionDuration,
+        transactionCosts,
+        userOpsReceived,
+        userOpsValidationSuccess,
+        userOpsValidationFailure,
+        userOpInclusionDuration,
         verificationGasLimitEstimationTime,
         verificationGasLimitEstimationCount,
         replacedTransactions,
-        userOperationsResubmitted,
+        userOpsResubmitted,
         utilityWalletBalance,
         utilityWalletInsufficientBalance,
         executorWalletsBalances,
         executorWalletsMinBalance,
         emittedOpEvents,
         walletsProcessingTime,
-        transactionCosts,
-        userOperationsSubmissionAttempts
+        userOpsSubmissionAttempts,
+        altoSecondValidationFailed
     }
 }

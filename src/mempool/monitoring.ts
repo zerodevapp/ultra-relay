@@ -1,6 +1,7 @@
 import type { HexData32, UserOperationStatus } from "@alto/types"
-import { AltoConfig } from "../createConfig"
 import { Redis } from "ioredis"
+import { getRedisKeys } from "../cli/config/redisKeys"
+import type { AltoConfig } from "../createConfig"
 import { userOperationStatusSchema } from "../types/schemas"
 
 interface UserOperationStatusStore {
@@ -12,29 +13,38 @@ interface UserOperationStatusStore {
 class InMemoryUserOperationStatusStore implements UserOperationStatusStore {
     private store: Record<HexData32, UserOperationStatus> = {}
 
-    async set(
-        userOpHash: HexData32,
-        status: UserOperationStatus
-    ): Promise<void> {
+    set(userOpHash: HexData32, status: UserOperationStatus) {
         this.store[userOpHash] = status
+        return Promise.resolve()
     }
 
-    async get(userOpHash: HexData32): Promise<UserOperationStatus | undefined> {
-        return this.store[userOpHash]
+    get(userOpHash: HexData32) {
+        return Promise.resolve(this.store[userOpHash])
     }
 
-    async delete(userOpHash: HexData32): Promise<void> {
+    delete(userOpHash: HexData32) {
         delete this.store[userOpHash]
+        return Promise.resolve()
     }
 }
 
 class RedisUserOperationStatusStore implements UserOperationStatusStore {
     private redis: Redis
     private keyPrefix: string
+    private ttlSeconds: number
 
-    constructor(redisUrl: string, chainId: number) {
-        this.redis = new Redis(redisUrl)
-        this.keyPrefix = `${chainId}:userop_status`
+    constructor({
+        config,
+        redisEndpoint,
+        ttlSeconds = 3600 // 1 hour ttl by default
+    }: {
+        config: AltoConfig
+        ttlSeconds?: number
+        redisEndpoint: string
+    }) {
+        this.redis = new Redis(redisEndpoint)
+        this.keyPrefix = getRedisKeys(config).userOpStatusQueue
+        this.ttlSeconds = ttlSeconds
     }
 
     private getKey(userOpHash: HexData32): string {
@@ -78,12 +88,17 @@ class RedisUserOperationStatusStore implements UserOperationStatusStore {
         userOpHash: HexData32,
         status: UserOperationStatus
     ): Promise<void> {
-        await this.redis.set(this.getKey(userOpHash), this.serialize(status))
+        const key = this.getKey(userOpHash)
+        const serialized = this.serialize(status)
+
+        await this.redis.set(key, serialized, "EX", this.ttlSeconds)
     }
 
     async get(userOpHash: HexData32): Promise<UserOperationStatus | undefined> {
         const data = await this.redis.get(this.getKey(userOpHash))
-        if (!data) return undefined
+        if (!data) {
+            return undefined
+        }
         return this.deserialize(data)
     }
 
@@ -94,49 +109,59 @@ class RedisUserOperationStatusStore implements UserOperationStatusStore {
 
 export class Monitor {
     private statusStore: UserOperationStatusStore
-    private userOperationTimeouts: Record<HexData32, NodeJS.Timeout>
+    private userOpTimeouts: Record<HexData32, NodeJS.Timeout>
     private timeout: number
+    private isUsingRedis: boolean
 
     constructor({
         config,
         timeout = 60 * 60 * 1000
     }: { config: AltoConfig; timeout?: number }) {
         this.timeout = timeout
-        this.userOperationTimeouts = {}
+        this.userOpTimeouts = {}
 
-        if (config?.redisMempoolUrl) {
-            this.statusStore = new RedisUserOperationStatusStore(
-                config.redisMempoolUrl,
-                config.chainId
-            )
+        if (config.enableHorizontalScaling && config.redisEndpoint) {
+            this.isUsingRedis = true
+            this.statusStore = new RedisUserOperationStatusStore({
+                config,
+                redisEndpoint: config.redisEndpoint
+            })
         } else {
+            this.isUsingRedis = false
             this.statusStore = new InMemoryUserOperationStatusStore()
         }
     }
 
-    public async setUserOperationStatus(
-        userOperation: HexData32,
+    public async setUserOpStatus(
+        userOpHash: HexData32,
         status: UserOperationStatus
     ): Promise<void> {
         // Clear existing timer if it exists
-        if (this.userOperationTimeouts[userOperation]) {
-            clearTimeout(this.userOperationTimeouts[userOperation])
+        if (this.userOpTimeouts[userOpHash]) {
+            clearTimeout(this.userOpTimeouts[userOpHash])
         }
 
         // Set the user operation status
-        await this.statusStore.set(userOperation, status)
+        await this.statusStore.set(userOpHash, status)
 
-        // Set a new timer and store its identifier
-        this.userOperationTimeouts[userOperation] = setTimeout(async () => {
-            await this.statusStore.delete(userOperation)
-            delete this.userOperationTimeouts[userOperation]
-        }, this.timeout) as NodeJS.Timeout
+        // For in-memory storage, we need to manually prune statuses
+        if (!this.isUsingRedis) {
+            // Clear existing timer if it exists
+            if (this.userOpTimeouts[userOpHash]) {
+                clearTimeout(this.userOpTimeouts[userOpHash])
+            }
+
+            this.userOpTimeouts[userOpHash] = setTimeout(async () => {
+                await this.statusStore.delete(userOpHash)
+                delete this.userOpTimeouts[userOpHash]
+            }, this.timeout) as NodeJS.Timeout
+        }
     }
 
-    public async getUserOperationStatus(
-        userOperation: HexData32
+    public async getUserOpStatus(
+        userOpHash: HexData32
     ): Promise<UserOperationStatus> {
-        const status = await this.statusStore.get(userOperation)
+        const status = await this.statusStore.get(userOpHash)
         if (status === undefined) {
             return {
                 status: "not_found",

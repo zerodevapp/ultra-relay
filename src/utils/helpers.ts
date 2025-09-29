@@ -1,6 +1,45 @@
 import type { StateOverrides, UserOperation } from "@alto/types"
-import { BaseError, type RawContractError, getAddress, concat } from "viem"
+import { BaseError, type RawContractError, concat, getAddress } from "viem"
 import type { SignedAuthorization } from "viem"
+
+/// Convert an object to JSON string, handling bigint values
+export const jsonStringifyWithBigint = (obj: unknown): string => {
+    return JSON.stringify(obj, (_key, value) =>
+        typeof value === "bigint" ? value.toString() : value
+    )
+}
+
+/// Convert an object to JSON string, handling bigint values
+export const recoverableJsonStringifyWithBigint = (obj: unknown): string => {
+    return JSON.stringify(obj, (_key, value) =>
+        typeof value === "bigint"
+            ? {
+                  type: "bigint",
+                  value: value.toString()
+              }
+            : value
+    )
+}
+
+export const recoverableJsonParseWithBigint = (str: string): any => {
+    return JSON.parse(str, (_key, value) => {
+        if (
+            value !== null &&
+            typeof value === "object" &&
+            "type" in value &&
+            value.type === "bigint" &&
+            "value" in value &&
+            typeof value.value === "string"
+        ) {
+            try {
+                return BigInt(value.value)
+            } catch {
+                return value
+            }
+        }
+        return value
+    })
+}
 
 /// Ensure proper equality by converting both addresses into their checksum type
 export const areAddressesEqual = (a: string, b: string) => {
@@ -36,15 +75,15 @@ function getAuthorizationStateOverride({
 }
 
 export function getAuthorizationStateOverrides({
-    userOperations,
+    userOps,
     stateOverrides
 }: {
-    userOperations: UserOperation[]
+    userOps: UserOperation[]
     stateOverrides?: StateOverrides
 }) {
     const overrides: StateOverrides = { ...(stateOverrides ?? {}) }
 
-    for (const op of userOperations) {
+    for (const op of userOps) {
         if (op.eip7702Auth) {
             overrides[op.sender] = {
                 ...(overrides[op.sender] || {}),

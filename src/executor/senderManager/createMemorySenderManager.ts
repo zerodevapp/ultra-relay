@@ -1,8 +1,8 @@
-import { Metrics } from "@alto/utils"
-import { SenderManager, getAvailableWallets } from "."
-import { AltoConfig } from "../../createConfig"
+import type { Metrics } from "@alto/utils"
 import { Semaphore } from "async-mutex"
-import { Account } from "viem"
+import type { Account } from "viem"
+import { type SenderManager, getAvailableWallets } from "."
+import type { AltoConfig } from "../../createConfig"
 
 export const createMemorySenderManager = ({
     config,
@@ -44,6 +44,31 @@ export const createMemorySenderManager = ({
             metrics.walletsAvailable.set(availableWallets.length)
 
             return wallet
+        },
+        lockWallet: async (wallet) => {
+            logger.trace("waiting for semaphore ")
+            await semaphore.acquire()
+
+            const walletIndex = availableWallets.findIndex(
+                (w) => w.address === wallet.address
+            )
+
+            if (walletIndex === -1) {
+                semaphore.release()
+                logger.error(
+                    "wallet not found in available wallets or is already been used up"
+                )
+                return
+            }
+
+            availableWallets.splice(walletIndex, 1)
+
+            logger.trace(
+                { executor: wallet.address },
+                "locked wallet in sender manager"
+            )
+
+            metrics.walletsAvailable.set(availableWallets.length)
         },
         markWalletProcessed: async (wallet: Account) => {
             if (!availableWallets.some((w) => w.address === wallet.address)) {

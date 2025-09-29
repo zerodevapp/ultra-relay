@@ -1,52 +1,44 @@
 import {
-    EntryPointV06Abi,
-    EntryPointV07Abi,
     type PackedUserOperation,
     type UserOperation,
-    type UserOperationV06,
-    type UserOperationV07,
+    type UserOperation06,
+    type UserOperation07,
+    type UserOperationReceipt,
     logSchema,
-    receiptSchema,
-    type UserOperationBundle,
-    type UserOperationReceipt
+    receiptSchema
 } from "@alto/types"
-import * as sentry from "@sentry/node"
-import type { Logger } from "pino"
 import {
     type Address,
     type Hex,
     type PublicClient,
     type TransactionReceipt,
     concat,
-    decodeErrorResult,
     decodeEventLog,
     encodeAbiParameters,
-    encodeEventTopics,
+    getAbiItem,
     getAddress,
     keccak256,
     pad,
-    parseAbi,
-    parseEventLogs,
     size,
     slice,
     toHex,
     zeroAddress
 } from "viem"
+import { entryPoint07Abi } from "viem/account-abstraction"
 import { z } from "zod"
-import { fromZodError } from "zod-validation-error"
-import { areAddressesEqual, getAuthorizationStateOverrides } from "./helpers"
+import { getAuthorizationStateOverrides } from "./helpers"
 
 // Type predicate check if the UserOperation is V06.
 export function isVersion06(
     operation: UserOperation
-): operation is UserOperationV06 {
+): operation is UserOperation06 {
     return "initCode" in operation && "paymasterAndData" in operation
 }
 
 // Type predicate to check if the UserOperation is V07.
 export function isVersion07(
     operation: UserOperation
-): operation is UserOperationV07 {
+): operation is UserOperation07 {
     return "factory" in operation && "paymaster" in operation
 }
 
@@ -54,20 +46,20 @@ export function isVersion07(
 export function isVersion08(
     operation: UserOperation,
     entryPointAddress: Address
-): operation is UserOperationV07 {
+): operation is UserOperation07 {
     return entryPointAddress.startsWith("0x4337")
 }
 
-export function getInitCode(unpackedUserOperation: UserOperationV07) {
-    return unpackedUserOperation.factory
+export function getInitCode(unpackedUserOp: UserOperation07) {
+    return unpackedUserOp.factory
         ? concat([
-              unpackedUserOperation.factory === "0x7702"
-                  ? pad(unpackedUserOperation.factory, {
-                          dir: "right",
-                          size: 20
-                      })
-                  : unpackedUserOperation.factory,
-              unpackedUserOperation.factoryData || ("0x" as Hex)
+              unpackedUserOp.factory === "0x7702"
+                  ? pad(unpackedUserOp.factory, {
+                        dir: "right",
+                        size: 20
+                    })
+                  : unpackedUserOp.factory,
+              unpackedUserOp.factoryData || ("0x" as Hex)
           ])
         : "0x"
 }
@@ -86,12 +78,12 @@ export function unPackInitCode(initCode: Hex) {
     }
 }
 
-export function getAccountGasLimits(unpackedUserOperation: UserOperationV07) {
+export function getAccountGasLimits(unpackedUserOp: UserOperation07) {
     return concat([
-        pad(toHex(unpackedUserOperation.verificationGasLimit), {
+        pad(toHex(unpackedUserOp.verificationGasLimit), {
             size: 16
         }),
-        pad(toHex(unpackedUserOperation.callGasLimit), { size: 16 })
+        pad(toHex(unpackedUserOp.callGasLimit), { size: 16 })
     ])
 }
 
@@ -102,12 +94,12 @@ export function unpackAccountGasLimits(accountGasLimits: Hex) {
     }
 }
 
-export function getGasLimits(unpackedUserOperation: UserOperationV07) {
+export function getGasLimits(unpackedUserOp: UserOperation07) {
     return concat([
-        pad(toHex(unpackedUserOperation.maxPriorityFeePerGas), {
+        pad(toHex(unpackedUserOp.maxPriorityFeePerGas), {
             size: 16
         }),
-        pad(toHex(unpackedUserOperation.maxFeePerGas), { size: 16 })
+        pad(toHex(unpackedUserOp.maxFeePerGas), { size: 16 })
     ])
 }
 
@@ -118,22 +110,17 @@ export function unpackGasLimits(gasLimits: Hex) {
     }
 }
 
-export function getPaymasterAndData(unpackedUserOperation: UserOperationV07) {
-    return unpackedUserOperation.paymaster
+export function getPaymasterAndData(unpackedUserOp: UserOperation07) {
+    return unpackedUserOp.paymaster
         ? concat([
-              unpackedUserOperation.paymaster,
-              pad(
-                  toHex(
-                      unpackedUserOperation.paymasterVerificationGasLimit || 0n
-                  ),
-                  {
-                      size: 16
-                  }
-              ),
-              pad(toHex(unpackedUserOperation.paymasterPostOpGasLimit || 0n), {
+              unpackedUserOp.paymaster,
+              pad(toHex(unpackedUserOp.paymasterVerificationGasLimit || 0n), {
                   size: 16
               }),
-              unpackedUserOperation.paymasterData || ("0x" as Hex)
+              pad(toHex(unpackedUserOp.paymasterPostOpGasLimit || 0n), {
+                  size: 16
+              }),
+              unpackedUserOp.paymasterData || ("0x" as Hex)
           ])
         : "0x"
 }
@@ -159,19 +146,19 @@ export function unpackPaymasterAndData(paymasterAndData: Hex) {
     }
 }
 
-export function toPackedUserOperation(
-    unpackedUserOperation: UserOperationV07
+export function toPackedUserOp(
+    unpackedUserOp: UserOperation07
 ): PackedUserOperation {
     return {
-        sender: unpackedUserOperation.sender,
-        nonce: unpackedUserOperation.nonce,
-        initCode: getInitCode(unpackedUserOperation),
-        callData: unpackedUserOperation.callData,
-        accountGasLimits: getAccountGasLimits(unpackedUserOperation),
-        preVerificationGas: unpackedUserOperation.preVerificationGas,
-        gasFees: getGasLimits(unpackedUserOperation),
-        paymasterAndData: getPaymasterAndData(unpackedUserOperation),
-        signature: unpackedUserOperation.signature
+        sender: unpackedUserOp.sender,
+        nonce: unpackedUserOp.nonce,
+        initCode: getInitCode(unpackedUserOp),
+        callData: unpackedUserOp.callData,
+        accountGasLimits: getAccountGasLimits(unpackedUserOp),
+        preVerificationGas: unpackedUserOp.preVerificationGas,
+        gasFees: getGasLimits(unpackedUserOp),
+        paymasterAndData: getPaymasterAndData(unpackedUserOp),
+        signature: unpackedUserOp.signature
     }
 }
 
@@ -216,165 +203,12 @@ export function getAddressFromInitCodeOrPaymasterAndData(
     return null
 }
 
-type UserOperationDetailsType = {
-    accountDeployed: boolean
-    status: "succesful" | "calldata_phase_reverted"
-    revertReason?: Hex
-}
-
-export type BundlingStatus =
-    | {
-          // The tx was successfully mined
-          // The status of each userOperation is recorded in userOperaitonDetails
-          status: "included"
-          userOperationDetails: Record<Hex, UserOperationDetailsType>
-      }
-    | {
-          // The tx reverted due to a op in the bundle failing EntryPoint validation
-          status: "reverted"
-          // biome-ignore lint/style/useNamingConvention: use double upper case for AA errors
-          isAA95: boolean
-      }
-    | {
-          // The tx could not be found (pending or invalid hash)
-          status: "not_found"
-      }
-
-// Return the status of the bundling transaction.
-export const getBundleStatus = async ({
-    transactionHash,
-    publicClient,
-    bundle,
-    logger
-}: {
-    transactionHash: Hex
-    bundle: UserOperationBundle
-    publicClient: PublicClient
-    logger: Logger
-}): Promise<{
-    bundlingStatus: BundlingStatus
-    blockNumber: bigint | undefined
-}> => {
-    try {
-        const { entryPoint, version } = bundle
-        const isVersion06 = version === "0.6"
-
-        const receipt = await publicClient.getTransactionReceipt({
-            hash: transactionHash
-        })
-        const blockNumber = receipt.blockNumber
-
-        if (receipt.status === "reverted") {
-            const bundlingStatus: {
-                status: "reverted"
-                isAA95: boolean
-            } = {
-                status: "reverted",
-                isAA95: false
-            }
-
-            if ("error" in receipt) {
-                try {
-                    const match = (receipt.error as any).match(
-                        /0x([a-fA-F0-9]+)?/
-                    )
-
-                    if (match) {
-                        const revertReason = match[0] as Hex
-                        const decoded = decodeErrorResult({
-                            data: revertReason,
-                            abi: parseAbi([
-                                "error FailedOp(uint256 opIndex, string reason)"
-                            ])
-                        })
-
-                        if (decoded.args[1] === "AA95 out of gas") {
-                            bundlingStatus.isAA95 = true
-                        }
-                    }
-                } catch (e) {
-                    logger.error(
-                        "Failed to decode userOperation revert reason due to ",
-                        e
-                    )
-                }
-            }
-
-            return { bundlingStatus, blockNumber }
-        }
-
-        const userOperationDetails = receipt.logs
-            .filter((log) => areAddressesEqual(log.address, entryPoint))
-            .reduce((result: Record<Hex, UserOperationDetailsType>, log) => {
-                try {
-                    const { data, topics } = log
-                    const { eventName, args } = decodeEventLog({
-                        abi: isVersion06 ? EntryPointV06Abi : EntryPointV07Abi,
-                        data,
-                        topics
-                    })
-
-                    if (
-                        eventName === "AccountDeployed" ||
-                        eventName === "UserOperationRevertReason" ||
-                        eventName === "UserOperationEvent"
-                    ) {
-                        const opHash = args.userOpHash
-
-                        // create result entry if doesn't exist
-                        result[opHash] ??= {
-                            accountDeployed: false,
-                            status: "succesful"
-                        }
-
-                        switch (eventName) {
-                            case "AccountDeployed": {
-                                result[opHash].accountDeployed = true
-                                break
-                            }
-                            case "UserOperationRevertReason": {
-                                result[opHash].revertReason = args.revertReason
-                                break
-                            }
-                            case "UserOperationEvent": {
-                                const status = args.success
-                                    ? "succesful"
-                                    : "calldata_phase_reverted"
-                                result[opHash].status = status
-                                break
-                            }
-                        }
-                    }
-                } catch (e) {
-                    sentry.captureException(e)
-                }
-
-                return result
-            }, {})
-
-        return {
-            bundlingStatus: {
-                status: "included",
-                userOperationDetails
-            },
-            blockNumber
-        }
-    } catch {
-        return {
-            bundlingStatus: {
-                status: "not_found"
-            },
-            blockNumber: undefined
-        }
-    }
-}
-
-export const getUserOperationHashV06 = ({
-    userOperation,
+export const getUserOpHashV06 = ({
+    userOp,
     entryPointAddress,
     chainId
 }: {
-    userOperation: UserOperationV06
+    userOp: UserOperation06
     entryPointAddress: Address
     chainId: number
 }) => {
@@ -423,16 +257,16 @@ export const getUserOperationHashV06 = ({
                 }
             ],
             [
-                userOperation.sender,
-                userOperation.nonce,
-                keccak256(userOperation.initCode),
-                keccak256(userOperation.callData),
-                userOperation.callGasLimit,
-                userOperation.verificationGasLimit,
-                userOperation.preVerificationGas,
-                userOperation.maxFeePerGas,
-                userOperation.maxPriorityFeePerGas,
-                keccak256(userOperation.paymasterAndData)
+                userOp.sender,
+                userOp.nonce,
+                keccak256(userOp.initCode),
+                keccak256(userOp.callData),
+                userOp.callGasLimit,
+                userOp.verificationGasLimit,
+                userOp.preVerificationGas,
+                userOp.maxFeePerGas,
+                userOp.maxPriorityFeePerGas,
+                keccak256(userOp.paymasterAndData)
             ]
         )
     )
@@ -458,12 +292,12 @@ export const getUserOperationHashV06 = ({
     )
 }
 
-export const getUserOperationHashV07 = ({
-    userOperation,
+export const getUserOpHashV07 = ({
+    userOp,
     entryPointAddress,
     chainId
 }: {
-    userOperation: PackedUserOperation
+    userOp: PackedUserOperation
     entryPointAddress: Address
     chainId: number
 }) => {
@@ -504,14 +338,14 @@ export const getUserOperationHashV07 = ({
                 }
             ],
             [
-                userOperation.sender,
-                userOperation.nonce,
-                keccak256(userOperation.initCode),
-                keccak256(userOperation.callData),
-                userOperation.accountGasLimits,
-                userOperation.preVerificationGas,
-                userOperation.gasFees,
-                keccak256(userOperation.paymasterAndData)
+                userOp.sender,
+                userOp.nonce,
+                keccak256(userOp.initCode),
+                keccak256(userOp.callData),
+                userOp.accountGasLimits,
+                userOp.preVerificationGas,
+                userOp.gasFees,
+                keccak256(userOp.paymasterAndData)
             ]
         )
     )
@@ -537,21 +371,21 @@ export const getUserOperationHashV07 = ({
     )
 }
 
-export const getUserOperationHashV08 = async ({
-    userOperation,
+export const getUserOpHashV08 = async ({
+    userOp,
     entryPointAddress,
     publicClient
 }: {
-    userOperation: UserOperationV07
+    userOp: UserOperation07
     entryPointAddress: Address
     chainId: number
     publicClient: PublicClient
 }) => {
-    const packedUserOp = toPackedUserOperation(userOperation)
+    const packedUserOp = toPackedUserOp(userOp)
 
     // : concat(["0xef0100", code ?? "0x"])
     const stateOverrides = getAuthorizationStateOverrides({
-        userOperations: [userOperation]
+        userOps: [userOp]
     })
 
     const hash = await publicClient.readContract({
@@ -594,36 +428,36 @@ export const getUserOperationHashV08 = async ({
     return hash
 }
 
-export const getUserOperationHash = ({
-    userOperation,
+export const getUserOpHash = ({
+    userOp,
     entryPointAddress,
     chainId,
     publicClient
 }: {
-    userOperation: UserOperation
+    userOp: UserOperation
     entryPointAddress: Address
     chainId: number
     publicClient: PublicClient
 }) => {
-    if (isVersion06(userOperation)) {
-        return getUserOperationHashV06({
-            userOperation,
+    if (isVersion06(userOp)) {
+        return getUserOpHashV06({
+            userOp,
             entryPointAddress,
             chainId
         })
     }
 
-    if (isVersion08(userOperation, entryPointAddress)) {
-        return getUserOperationHashV08({
-            userOperation,
+    if (isVersion08(userOp, entryPointAddress)) {
+        return getUserOpHashV08({
+            userOp,
             entryPointAddress,
             chainId,
             publicClient
         })
     }
 
-    return getUserOperationHashV07({
-        userOperation: toPackedUserOperation(userOperation),
+    return getUserOpHashV07({
+        userOp: toPackedUserOp(userOp),
         entryPointAddress,
         chainId
     })
@@ -636,26 +470,17 @@ export const getNonceKeyAndSequence = (nonce: bigint) => {
     return [nonceKey, nonceSequence]
 }
 
-export const encodeNonce = ({
-    nonceKey,
-    nonceSequence
-}: { nonceKey: bigint; nonceSequence: bigint }) => {
-    return (nonceKey << 64n) | nonceSequence
-}
-
-export function toUnpackedUserOperation(
-    packedUserOperation: PackedUserOperation
-): UserOperationV07 {
-    const { factory, factoryData } = unPackInitCode(
-        packedUserOperation.initCode
-    )
+export function toUnpackedUserOp(
+    packedUserOp: PackedUserOperation
+): UserOperation07 {
+    const { factory, factoryData } = unPackInitCode(packedUserOp.initCode)
 
     const { callGasLimit, verificationGasLimit } = unpackAccountGasLimits(
-        packedUserOperation.accountGasLimits
+        packedUserOp.accountGasLimits
     )
 
     const { maxFeePerGas, maxPriorityFeePerGas } = unpackGasLimits(
-        packedUserOperation.gasFees
+        packedUserOp.gasFees
     )
 
     const {
@@ -663,147 +488,126 @@ export function toUnpackedUserOperation(
         paymasterVerificationGasLimit,
         paymasterPostOpGasLimit,
         paymasterData
-    } = unpackPaymasterAndData(packedUserOperation.paymasterAndData)
+    } = unpackPaymasterAndData(packedUserOp.paymasterAndData)
 
     return {
-        sender: packedUserOperation.sender,
-        nonce: packedUserOperation.nonce,
+        sender: packedUserOp.sender,
+        nonce: packedUserOp.nonce,
         factory: factory,
         factoryData: factoryData,
-        callData: packedUserOperation.callData,
+        callData: packedUserOp.callData,
         callGasLimit: callGasLimit,
         verificationGasLimit: verificationGasLimit,
-        preVerificationGas: packedUserOperation.preVerificationGas,
+        preVerificationGas: packedUserOp.preVerificationGas,
         maxFeePerGas: maxFeePerGas,
         maxPriorityFeePerGas: maxPriorityFeePerGas,
         paymaster: paymaster,
         paymasterVerificationGasLimit: paymasterVerificationGasLimit,
         paymasterPostOpGasLimit: paymasterPostOpGasLimit,
         paymasterData: paymasterData,
-        signature: packedUserOperation.signature
+        signature: packedUserOp.signature
     }
 }
 
-export const getRequiredPrefund = (userOperation: UserOperation) => {
-    if (isVersion06(userOperation)) {
-        const op = userOperation as UserOperationV06
-        const multiplier =
-            (op.paymasterAndData?.length ?? 0) > 2 ? BigInt(3) : BigInt(1)
-        const requiredGas =
-            op.callGasLimit +
-            op.verificationGasLimit * multiplier +
-            op.preVerificationGas
-
-        return BigInt(requiredGas) * BigInt(op.maxFeePerGas)
-    }
-
-    const op = userOperation as UserOperationV07
-
-    const requiredGas =
-        op.verificationGasLimit +
-        op.callGasLimit +
-        (op.paymasterVerificationGasLimit || 0n) +
-        (op.paymasterPostOpGasLimit || 0n) +
-        op.preVerificationGas
-
-    return requiredGas * op.maxFeePerGas
-}
-
-export function parseUserOperationReceipt(
+export function parseUserOpReceipt(
     userOpHash: Hex,
     receipt: TransactionReceipt
 ) {
-    const userOperationRevertReasonAbi = parseAbi([
-        "event UserOperationRevertReason(bytes32 indexed userOpHash, address indexed sender, uint256 nonce, bytes revertReason)"
-    ])
-    const userOperationEventTopic = encodeEventTopics({
-        abi: EntryPointV06Abi,
-        eventName: "UserOperationEvent"
-    })
-
-    const userOperationRevertReasonTopicEvent = encodeEventTopics({
-        abi: userOperationRevertReasonAbi
-    })[0]
-
     let entryPoint: Address = zeroAddress
-    let revertReason = undefined
+    let revertReason: Hex | undefined
+    let userOpEventArgs:
+        | {
+              userOpHash: Hex
+              sender: Address
+              paymaster: Address
+              nonce: bigint
+              success: boolean
+              actualGasCost: bigint
+              actualGasUsed: bigint
+          }
+        | undefined
 
     let startIndex = -1
-    let endIndex = -1
-    receipt.logs.forEach((log, index) => {
-        if (log?.topics[0] === userOperationEventTopic[0]) {
-            // process UserOperationEvent
-            if (log.topics[1] === userOpHash) {
-                // it's our userOpHash. save as end of logs array
-                endIndex = index
-                entryPoint = log.address
-            } else if (endIndex === -1) {
-                // it's a different hash. remember it as beginning index, but only if we didn't find our end index yet.
+    let userOpEventIndex = -1
+
+    // Find our UserOpEvent and determine the starting point for logs
+    for (let index = 0; index < receipt.logs.length; index++) {
+        const log = receipt.logs[index]
+        try {
+            const { eventName, args } = decodeEventLog({
+                abi: [
+                    getAbiItem({
+                        abi: entryPoint07Abi,
+                        name: "UserOperationEvent"
+                    }),
+                    getAbiItem({
+                        abi: entryPoint07Abi,
+                        name: "UserOperationRevertReason"
+                    }),
+                    getAbiItem({
+                        abi: entryPoint07Abi,
+                        name: "BeforeExecution"
+                    })
+                ],
+                data: log.data,
+                topics: log.topics
+            })
+
+            if (eventName === "BeforeExecution") {
+                // BeforeExecution is emitted once and before individually executing UserOperations.
                 startIndex = index
             }
-        }
 
-        if (log?.topics[0] === userOperationRevertReasonTopicEvent) {
-            // process UserOperationRevertReason
-            if (log.topics[1] === userOpHash) {
-                // it's our userOpHash. capture revert reason.
-                const decodedLog = decodeEventLog({
-                    abi: userOperationRevertReasonAbi,
-                    data: log.data,
-                    topics: log.topics
-                })
-
-                revertReason = decodedLog.args.revertReason
+            if (
+                eventName === "UserOperationRevertReason" &&
+                args.userOpHash === userOpHash
+            ) {
+                revertReason = args.revertReason
             }
-        }
-    })
 
-    if (endIndex === -1) {
-        throw new Error("fatal: no UserOperationEvent in logs")
+            if (eventName === "UserOperationEvent") {
+                if (args.userOpHash === userOpHash) {
+                    userOpEventIndex = index
+                    entryPoint = log.address
+                    userOpEventArgs = args
+                    break
+                }
+                // Update startIndex to this UserOpEvent for the next UserOp's logs
+                startIndex = index
+            }
+        } catch (e) {}
     }
 
-    const filteredLogs = receipt.logs.slice(startIndex + 1, endIndex)
-
-    const logsParsing = z.array(logSchema).safeParse(filteredLogs)
-    if (!logsParsing.success) {
-        const err = fromZodError(logsParsing.error)
-        throw err
+    if (userOpEventIndex === -1 || startIndex === -1 || !userOpEventArgs) {
+        throw new Error("fatal: no UserOpEvent in logs")
     }
 
-    const receiptParsing = receiptSchema.safeParse({
+    // Get logs between the starting point and our UserOpEvent
+    const filteredLogs = receipt.logs.slice(startIndex + 1, userOpEventIndex)
+    const parsedLogs = z.array(logSchema).parse(filteredLogs)
+    const parsedReceipt = receiptSchema.parse({
         ...receipt,
         status: receipt.status === "success" ? 1 : 0
     })
-    if (!receiptParsing.success) {
-        const err = fromZodError(receiptParsing.error)
-        throw err
+
+    let paymaster: Address | undefined = userOpEventArgs.paymaster
+    if (paymaster === zeroAddress) {
+        paymaster = undefined
     }
 
-    const userOperationEvent = parseEventLogs({
-        abi: EntryPointV06Abi,
-        eventName: "UserOperationEvent",
-        args: {
-            userOpHash
-        },
-        logs: receipt.logs
-    })[0]
-
-    let paymaster: Address | undefined = userOperationEvent.args.paymaster
-    paymaster = paymaster === zeroAddress ? undefined : paymaster
-
-    const userOperationReceipt: UserOperationReceipt = {
+    const userOpReceipt: UserOperationReceipt = {
         userOpHash,
         entryPoint,
-        sender: userOperationEvent.args.sender,
-        nonce: userOperationEvent.args.nonce,
         paymaster,
-        actualGasUsed: userOperationEvent.args.actualGasUsed,
-        actualGasCost: userOperationEvent.args.actualGasCost,
-        success: userOperationEvent.args.success,
+        sender: userOpEventArgs.sender,
+        nonce: userOpEventArgs.nonce,
+        actualGasUsed: userOpEventArgs.actualGasUsed,
+        actualGasCost: userOpEventArgs.actualGasCost,
+        success: userOpEventArgs.success,
         reason: revertReason,
-        logs: logsParsing.data,
-        receipt: receiptParsing.data
+        logs: parsedLogs,
+        receipt: parsedReceipt
     }
 
-    return userOperationReceipt
+    return userOpReceipt
 }

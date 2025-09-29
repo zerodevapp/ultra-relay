@@ -1,9 +1,14 @@
 import Redis from "ioredis"
-import { Store, UserOpType } from "."
-import { AltoConfig } from "../createConfig"
-import { HexData32, UserOperation, userOperationSchema } from "../types/schemas"
+import { type Address, toHex } from "viem"
+import type { Store } from "."
+import type { AltoConfig } from "../createConfig"
+import {
+    type HexData32,
+    type UserOpInfo,
+    type UserOperation,
+    userOperationSchema
+} from "../types/schemas"
 import { isVersion06, isVersion07 } from "../utils/userop"
-import { Address, toHex } from "viem"
 import { RedisHash } from "./createRedisOutstandingStore"
 import { createMemoryStore } from "./createStore"
 
@@ -42,20 +47,18 @@ const deserializeUserOp = (data: string): UserOperation => {
     }
 }
 
-export const createRedisStore = <T extends UserOpType>({
+export const createRedisStore = ({
     config,
     storeType,
-    entryPoint
+    entryPoint,
+    redisEndpoint
 }: {
     config: AltoConfig
     storeType: string
     entryPoint: Address
-}): Store<T> => {
-    if (!config.redisMempoolUrl) {
-        throw new Error("Missing required redisMempoolUrl")
-    }
-
-    const redis = new Redis(config.redisMempoolUrl, {})
+    redisEndpoint: string
+}): Store => {
+    const redis = new Redis(redisEndpoint, {})
 
     const factoryLookupKey = `${config.chainId}:${storeType}:factory-lookup:${entryPoint}`
     const conflictingNonceKey = `${config.chainId}:${storeType}:conflicting-nonce:${entryPoint}`
@@ -67,14 +70,14 @@ export const createRedisStore = <T extends UserOpType>({
     const senderNonceLookup = new RedisHash(redis, senderNonceLookupKey) // sender + nonce -> userOp
     const userOpHashLookup = new RedisHash(redis, userOpHashLookupKey) // userOpHash -> userOp
 
-    const memoryStore = createMemoryStore<T>({ config })
+    const memoryStore = createMemoryStore({ config })
 
     const encodeSenderNonce = (userOp: UserOperation) => {
         return `${userOp.sender}-${userOp.nonce}`
     }
 
     return {
-        add: async (op: T) => {
+        add: async (op: UserOpInfo) => {
             // Local memory logic
             memoryStore.add(op)
 

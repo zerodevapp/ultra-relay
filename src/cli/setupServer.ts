@@ -12,9 +12,11 @@ import type { InterfaceValidator } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Registry } from "prom-client"
 import type { AltoConfig } from "../createConfig"
-import { validateAndRefillWallets } from "../executor/senderManager/validateAndRefill"
+import { BundleManager } from "../executor/bundleManager"
 import { flushOnStartUp } from "../executor/senderManager/flushOnStartUp"
+import { validateAndRefillWallets } from "../executor/senderManager/validateAndRefill"
 import { createMempoolStore } from "../store/createMempoolStore"
+import { persistShutdownState, restoreShutdownState } from "./shutDown"
 
 const getReputationManager = (
     config: AltoConfig
@@ -73,6 +75,7 @@ const getMempool = ({
     return new Mempool({
         config,
         monitor,
+        metrics,
         store: createMempoolStore({ config, metrics }),
         reputationManager,
         validator,
@@ -91,26 +94,14 @@ const getEventManager = ({
 }
 
 const getExecutor = ({
-    mempool,
     config,
-    reputationManager,
-    metrics,
-    gasPriceManager,
     eventManager
 }: {
-    mempool: Mempool
     config: AltoConfig
-    reputationManager: InterfaceReputationManager
-    metrics: Metrics
-    gasPriceManager: GasPriceManager
     eventManager: EventManager
 }): Executor => {
     return new Executor({
-        mempool,
         config,
-        reputationManager,
-        metrics,
-        gasPriceManager,
         eventManager
     })
 }
@@ -119,33 +110,27 @@ const getExecutorManager = ({
     config,
     executor,
     mempool,
-    monitor,
     senderManager,
-    reputationManager,
     metrics,
     gasPriceManager,
-    eventManager
+    bundleManager
 }: {
     config: AltoConfig
     executor: Executor
     mempool: Mempool
-    monitor: Monitor
-    reputationManager: InterfaceReputationManager
     senderManager: SenderManager
     metrics: Metrics
     gasPriceManager: GasPriceManager
-    eventManager: EventManager
+    bundleManager: BundleManager
 }) => {
     return new ExecutorManager({
         config,
         executor,
+        bundleManager,
         mempool,
-        monitor,
         senderManager,
-        reputationManager,
         metrics,
-        gasPriceManager,
-        eventManager
+        gasPriceManager
     })
 }
 
@@ -157,6 +142,7 @@ const getRpcHandler = ({
     monitor,
     executorManager,
     reputationManager,
+    bundleManager,
     metrics,
     gasPriceManager,
     eventManager
@@ -168,6 +154,7 @@ const getRpcHandler = ({
     monitor: Monitor
     executorManager: ExecutorManager
     reputationManager: InterfaceReputationManager
+    bundleManager: BundleManager
     metrics: Metrics
     eventManager: EventManager
     gasPriceManager: GasPriceManager
@@ -180,6 +167,7 @@ const getRpcHandler = ({
         monitor,
         executorManager,
         reputationManager,
+        bundleManager,
         metrics,
         eventManager,
         gasPriceManager
@@ -280,24 +268,29 @@ export const setupServer = async ({
     })
 
     const executor = getExecutor({
-        mempool,
         config,
-        reputationManager,
-        metrics,
-        gasPriceManager,
         eventManager
     })
 
+    const bundleManager = new BundleManager({
+        config,
+        mempool,
+        monitor,
+        metrics,
+        reputationManager,
+        gasPriceManager,
+        eventManager,
+        senderManager
+    })
+
     const executorManager = getExecutorManager({
+        bundleManager,
         config,
         executor,
         mempool,
-        monitor,
         senderManager,
-        reputationManager,
         metrics,
-        gasPriceManager,
-        eventManager
+        gasPriceManager
     })
 
     const rpcEndpoint = getRpcHandler({
@@ -308,6 +301,7 @@ export const setupServer = async ({
         monitor,
         executorManager,
         reputationManager,
+        bundleManager,
         metrics,
         gasPriceManager,
         eventManager
@@ -336,6 +330,24 @@ export const setupServer = async ({
         metrics
     })
 
+    const shutdownLogger = rootLogger.child(
+        { module: "shutdown" },
+        {
+            level: config.logLevel
+        }
+    )
+
+    // Ignore when horizontal scaling is enabled, because state is already saved between shutdowns.
+    if (!config.enableHorizontalScaling) {
+        restoreShutdownState({
+            mempool,
+            bundleManager,
+            config,
+            logger: shutdownLogger,
+            senderManager
+        })
+    }
+
     server.start()
 
     const gracefulShutdown = async (signal: string) => {
@@ -344,33 +356,12 @@ export const setupServer = async ({
         await server.stop()
         rootLogger.info("server stopped")
 
-        for (const entryPoint of config.entrypoints) {
-            const outstanding = [...(await mempool.dumpOutstanding(entryPoint))]
-            const submitted = [...(await mempool.dumpSubmittedOps(entryPoint))]
-            const processing = [...(await mempool.dumpProcessing(entryPoint))]
-            await executorManager.dropUserOps(entryPoint, [
-                ...outstanding.map((userOp) => ({
-                    ...userOp,
-                    reason: "shutdown"
-                })),
-                ...submitted.map((userOp) => ({
-                    ...userOp,
-                    reason: "shutdown"
-                })),
-                ...processing.map((userOp) => ({
-                    ...userOp,
-                    reason: "shutdown"
-                }))
-            ])
-            rootLogger.info(
-                {
-                    outstanding: outstanding.length,
-                    submitted: submitted.length,
-                    processing: processing.length
-                },
-                "dumping mempool before shutdown"
-            )
-        }
+        await persistShutdownState({
+            mempool,
+            config,
+            bundleManager,
+            logger: shutdownLogger
+        })
 
         // mark all executors as processed
         for (const account of senderManager.getActiveWallets()) {
@@ -383,7 +374,7 @@ export const setupServer = async ({
     const signals = ["SIGINT", "SIGTERM"]
 
     // Handle regular termination signals
-    signals.forEach((signal) => {
+    for (const signal of signals) {
         process.on(signal, async () => {
             try {
                 await gracefulShutdown(signal)
@@ -395,7 +386,7 @@ export const setupServer = async ({
                 process.exit(1)
             }
         })
-    })
+    }
 
     // Handle unhandled rejections with the actual rejection reason
     process.on("unhandledRejection", async (err) => {
@@ -403,14 +394,14 @@ export const setupServer = async ({
             {
                 err
             },
-            `Unhandled Promise Rejection`
+            "Unhandled Promise Rejection"
         )
         try {
             await gracefulShutdown("unhandledRejection")
         } catch (err) {
             rootLogger.error(
                 { err },
-                `Error during unhandledRejection shutdown`
+                "Error during unhandledRejection shutdown"
             )
             process.exit(1)
         }
@@ -418,7 +409,7 @@ export const setupServer = async ({
 
     // Handle uncaught exceptions with the actual error
     process.on("uncaughtException", async (err) => {
-        rootLogger.error({ err }, `Uncaught Exception`)
+        rootLogger.error({ err }, "Uncaught Exception")
         try {
             await gracefulShutdown("uncaughtException")
         } catch (err) {
@@ -426,7 +417,7 @@ export const setupServer = async ({
                 {
                     err
                 },
-                `Error during uncaughtException shutdown`
+                "Error during uncaughtException shutdown"
             )
             process.exit(1)
         }

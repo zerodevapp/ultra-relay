@@ -1,34 +1,44 @@
-import { encodeNonce } from "permissionless/utils"
+import {
+    decodeNonce,
+    encodeNonce,
+    getRequiredPrefund
+} from "permissionless/utils"
 import {
     http,
+    type Address,
     type Hex,
+    concat,
     createPublicClient,
     createTestClient,
     getContract,
     parseEther,
     parseGwei,
-    type Address,
-    concat
+    zeroAddress
 } from "viem"
 import {
     type EntryPointVersion,
+    type UserOperation,
     UserOperationReceiptNotFoundError,
     entryPoint06Address,
     entryPoint07Address,
-    type UserOperation
+    entryPoint08Address
 } from "viem/account-abstraction"
-import { generatePrivateKey } from "viem/accounts"
+import {
+    generatePrivateKey,
+    privateKeyToAccount,
+    privateKeyToAddress
+} from "viem/accounts"
 import { foundry } from "viem/chains"
 import { beforeEach, describe, expect, inject, test } from "vitest"
+import { deployPaymaster } from "../src/testPaymaster.js"
+import { getEntryPointAbi } from "../src/utils/entrypoint.js"
 import {
     beforeEachCleanUp,
+    getSimple7702AccountImplementationAddress,
     getSmartAccountClient,
     sendBundleNow,
     setBundlingMode
 } from "../src/utils/index.js"
-import { ENTRYPOINT_V06_ABI, ENTRYPOINT_V07_ABI } from "../src/utils/abi.js"
-import { getNonceKeyAndValue } from "../src/utils/userop.js"
-import { deployPaymaster } from "../src/testPaymaster.js"
 
 describe.each([
     {
@@ -38,6 +48,10 @@ describe.each([
     {
         entryPoint: entryPoint07Address,
         entryPointVersion: "0.7" as EntryPointVersion
+    },
+    {
+        entryPoint: entryPoint08Address,
+        entryPointVersion: "0.8" as EntryPointVersion
     }
 ])(
     "$entryPointVersion supports eth_sendUserOperation",
@@ -66,6 +80,29 @@ describe.each([
                 entryPoint,
                 anvilRpc
             })
+        })
+
+        test("Should throw if EntryPoint is not supported", async () => {
+            const smartAccountClient = await getSmartAccountClient({
+                entryPointVersion,
+                anvilRpc,
+                altoRpc
+            })
+
+            const fakeEntryPoint = privateKeyToAddress(generatePrivateKey())
+
+            await expect(async () =>
+                smartAccountClient.estimateUserOperationGas({
+                    calls: [
+                        {
+                            to: "0x23B608675a2B2fB1890d3ABBd85c5775c51691d5",
+                            data: "0x",
+                            value: 0n
+                        }
+                    ],
+                    entryPointAddress: fakeEntryPoint
+                })
+            ).rejects.toThrow(/EntryPoint .* not supported/)
         })
 
         test("Send UserOperation", async () => {
@@ -225,10 +262,7 @@ describe.each([
 
             const entryPointContract = getContract({
                 address: entryPoint,
-                abi:
-                    entryPointVersion === "0.6"
-                        ? ENTRYPOINT_V06_ABI
-                        : ENTRYPOINT_V07_ABI,
+                abi: getEntryPointAbi(entryPointVersion),
                 client: {
                     public: publicClient
                 }
@@ -299,8 +333,7 @@ describe.each([
 
             // @ts-ignore
             const bundleNonceKeys = logs.map(
-                // @ts-ignore
-                (log) => getNonceKeyAndValue(log.args.nonce)[0]
+                (log) => decodeNonce(log.args.nonce as bigint).key
             )
 
             const sortedNonceKeys = [...nonceKeys].sort(
@@ -323,11 +356,7 @@ describe.each([
 
             const entryPointContract = getContract({
                 address: entryPoint,
-                abi:
-                    // @ts-ignore
-                    entryPointVersion === "0.6"
-                        ? ENTRYPOINT_V06_ABI
-                        : ENTRYPOINT_V07_ABI,
+                abi: getEntryPointAbi(entryPointVersion),
                 client: {
                     public: publicClient
                 }
@@ -482,15 +511,15 @@ describe.each([
 
             const invalidPaymasterSignature = "0xff"
 
-            if (entryPointVersion === "0.7") {
-                op.paymaster = paymaster
-                op.paymasterData = invalidPaymasterSignature // FAILING CONDITION
-                op.paymasterVerificationGasLimit = 100_000n
-            } else {
+            if (entryPointVersion === "0.6") {
                 op.paymasterAndData = concat([
                     paymaster,
                     invalidPaymasterSignature
                 ])
+            } else {
+                op.paymaster = paymaster
+                op.paymasterData = invalidPaymasterSignature // FAILING CONDITION
+                op.paymasterVerificationGasLimit = 100_000n
             }
 
             op.signature = await client.account.signUserOperation(op)
@@ -505,6 +534,251 @@ describe.each([
                     )
                 })
             )
+        })
+
+        test("Should reject userOperation with insufficient prefund", async () => {
+            const client = await getSmartAccountClient({
+                entryPointVersion,
+                anvilRpc,
+                altoRpc
+            })
+
+            const op = (await client.prepareUserOperation({
+                calls: [
+                    {
+                        to: TO_ADDRESS,
+                        value: 0n,
+                        data: "0x"
+                    }
+                ]
+            })) as UserOperation
+
+            op.signature = await client.account.signUserOperation(op)
+
+            const requiedPrefund = getRequiredPrefund({
+                userOperation: op,
+                entryPointVersion: entryPointVersion
+            })
+
+            // Should throw when there is insufficient prefund
+            await anvilClient.setBalance({
+                address: client.account.address,
+                value: requiedPrefund - 1n
+            })
+
+            await expect(async () => {
+                await client.sendUserOperation(op)
+            }).rejects.toThrowError(
+                expect.objectContaining({
+                    name: "UserOperationExecutionError",
+                    details: expect.stringMatching(/(AA21|didn't pay prefund)/i)
+                })
+            )
+
+            // Should be able to send userOperation when there is sufficient prefund
+            await anvilClient.setBalance({
+                address: client.account.address,
+                value: requiedPrefund
+            })
+
+            const hash = await client.sendUserOperation(op)
+
+            await new Promise((resolve) => setTimeout(resolve, 1500))
+
+            const receipt = await client.waitForUserOperationReceipt({ hash })
+            expect(receipt.success).toEqual(true)
+        })
+
+        test("Should send userOp with 7702Auth", async () => {
+            const privateKey = generatePrivateKey()
+            const smartAccountClient = await getSmartAccountClient({
+                entryPointVersion,
+                privateKey,
+                anvilRpc,
+                altoRpc,
+                use7702: true
+            })
+
+            const owner = privateKeyToAccount(privateKey)
+
+            const authorization = await owner.signAuthorization({
+                chainId: foundry.id,
+                nonce: await publicClient.getTransactionCount({
+                    address: owner.address
+                }),
+                contractAddress:
+                    getSimple7702AccountImplementationAddress(entryPointVersion)
+            })
+
+            const hash = await smartAccountClient.sendUserOperation({
+                calls: [
+                    {
+                        to: zeroAddress,
+                        data: "0x",
+                        value: 0n
+                    }
+                ],
+                authorization
+            })
+
+            await new Promise((resolve) => setTimeout(resolve, 1500))
+
+            const receipt =
+                await smartAccountClient.waitForUserOperationReceipt({ hash })
+
+            expect(receipt.success)
+        })
+
+        test("Should AA25 throw when sending userOp with nonce + 1", async () => {
+            const client = await getSmartAccountClient({
+                entryPointVersion,
+                anvilRpc,
+                altoRpc
+            })
+
+            const entryPointContract = getContract({
+                address: entryPoint,
+                abi: getEntryPointAbi(entryPointVersion),
+                client: {
+                    public: publicClient
+                }
+            })
+
+            // Get current nonce
+            const currentNonce = (await entryPointContract.read.getNonce([
+                client.account.address,
+                0n // nonce key
+            ])) as bigint
+
+            // Try to send with nonce + 1 (should fail)
+            await expect(async () => {
+                await client.sendUserOperation({
+                    calls: [
+                        {
+                            to: TO_ADDRESS,
+                            value: VALUE,
+                            data: "0x"
+                        }
+                    ],
+                    nonce: currentNonce + 1n
+                })
+            }).rejects.toThrowError(
+                expect.objectContaining({
+                    name: "UserOperationExecutionError",
+                    details: expect.stringMatching(
+                        /(AA25|Invalid account nonce)/i
+                    )
+                })
+            )
+        })
+
+        test.each([
+            {
+                sponsored: false,
+                testName: "Should bundle 10 userOps sent sequentially"
+            },
+            {
+                sponsored: true,
+                testName: "Should bundle 10 sponsored userOps sent sequentially"
+            }
+        ])("$testName", async ({ sponsored }) => {
+            // Skip for v0.6 - doesn't support queued userOps
+            if (entryPointVersion === "0.6") {
+                return
+            }
+
+            const client = await getSmartAccountClient({
+                entryPointVersion,
+                anvilRpc,
+                altoRpc
+            })
+
+            // Deploy the account and wait for confirmation
+            const deployHash = await client.sendUserOperation({
+                calls: [
+                    {
+                        to: client.account.address,
+                        value: 0n,
+                        data: "0x"
+                    }
+                ]
+            })
+            await client.waitForUserOperationReceipt({ hash: deployHash })
+
+            // Now switch to manual bundling for the test
+            await setBundlingMode({
+                mode: "manual",
+                altoRpc
+            })
+
+            const entryPointContract = getContract({
+                address: entryPoint,
+                abi: getEntryPointAbi(entryPointVersion),
+                client: {
+                    public: publicClient
+                }
+            })
+
+            // Get starting nonce after deployment
+            const startNonce = (await entryPointContract.read.getNonce([
+                client.account.address,
+                0n // nonce key
+            ])) as bigint
+
+            const userOpHashes: Hex[] = []
+            const numOps = 10
+
+            // Send 10 userOps with incremental nonces (with or without paymaster)
+            for (let i = 0; i < numOps; i++) {
+                const userOpHash = await client.sendUserOperation({
+                    calls: [
+                        {
+                            to: TO_ADDRESS,
+                            value: parseEther("0.001"),
+                            data: "0x"
+                        }
+                    ],
+                    nonce: startNonce + BigInt(i),
+                    ...(sponsored
+                        ? {
+                              paymaster: paymaster,
+                              paymasterVerificationGasLimit: 100_000n,
+                              paymasterPostOpGasLimit: 50_000n
+                          }
+                        : {})
+                })
+                userOpHashes.push(userOpHash)
+            }
+
+            // Bundle them all
+            await sendBundleNow({ altoRpc })
+
+            // Verify all receipts are successful
+            const receipts = await Promise.all(
+                userOpHashes.map(async (hash) => {
+                    const receipt = await client.waitForUserOperationReceipt({
+                        hash
+                    })
+                    return receipt
+                })
+            )
+
+            // Verify all ops were included
+            expect(receipts.every((receipt) => receipt.success)).toEqual(true)
+
+            // Verify final nonce is correct
+            const finalNonce = (await entryPointContract.read.getNonce([
+                client.account.address,
+                0n
+            ])) as bigint
+            expect(finalNonce).toEqual(startNonce + BigInt(numOps))
+
+            // If sponsored, verify paymaster was used.
+            if (sponsored) {
+                expect(
+                    receipts.every((receipt) => receipt.paymaster === paymaster)
+                ).toEqual(true)
+            }
         })
     }
 )

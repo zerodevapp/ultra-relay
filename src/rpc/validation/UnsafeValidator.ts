@@ -2,13 +2,11 @@ import type { GasPriceManager } from "@alto/handlers"
 import type {
     InterfaceValidator,
     StateOverrides,
-    UserOperationV06,
-    UserOperationV07,
+    UserOperation06,
+    UserOperation07,
     ValidationResult,
-    ValidationResultV06,
-    ValidationResultV07,
-    ValidationResultWithAggregationV06,
-    ValidationResultWithAggregationV07
+    ValidationResult06,
+    ValidationResult07
 } from "@alto/types"
 import {
     type Address,
@@ -20,21 +18,16 @@ import {
     type StorageMap,
     type UserOperation,
     ValidationErrors,
-    type ValidationResultWithAggregation,
-    entryPointExecutionErrorSchemaV06,
-    entryPointExecutionErrorSchemaV07
+    entryPointExecutionErrorSchema06,
+    entryPointExecutionErrorSchema07
 } from "@alto/types"
 import type { Logger, Metrics } from "@alto/utils"
-import {
-    calcPreVerificationGas,
-    calcVerificationGasAndCallGasLimit,
-    isVersion06,
-    isVersion07
-} from "@alto/utils"
+import { isVersion06 } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
     BaseError,
     ContractFunctionExecutionError,
+    type StateOverride,
     getContract,
     pad,
     slice,
@@ -42,9 +35,10 @@ import {
     zeroAddress
 } from "viem"
 import { fromZodError } from "zod-validation-error"
+import type { AltoConfig } from "../../createConfig"
+import { getEip7702DelegationOverrides } from "../../utils/eip7702"
 import { GasEstimationHandler } from "../estimation/gasEstimationHandler"
 import type { SimulateHandleOpResult } from "../estimation/types"
-import type { AltoConfig } from "../../createConfig"
 
 export class UnsafeValidator implements InterfaceValidator {
     config: AltoConfig
@@ -71,7 +65,10 @@ export class UnsafeValidator implements InterfaceValidator {
                 level: config.logLevel
             }
         )
-        this.gasEstimationHandler = new GasEstimationHandler(config)
+        this.gasEstimationHandler = new GasEstimationHandler(
+            config,
+            gasPriceManager
+        )
     }
 
     async getSimulationResult(
@@ -79,12 +76,10 @@ export class UnsafeValidator implements InterfaceValidator {
         errorResult: unknown,
         logger: Logger,
         simulationType: "validation" | "execution"
-    ): Promise<
-        ValidationResult | ValidationResultWithAggregation | ExecutionResult
-    > {
+    ): Promise<ValidationResult | ExecutionResult> {
         const entryPointExecutionErrorSchema = isVersion06
-            ? entryPointExecutionErrorSchemaV06
-            : entryPointExecutionErrorSchemaV07
+            ? entryPointExecutionErrorSchema06
+            : entryPointExecutionErrorSchema07
 
         const entryPointErrorSchemaParsing =
             entryPointExecutionErrorSchema.safeParse(errorResult)
@@ -151,56 +146,96 @@ export class UnsafeValidator implements InterfaceValidator {
         return simulationResult
     }
 
-    async validateHandleOp({
-        userOperation,
-        entryPoint,
-        queuedUserOperations,
-        stateOverrides
-    }: {
-        userOperation: UserOperation
+    async validateHandleOp(args: {
+        userOp: UserOperation
         entryPoint: Address
-        queuedUserOperations: UserOperation[]
+        queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }): Promise<SimulateHandleOpResult<"execution">> {
+    }) {
+        const { userOp, entryPoint, queuedUserOps, stateOverrides } = args
         const error = await this.gasEstimationHandler.validateHandleOp({
-            userOperation,
-            queuedUserOperations,
+            userOp,
+            queuedUserOps,
             entryPoint,
             targetAddress: zeroAddress,
             targetCallData: "0x",
             stateOverrides
         })
 
+        let { callGasLimit, verificationGasLimit } = userOp
+        let paymasterVerificationGasLimit =
+            "paymasterVerificationGasLimit" in userOp
+                ? userOp.paymasterVerificationGasLimit
+                : null
+        // Check if userOperation passes without estimation balance overrides (will throw error if it fails validation)
+        // the errors we are looking for are:
+        // 1. AA31 paymaster deposit too low
+        // 2. AA21 didn't pay prefund
         if (error.result === "failed") {
-            let errorCode: number = ExecutionErrors.UserOperationReverted
+            const data = error.data.toString()
 
-            if (error.data.toString().includes("AA23")) {
-                errorCode = ValidationErrors.SimulateValidation
+            if (data.includes("AA31") || data.includes("AA21")) {
+                throw new RpcError(
+                    `UserOperation reverted during simulation with reason: ${error.data}`,
+                    ExecutionErrors.UserOperationReverted
+                )
             }
 
-            throw new RpcError(
-                `UserOperation reverted during simulation with reason: ${error.data}`,
-                errorCode
+            this.metrics.secondValidationFailed.inc()
+
+            this.logger.warn(
+                { data },
+                "Second validation during eth_estimateUserOperationGas led to a failure"
             )
+
+            // we always have to double the call gas limits as other gas limits happen
+            // before we even get to callGasLimit
+            callGasLimit *= 2n
+            const isPaymasterError =
+                data.includes("AA33") || data.includes("AA36")
+
+            const isVerificationError =
+                data.includes("AA23") ||
+                data.includes("AA13") ||
+                data.includes("AA26") ||
+                data.includes("AA40") ||
+                data.includes("AA41")
+
+            if (isPaymasterError && paymasterVerificationGasLimit) {
+                // paymasterVerificationGasLimit out of gas errors
+                paymasterVerificationGasLimit *= 2n
+            } else if (isVerificationError) {
+                // verificationGasLimit out of gas errors
+                verificationGasLimit *= 2n
+                // we need to increase paymaster fields because they will be
+                // caught after verification gas limit errors
+                if (paymasterVerificationGasLimit) {
+                    paymasterVerificationGasLimit *= 2n
+                }
+            }
         }
 
-        return error as SimulateHandleOpResult<"execution">
+        return {
+            callGasLimit: callGasLimit,
+            verificationGasLimit: verificationGasLimit,
+            paymasterVerificationGasLimit: paymasterVerificationGasLimit,
+            paymasterPostOpGasLimit:
+                "paymasterPostOpGasLimit" in userOp
+                    ? userOp.paymasterPostOpGasLimit
+                    : null
+        }
     }
 
-    async getExecutionResult({
-        userOperation,
-        entryPoint,
-        queuedUserOperations,
-        stateOverrides
-    }: {
-        userOperation: UserOperation
+    async getExecutionResult(args: {
+        userOp: UserOperation
         entryPoint: Address
-        queuedUserOperations: UserOperation[]
+        queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }): Promise<SimulateHandleOpResult<"execution">> {
+    }): Promise<SimulateHandleOpResult> {
+        const { userOp, entryPoint, queuedUserOps, stateOverrides } = args
         const error = await this.gasEstimationHandler.simulateHandleOp({
-            userOperation,
-            queuedUserOperations,
+            userOp,
+            queuedUserOps,
             entryPoint,
             targetAddress: zeroAddress,
             targetCallData: "0x",
@@ -212,30 +247,35 @@ export class UnsafeValidator implements InterfaceValidator {
 
             if (error.data.toString().includes("AA23")) {
                 errorCode = ValidationErrors.SimulateValidation
+
+                return {
+                    result: "failed",
+                    data: error.data,
+                    code: errorCode
+                }
             }
 
-            throw new RpcError(
-                `UserOperation reverted during simulation with reason: ${error.data}`,
-                errorCode
-            )
+            return {
+                result: "failed",
+                data: `UserOperation reverted during simulation with reason: ${error.data}`,
+                code: errorCode
+            }
         }
 
-        return error as SimulateHandleOpResult<"execution">
+        return error
     }
 
-    async getValidationResultV06({
-        userOperation,
-        entryPoint
-    }: {
-        userOperation: UserOperationV06
+    async getValidationResultV06(args: {
+        userOp: UserOperation06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResultV06 | ValidationResultWithAggregationV06) & {
+        ValidationResult06 & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
+        const { userOp, entryPoint } = args
         const entryPointContract = getContract({
             address: entryPoint,
             abi: EntryPointV06Abi,
@@ -244,8 +284,16 @@ export class UnsafeValidator implements InterfaceValidator {
             }
         })
 
+        let eip7702Override: StateOverride | undefined
+        if (userOp.eip7702Auth) {
+            eip7702Override = getEip7702DelegationOverrides([userOp])
+        }
+
         const simulateValidationPromise = entryPointContract.simulate
-            .simulateValidation([userOperation])
+            .simulateValidation(
+                [userOp],
+                eip7702Override ? { stateOverride: eip7702Override } : {}
+            )
             .catch((e) => {
                 if (e instanceof Error) {
                     return e
@@ -254,9 +302,9 @@ export class UnsafeValidator implements InterfaceValidator {
             })
 
         const runtimeValidationPromise =
-            this.gasEstimationHandler.gasEstimatorV06.simulateHandleOpV06({
+            this.gasEstimationHandler.gasEstimator06.simulateHandleOp06({
                 entryPoint,
-                userOperation,
+                userOp,
                 useCodeOverride: false, // disable code override so that call phase reverts aren't caught
                 targetAddress: zeroAddress,
                 targetCallData: "0x"
@@ -268,11 +316,11 @@ export class UnsafeValidator implements InterfaceValidator {
 
         const validationResult = {
             ...((await this.getSimulationResult(
-                isVersion06(userOperation),
+                isVersion06(userOp),
                 simulateValidationResult,
                 this.logger,
                 "validation"
-            )) as ValidationResultV06 | ValidationResultWithAggregationV06),
+            )) as ValidationResult06),
             storageMap: {}
         }
 
@@ -392,29 +440,27 @@ export class UnsafeValidator implements InterfaceValidator {
         )
     }
 
-    async getValidationResultV07({
-        userOperation,
-        queuedUserOperations,
-        entryPoint
-    }: {
-        userOperation: UserOperationV07
-        queuedUserOperations: UserOperationV07[]
+    async getValidationResultV07(args: {
+        userOp: UserOperation07
+        queuedUserOps: UserOperation07[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResultV07 | ValidationResultWithAggregationV07) & {
+        ValidationResult07 & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        const { simulateValidationResult } =
-            await this.gasEstimationHandler.gasEstimatorV07.simulateValidation({
+        const { userOp, queuedUserOps, entryPoint } = args
+
+        const simulateValidationResult =
+            await this.gasEstimationHandler.gasEstimator07.simulateValidation({
                 entryPoint,
-                userOperation,
-                queuedUserOperations
+                userOp,
+                queuedUserOps
             })
 
-        if (simulateValidationResult.status === "failed") {
+        if (simulateValidationResult.result === "failed") {
             throw new RpcError(
                 `UserOperation reverted with reason: ${
                     simulateValidationResult.data as string
@@ -424,7 +470,7 @@ export class UnsafeValidator implements InterfaceValidator {
         }
 
         const validationResult =
-            simulateValidationResult.data as ValidationResultWithAggregationV07
+            simulateValidationResult.data as ValidationResult07
 
         const mergedValidation = this.mergeValidationDataValues(
             validationResult.returnInfo.accountValidationData,
@@ -441,27 +487,27 @@ export class UnsafeValidator implements InterfaceValidator {
             },
             senderInfo: {
                 ...validationResult.senderInfo,
-                addr: userOperation.sender
+                addr: userOp.sender
             },
             factoryInfo:
-                userOperation.factory && validationResult.factoryInfo
+                userOp.factory && validationResult.factoryInfo
                     ? {
                           ...validationResult.factoryInfo,
-                          addr: userOperation.factory
+                          addr: userOp.factory
                       }
                     : undefined,
             paymasterInfo:
-                userOperation.paymaster && validationResult.paymasterInfo
+                userOp.paymaster && validationResult.paymasterInfo
                     ? {
                           ...validationResult.paymasterInfo,
-                          addr: userOperation.paymaster
+                          addr: userOp.paymaster
                       }
                     : undefined,
             aggregatorInfo: validationResult.aggregatorInfo,
             storageMap: {}
         }
 
-        // this.validateStorageAccessList(userOperation, res, accessList)
+        // this.validateStorageAccessList(userOp, res, accessList)
 
         if (res.returnInfo.accountSigFailed) {
             throw new RpcError(
@@ -500,126 +546,50 @@ export class UnsafeValidator implements InterfaceValidator {
         return res
     }
 
-    getValidationResult({
-        userOperation,
-        queuedUserOperations,
-        entryPoint,
-        codeHashes
-    }: {
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+    getValidationResult(args: {
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResult | ValidationResultWithAggregation) & {
+        ValidationResult & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        if (isVersion06(userOperation)) {
+        const { userOp, queuedUserOps, entryPoint, codeHashes } = args
+        if (isVersion06(userOp)) {
             return this.getValidationResultV06({
-                userOperation,
+                userOp,
                 entryPoint,
                 codeHashes
             })
         }
         return this.getValidationResultV07({
-            userOperation,
-            queuedUserOperations: queuedUserOperations as UserOperationV07[],
+            userOp,
+            queuedUserOps: queuedUserOps as UserOperation07[],
             entryPoint
         })
     }
 
-    async validatePreVerificationGas({
-        userOperation,
-        entryPoint
-    }: {
-        userOperation: UserOperation
-        entryPoint: Address
-    }) {
-        const preVerificationGas = await calcPreVerificationGas({
-            config: this.config,
-            userOperation,
-            entryPoint,
-            gasPriceManager: this.gasPriceManager,
-            validate: true
-        })
-
-        if (preVerificationGas > userOperation.preVerificationGas) {
-            throw new RpcError(
-                `preVerificationGas is not enough, required: ${preVerificationGas}, got: ${userOperation.preVerificationGas}`,
-                ValidationErrors.SimulateValidation
-            )
-        }
-    }
-
-    async validateUserOperation({
-        shouldCheckPrefund,
-        userOperation,
-        queuedUserOperations,
-        entryPoint
-    }: {
-        shouldCheckPrefund: boolean
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+    async validateUserOp(args: {
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         _referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResult | ValidationResultWithAggregation) & {
+        ValidationResult & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
+        const { userOp, queuedUserOps, entryPoint } = args
         try {
             const validationResult = await this.getValidationResult({
-                userOperation,
-                queuedUserOperations,
+                userOp,
+                queuedUserOps,
                 entryPoint
             })
-
-            if (shouldCheckPrefund) {
-                const prefund = validationResult.returnInfo.prefund
-
-                const { verificationGasLimit, callGasLimit } =
-                    calcVerificationGasAndCallGasLimit(
-                        userOperation,
-                        {
-                            preOpGas: validationResult.returnInfo.preOpGas,
-                            paid: validationResult.returnInfo.prefund
-                        },
-                        this.config.chainId
-                    )
-
-                let mul = 1n
-
-                if (
-                    isVersion06(userOperation) &&
-                    userOperation.paymasterAndData
-                ) {
-                    mul = 3n
-                }
-
-                if (
-                    isVersion07(userOperation) &&
-                    userOperation.paymaster === "0x"
-                ) {
-                    mul = 3n
-                }
-
-                const requiredPreFund =
-                    callGasLimit +
-                    verificationGasLimit * mul +
-                    userOperation.preVerificationGas
-
-                if (requiredPreFund > prefund) {
-                    throw new RpcError(
-                        `prefund is not enough, required: ${requiredPreFund}, got: ${prefund}`,
-                        ValidationErrors.SimulateValidation
-                    )
-                }
-
-                // TODO prefund should be greater than it costs us to add it to mempool
-            }
 
             this.metrics.userOperationsValidationSuccess.inc()
 

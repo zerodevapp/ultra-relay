@@ -5,10 +5,11 @@ import {
     SenderCreatorAbi,
     type StakeInfo,
     type StorageMap,
-    type UserOperationV07,
+    type UserOperation07,
     ValidationErrors,
-    type ValidationResultV07
+    type ValidationResult07
 } from "@alto/types"
+import { areAddressesEqual, isVersion08 } from "@alto/utils"
 import type { Abi, AbiFunction } from "abitype"
 // This file contains references to validation rules, in the format [xxx-###]
 // where xxx is OP/STO/COD/EP/SREP/EREP/UREP/ALT, and ### is a number
@@ -24,7 +25,6 @@ import {
     toFunctionSelector
 } from "viem"
 import type { BundlerTracerResult } from "./BundlerCollectorTracerV07"
-import { areAddressesEqual, isVersion08 } from "@alto/utils"
 
 interface CallEntry {
     to: string
@@ -48,7 +48,7 @@ const abi = [...SenderCreatorAbi, ...EntryPointV07Abi, ...PaymasterAbi] as Abi
 
 // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
 const functionSignatureToMethodName = (hash: any) => {
-    let functionName: string | undefined = undefined
+    let functionName: string | undefined
     for (const item of abi) {
         const signature = toFunctionSelector(item as AbiFunction)
         if (signature === hash) {
@@ -65,7 +65,7 @@ const functionSignatureToMethodName = (hash: any) => {
 
 export function isStaked(entStake?: StakeInfo): boolean {
     return Boolean(
-        entStake && 1n <= entStake.stake && 1n <= entStake.unstakeDelaySec
+        entStake && entStake.stake >= 1n && entStake.unstakeDelaySec >= 1n
     )
 }
 
@@ -415,22 +415,22 @@ const callsFromEntryPointMethodSigs: { [key: string]: string } = {
 
 /**
  * parse collected simulation traces and revert if they break our rules
- * @param userOperation the userOperation that was used in this simulation
+ * @param userOp the userOperation that was used in this simulation
  * @param tracerResults the tracer return value
  * @param validationResult output from simulateValidation
  * @param entryPoint the entryPoint that hosted the "simulatedValidation" traced call.
  * @return list of contract addresses referenced by this UserOp
  */
 export function tracerResultParserV07(
-    userOperation: UserOperationV07,
+    userOp: UserOperation07,
     tracerResults: BundlerTracerResult,
-    validationResult: ValidationResultV07,
+    validationResult: ValidationResult07,
     entryPointAddress: Address
 ): [string[], StorageMap] {
     // todo: block access to no-code addresses (might need update to tracer)
 
     // opcodes from [OP-011]
-    const bannedOpCodes = isVersion08(userOperation, entryPointAddress)
+    const bannedOpCodes = isVersion08(userOp, entryPointAddress)
         ? new Set([
               "GAS",
               "NUMBER",
@@ -508,7 +508,7 @@ export function tracerResultParserV07(
         )
     }
 
-    const sender = userOperation.sender.toLowerCase()
+    const sender = userOp.sender.toLowerCase()
     // stake info per "number" level (factory, sender, paymaster)
     // we only use stake info if we notice a memory reference that require stake
     const stakeInfoEntities: StakeInfoEntities = {
@@ -606,7 +606,7 @@ export function tracerResultParserV07(
 
         for (const [addr, { reads, writes }] of Object.entries(access)) {
             // testing read/write access on contract "addr"
-            if (areAddressesEqual(addr, userOperation.sender)) {
+            if (areAddressesEqual(addr, userOp.sender)) {
                 // allowed to access sender's storage
                 // [STO-010]
                 continue
@@ -633,19 +633,16 @@ export function tracerResultParserV07(
                 // slot associated with sender is allowed (e.g. token.balanceOf(sender)
                 // but during initial UserOp (where there is an initCode), it is allowed only for staked entity
                 if (associatedWith(slot, sender, entitySlots)) {
-                    if (userOperation.factory) {
+                    if (userOp.factory) {
                         // special case: account.validateUserOp is allowed to use assoc storage if factory is staked.
                         // [STO-022], [STO-021]
 
                         if (
                             !(
-                                (areAddressesEqual(
-                                    entityAddr,
-                                    userOperation.sender
-                                ) ||
+                                (areAddressesEqual(entityAddr, userOp.sender) ||
                                     areAddressesEqual(
                                         entityAddr,
-                                        userOperation.paymaster ?? ""
+                                        userOp.paymaster ?? ""
                                     )) &&
                                 isStaked(stakeInfoEntities.factory)
                             )
@@ -779,7 +776,7 @@ export function tracerResultParserV07(
             )
         }
 
-        let illegalEntryPointCodeAccess: string | undefined = undefined
+        let illegalEntryPointCodeAccess: string | undefined
         for (const addr of Object.keys(currentNumLevel.extCodeAccessInfo)) {
             if (addr === entryPointAddress) {
                 illegalEntryPointCodeAccess =

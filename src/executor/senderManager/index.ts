@@ -1,7 +1,7 @@
-import { Account } from "viem"
-import { AltoConfig } from "../../createConfig"
+import type { Metrics } from "@alto/utils"
+import type { Account } from "viem"
+import type { AltoConfig } from "../../createConfig"
 import { createMemorySenderManager } from "./createMemorySenderManager"
-import { Metrics } from "@alto/utils"
 import { createRedisSenderManager } from "./createRedisSenderManager"
 
 export const getAvailableWallets = (config: AltoConfig) => {
@@ -25,6 +25,7 @@ export const getAvailableWallets = (config: AltoConfig) => {
 export type SenderManager = {
     getAllWallets: () => Account[]
     getWallet: () => Promise<Account>
+    lockWallet?: (wallet: Account) => Promise<void>
     markWalletProcessed: (wallet: Account) => Promise<void>
     getActiveWallets: () => Account[]
 }
@@ -33,8 +34,12 @@ export const getSenderManager = async ({
     config,
     metrics
 }: { config: AltoConfig; metrics: Metrics }): Promise<SenderManager> => {
-    if (config.redisSenderManagerUrl) {
-        return await createRedisSenderManager({ config, metrics })
+    if (config.enableHorizontalScaling && config.redisEndpoint) {
+        return await createRedisSenderManager({
+            config,
+            metrics,
+            redisEndpoint: config.redisEndpoint
+        })
     }
 
     return createMemorySenderManager({ config, metrics })
