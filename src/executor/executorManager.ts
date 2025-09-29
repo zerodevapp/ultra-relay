@@ -264,7 +264,7 @@ export class ExecutorManager {
             // Free wallet as no bundle was sent.
             await this.senderManager.markWalletProcessed(wallet)
 
-            this.metrics.userOpsSubmitted
+            this.metrics.userOperationsSubmitted
                 .labels({ status: "failed" })
                 .inc(rejectedUserOps.length)
 

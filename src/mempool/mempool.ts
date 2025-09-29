@@ -104,7 +104,7 @@ export class Mempool {
             })
         )
 
-        this.metrics.userOpsSubmitted
+        this.metrics.userOperationsSubmitted
             .labels({ status: "success" })
             .inc(userOps.length)
     }
@@ -149,7 +149,7 @@ export class Mempool {
             })
         )
 
-        this.metrics.userOpsResubmitted.inc(userOps.length)
+        this.metrics.userOperationsResubmitted.inc(userOps.length)
     }
 
     async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {

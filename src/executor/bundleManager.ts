@@ -227,7 +227,7 @@ export class BundleManager {
                         "user op failed onchain"
                     )
 
-                    this.metrics.userOpsOnChain
+                    this.metrics.userOperationsOnChain
                         .labels({ status: "reverted" })
                         .inc(1)
                 }
@@ -292,7 +292,7 @@ export class BundleManager {
         })
 
         // Log metric
-        this.metrics.userOpsOnChain.labels({ status: "included" }).inc()
+        this.metrics.userOperationsOnChain.labels({ status: "included" }).inc()
 
         // Emit appropriate event
         if (userOpReceipt.success) {
@@ -311,8 +311,8 @@ export class BundleManager {
         }
 
         // Track metrics
-        this.metrics.userOpInclusionDuration.observe(inclusionTimeMs / 1000)
-        this.metrics.userOpsSubmissionAttempts.observe(submissionAttempts)
+        this.metrics.userOperationInclusionDuration.observe(inclusionTimeMs / 1000)
+        this.metrics.userOperationsSubmissionAttempts.observe(submissionAttempts)
 
         // Update reputation
         const accountDeployed = this.checkAccountDeployment(
@@ -394,7 +394,7 @@ export class BundleManager {
                 )
 
                 // Update metrics
-                this.metrics.userOpsOnChain.labels({ status: "frontran" }).inc()
+                this.metrics.userOperationsOnChain.labels({ status: "frontran" }).inc()
 
                 // userOp was bundled by another bundler
                 return "frontran"

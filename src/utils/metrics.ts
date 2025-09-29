@@ -46,7 +46,7 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOpsInMempool = new Gauge({
+    const userOperationsInMempool = new Gauge({
         name: "ultra_relay_user_operations_in_mempool_count",
         help: "Number of user operations in mempool",
         labelNames: ["status"] as const,
@@ -67,14 +67,14 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOpsOnChain = new Counter({
+    const userOperationsOnChain = new Counter({
         name: "ultra_relay_user_operations_on_chain_total",
         help: "Number of user operations on-chain by status",
         labelNames: ["status"] as const,
         registers
     })
 
-    const userOpsSubmitted = new Counter({
+    const userOperationsSubmitted = new Counter({
         name: "ultra_relay_user_operations_submitted_total",
         help: "Number of user operations bundles submitted on-chain",
         labelNames: ["status"] as const,
@@ -107,28 +107,28 @@ export function createMetrics(registry: Registry, register = true) {
     })
 
 
-    const userOpsReceived = new Counter({
+    const userOperationsReceived = new Counter({
         name: "ultra_relay_user_operations_received_total",
         help: "Number of user operations received",
         labelNames: ["status", "type"] as const,
         registers
     })
 
-    const userOpsValidationSuccess = new Counter({
+    const userOperationsValidationSuccess = new Counter({
         name: "ultra_relay_user_operations_validation_success_total",
         help: "Number of user operations successfully validated",
         labelNames: [] as const,
         registers
     })
 
-    const userOpsValidationFailure = new Counter({
+    const userOperationsValidationFailure = new Counter({
         name: "ultra_relay_user_operations_validation_failure_total",
         help: "Number of user operations failed to validate",
         labelNames: [] as const,
         registers
     })
 
-    const userOpInclusionDuration = new Histogram({
+    const userOperationInclusionDuration = new Histogram({
         name: "ultra_relay_user_operation_inclusion_duration_seconds",
         help: "Duration of user operation inclusion from first submission to inclusion on-chain",
         labelNames: [] as const,
@@ -162,14 +162,14 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOpsResubmitted = new Counter({
+    const userOperationsResubmitted = new Counter({
         name: "ultra_relay_user_operations_resubmitted_total",
         help: "Number of user operations resubmitted",
         labelNames: [] as const,
         registers
     })
 
-    const userOpsSubmissionAttempts = new Histogram({
+    const userOperationsSubmissionAttempts = new Histogram({
         name: "ultra_relay_user_operations_attempts_before_inclusion",
         help: "Number of submission attempts needed before a user operation was included on-chain",
         labelNames: [] as const,
@@ -218,7 +218,7 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const altoSecondValidationFailed = new Counter({
+    const secondValidationFailed = new Counter({
         name: "ultra_relay_second_validation_failed",
         help: "Number of times alto's second estimation failed during eth_estimateUserOperationGas and we returned 2x gas limits",
         labelNames: [] as const,
@@ -228,29 +228,29 @@ export function createMetrics(registry: Registry, register = true) {
     return {
         httpRequests,
         httpRequestsDuration,
-        userOpsInMempool,
+        userOperationsInMempool,
         walletsAvailable,
         walletsTotal,
-        userOpsOnChain,
-        userOpsSubmitted,
+        userOperationsOnChain,
+        userOperationsSubmitted,
         bundlesIncluded,
         bundlesSubmitted,
         transactionCosts,
-        userOpsReceived,
-        userOpsValidationSuccess,
-        userOpsValidationFailure,
-        userOpInclusionDuration,
+        userOperationsReceived,
+        userOperationsValidationSuccess,
+        userOperationsValidationFailure,
+        userOperationInclusionDuration,
         verificationGasLimitEstimationTime,
         verificationGasLimitEstimationCount,
         replacedTransactions,
-        userOpsResubmitted,
+        userOperationsResubmitted,
         utilityWalletBalance,
         utilityWalletInsufficientBalance,
         executorWalletsBalances,
         executorWalletsMinBalance,
         emittedOpEvents,
         walletsProcessingTime,
-        userOpsSubmissionAttempts,
-        altoSecondValidationFailed
+        userOperationsSubmissionAttempts,
+        secondValidationFailed
     }
 }

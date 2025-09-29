@@ -63,7 +63,7 @@ export const boostSendUserOperationHandler = createMethodHandler({
             status = "rejected"
             throw error
         } finally {
-            rpcHandler.metrics.userOpsReceived
+            rpcHandler.metrics.userOperationsReceived
                 .labels({
                     status,
                     type: userOp.eip7702Auth ? "7702" : "boost"
