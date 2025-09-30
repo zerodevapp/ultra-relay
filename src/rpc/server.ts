@@ -101,7 +101,10 @@ export class Server {
 
         this.fastify.addHook("onResponse", (request, reply) => {
             const ignoredRoutes = ["/health", "/metrics"]
-            if (request.routeOptions.url && ignoredRoutes.includes(request.routeOptions.url)) {
+            if (
+                request.routeOptions.url &&
+                ignoredRoutes.includes(request.routeOptions.url)
+            ) {
                 return
             }
 

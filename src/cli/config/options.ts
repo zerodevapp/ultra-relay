@@ -101,7 +101,8 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         default: "20000000"
     },
     "max-bundle-count": {
-        description: "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+        description:
+            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
         type: "number",
         require: false
     },

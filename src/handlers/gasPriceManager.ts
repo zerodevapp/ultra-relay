@@ -12,7 +12,7 @@ import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 import { ArbitrumManager } from "./arbitrumGasPriceManager"
 import { MantleManager } from "./mantleGasPriceManager"
 import { OptimismManager } from "./optimismManager"
-import { AbstractManager } from "./abstractGasPriceManager";
+import { AbstractManager } from "./abstractGasPriceManager"
 
 export class GasPriceManager {
     private readonly config: AltoConfig

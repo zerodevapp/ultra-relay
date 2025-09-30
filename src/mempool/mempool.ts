@@ -387,6 +387,27 @@ export class Mempool {
                 return [false, `${message}, bump the gas price by minimum 10%`]
             }
 
+            this.logger.info(
+                {
+                    event: "userOpReplaced",
+                    reason: "Higher gas fees",
+                    replacedUserOpHash: userOpInfo.userOpHash,
+                    newUserOpHash: userOpHash,
+                    sender: userOp.sender,
+                    oldFees: {
+                        maxFeePerGas: conflictingUserOp.maxFeePerGas.toString(),
+                        maxPriorityFeePerGas:
+                            conflictingUserOp.maxPriorityFeePerGas.toString()
+                    },
+                    newFees: {
+                        maxFeePerGas: userOp.maxFeePerGas.toString(),
+                        maxPriorityFeePerGas:
+                            userOp.maxPriorityFeePerGas.toString()
+                    }
+                },
+                `Replacing user operation ${userOpInfo.userOpHash} due to higher gas fees.`
+            )
+
             await this.reputationManager.replaceUserOpSeenStatus(
                 conflictingUserOp,
                 entryPoint
@@ -486,6 +507,19 @@ export class Mempool {
             paymasterStatus === ReputationStatuses.banned ||
             factoryStatus === ReputationStatuses.banned
         ) {
+            this.logger.warn(
+                {
+                    event: "userOpSkipped",
+                    reason: "Entity banned",
+                    userOpHash: userOpHash,
+                    sender: userOp.sender,
+                    paymaster: paymaster,
+                    factory: factory,
+                    paymasterStatus: paymasterStatus.toString(),
+                    factoryStatus: factoryStatus.toString()
+                },
+                `Skipping userOp ${userOpHash}: associated entity is banned.`
+            )
             return {
                 skip: true,
                 removeOutstanding: true,
@@ -502,12 +536,15 @@ export class Mempool {
             paymaster &&
             stakedEntityCount[paymaster] >= this.throttledEntityBundleCount
         ) {
-            this.logger.trace(
+            this.logger.info(
                 {
-                    paymaster,
-                    userOpHash
+                    event: "userOpSkipped",
+                    reason: "Paymaster throttled",
+                    userOpHash: userOpHash,
+                    sender: userOp.sender,
+                    paymaster: paymaster
                 },
-                "Throttled paymaster skipped"
+                `Skipping userOp ${userOpHash}: paymaster is throttled.`
             )
             return {
                 skip: true,
@@ -524,12 +561,15 @@ export class Mempool {
             factory &&
             stakedEntityCount[factory] >= this.throttledEntityBundleCount
         ) {
-            this.logger.trace(
+            this.logger.info(
                 {
-                    factory,
-                    userOpHash
+                    event: "userOpSkipped",
+                    reason: "Factory throttled",
+                    userOpHash: userOpHash,
+                    sender: userOp.sender,
+                    factory: factory
                 },
-                "Throttled factory skipped"
+                `Skipping userOp ${userOpHash}: factory is throttled.`
             )
             return {
                 skip: true,
@@ -816,6 +856,25 @@ export class Mempool {
                     gasUsed > maxGasLimit &&
                     currentBundle.userOps.length >= minOpsPerBundle
                 ) {
+                    this.logger.debug(
+                        {
+                            event: "userOpSkipped",
+                            reason: "Bundle gas limit exceeded",
+                            userOpHash: userOpInfo.userOpHash,
+                            userOpGas: (
+                                userOp.callGasLimit +
+                                userOp.verificationGasLimit
+                            ).toString(),
+                            currentBundleGas: (
+                                gasUsed -
+                                userOp.callGasLimit -
+                                userOp.verificationGasLimit
+                            ).toString(),
+                            maxBundleGas: maxGasLimit.toString()
+                        },
+                        `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle gas limit.`
+                    )
+
                     // Put the operation back in the store
                     await this.store.addOutstanding({ entryPoint, userOpInfo })
                     break

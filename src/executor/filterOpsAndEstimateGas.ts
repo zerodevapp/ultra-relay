@@ -319,7 +319,7 @@ export async function filterOpsAndEstimateGas({
             ({ userOpHash }) => !rejectedUserOpHashes.includes(userOpHash)
         )
         const rejectedUserOps = filterOpsResult.rejectedUserOps.map(
-            ({ userOpHash, revertReason }) => {
+            ({ userOpHash, revertReason }, opIndex) => {
                 const userOpInfo = userOps.find(
                     (op) => op.userOpHash === userOpHash
                 )
@@ -354,6 +354,18 @@ export async function filterOpsAndEstimateGas({
                     // If decoding fails, keep the raw hex
                     decodedReason = revertReason
                 }
+
+                logger.warn(
+                    {
+                        event: "userOpSimulationFailedInBundle",
+                        userOpHash: userOpInfo.userOpHash,
+                        sender: userOpInfo.userOp.sender,
+                        reason: decodedReason,
+                        opIndex: opIndex,
+                        bundleSize: userOps.length
+                    },
+                    `UserOp ${userOpInfo.userOpHash} failed simulation in bundle: ${decodedReason}`
+                )
 
                 return {
                     ...userOpInfo,

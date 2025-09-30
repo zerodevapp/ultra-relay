@@ -8,7 +8,12 @@ import type {
 } from "@alto/types"
 import type { GasPriceParameters } from "@alto/types"
 import { type Logger, type Metrics, scaleBigIntByPercent } from "@alto/utils"
-import { type Block, type Hex, type WatchBlocksReturnType, formatEther } from "viem"
+import {
+    type Block,
+    type Hex,
+    type WatchBlocksReturnType,
+    formatEther
+} from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
@@ -414,7 +419,9 @@ export class ExecutorManager {
                     // Track transaction costs for included bundles
                     await this.updateTransactionCostMetrics(
                         submittedBundle.transactionHash,
-                        submittedBundle.bundle.userOps.map((op) => op.userOpHash),
+                        submittedBundle.bundle.userOps.map(
+                            (op) => op.userOpHash
+                        ),
                         bundleStatus.status
                     )
                 }
@@ -430,7 +437,9 @@ export class ExecutorManager {
                     // Track transaction costs for reverted bundles
                     await this.updateTransactionCostMetrics(
                         submittedBundle.transactionHash,
-                        submittedBundle.bundle.userOps.map((op) => op.userOpHash),
+                        submittedBundle.bundle.userOps.map(
+                            (op) => op.userOpHash
+                        ),
                         bundleStatus.status
                     )
                 }
@@ -581,6 +590,18 @@ export class ExecutorManager {
         networkBaseFee: bigint
         reason: "gas_price" | "stuck"
     }): Promise<void> {
+        this.logger.warn(
+            {
+                event: "replacingStuckTx",
+                reason: reason,
+                oldTxHash: submittedBundle.transactionHash,
+                nonce: submittedBundle.transactionRequest.nonce,
+                executor: submittedBundle.executor.address,
+                submissionAttempts: submittedBundle.bundle.submissionAttempts
+            },
+            `Attempting to replace transaction ${submittedBundle.transactionHash} due to: ${reason}`
+        )
+
         const {
             bundle,
             executor,

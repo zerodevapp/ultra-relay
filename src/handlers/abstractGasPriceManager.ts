@@ -1,22 +1,22 @@
 // src/gas/abstractGasPriceManager.ts
-import type { AltoConfig } from "../createConfig";
-import { createMinMaxQueue, MinMaxQueue } from "../utils/minMaxQueue";
+import type { AltoConfig } from "../createConfig"
+import { createMinMaxQueue, MinMaxQueue } from "../utils/minMaxQueue"
 
 export class AbstractManager {
-  private pubdataPriceQueue: MinMaxQueue;
+    private pubdataPriceQueue: MinMaxQueue
 
-  constructor({ config }: { config: AltoConfig }) {
-    this.pubdataPriceQueue = createMinMaxQueue({
-      keyPrefix: "abstract-pubdata-price-queue",
-      config
-    });
-  }
+    constructor({ config }: { config: AltoConfig }) {
+        this.pubdataPriceQueue = createMinMaxQueue({
+            keyPrefix: "abstract-pubdata-price-queue",
+            config
+        })
+    }
 
-  public async getMinPubdataPrice(): Promise<bigint> {
-    return (await this.pubdataPriceQueue.getMinValue()) || 1n;
-  }
+    public async getMinPubdataPrice(): Promise<bigint> {
+        return (await this.pubdataPriceQueue.getMinValue()) || 1n
+    }
 
-  public savePubdataPrice(value: bigint) {
-    this.pubdataPriceQueue.saveValue(value);
-  }
+    public savePubdataPrice(value: bigint) {
+        this.pubdataPriceQueue.saveValue(value)
+    }
 }

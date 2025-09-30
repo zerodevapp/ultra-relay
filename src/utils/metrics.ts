@@ -106,7 +106,6 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-
     const userOperationsReceived = new Counter({
         name: "ultra_relay_user_operations_received_total",
         help: "Number of user operations received",

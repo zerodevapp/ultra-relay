@@ -114,9 +114,9 @@ export interface GasOverheads {
 
 const defaultOverHeads: GasOverheads = {
     tokensPerNonzeroByte: 4n,
-    fixedGasOverhead: 9830n,
+    fixedGasOverhead: 21000n,
     transactionGasStipend: 21000n,
-    perUserOp: 7260n,
+    perUserOp: 18300n,
     standardTokenGasCost: 4n,
     zeroByte: 4n,
     nonZeroByte: 16n,

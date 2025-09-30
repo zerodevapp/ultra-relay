@@ -60,7 +60,8 @@
     "exclude": [
         "./**/*.test.ts",
         "./lib/*",
-        "./node_modules/*"
+        "./node_modules/*",
+        "./esm/*"
     ],
     "tsc-alias": {
         "resolveFullPaths": true,

@@ -110,5 +110,5 @@ export function getAuthorizationStateOverrides({
 
 /** Integer-ceil division for bigint — equivalent to Math.ceil(a / b). */
 export function ceilDiv(a: bigint, b: bigint): bigint {
-    return (a + b - 1n) / b;
+    return (a + b - 1n) / b
 }

@@ -311,8 +311,12 @@ export class BundleManager {
         }
 
         // Track metrics
-        this.metrics.userOperationInclusionDuration.observe(inclusionTimeMs / 1000)
-        this.metrics.userOperationsSubmissionAttempts.observe(submissionAttempts)
+        this.metrics.userOperationInclusionDuration.observe(
+            inclusionTimeMs / 1000
+        )
+        this.metrics.userOperationsSubmissionAttempts.observe(
+            submissionAttempts
+        )
 
         // Update reputation
         const accountDeployed = this.checkAccountDeployment(
@@ -394,7 +398,9 @@ export class BundleManager {
                 )
 
                 // Update metrics
-                this.metrics.userOperationsOnChain.labels({ status: "frontran" }).inc()
+                this.metrics.userOperationsOnChain
+                    .labels({ status: "frontran" })
+                    .inc()
 
                 // userOp was bundled by another bundler
                 return "frontran"
