@@ -105,7 +105,6 @@ const getViemChain = ({
         if (chain.id === chainId) {
             return {
                 ...chain,
-                blockTime: chain.blockTime ?? args.blockTime,
                 rpcUrls: {
                     default: { http: [args.rpcUrl] },
                     public: { http: [args.rpcUrl] }
@@ -149,12 +148,10 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             symbol: "ETH",
             decimals: 18
         },
-        blockTime: args.blockTime,
         rpcUrls: {
             default: { http: [args.rpcUrl] },
             public: { http: [args.rpcUrl] }
-        },
-        experimental_preconfirmationTime: args.flashblocksPreconfirmationTime
+        }
     }
     const fetchOptions = args.rpcUrl.includes("tenderly")
         ? {

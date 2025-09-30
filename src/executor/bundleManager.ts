@@ -421,7 +421,7 @@ export class BundleManager {
                             blockWaitCount: blockWaitCount + 1
                         })
                     )
-                }, this.config.publicClient.chain.blockTime ?? 1_000)
+                }, this.config.blockTime ?? 1_000)
             })
         } catch (error) {
             this.logger.error(

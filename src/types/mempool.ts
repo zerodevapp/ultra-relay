@@ -1,7 +1,9 @@
 import type { HexData32, UserOpInfo } from "@alto/types"
 import type { Address, Prettify } from "viem"
-import type { EntryPointVersion } from "viem/account-abstraction"
+import type { EntryPointVersion as ViemEntryPointVersion } from "viem/account-abstraction"
 import type { Account } from "viem/accounts"
+
+export type EntryPointVersion = ViemEntryPointVersion | "0.8"
 
 export type SubmittedBundleInfo = {
     uid: string

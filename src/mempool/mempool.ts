@@ -4,6 +4,7 @@ import {
     type Address,
     EntryPointV06Abi,
     EntryPointV07Abi,
+    type EntryPointVersion,
     type InterfaceValidator,
     type ReferencedCodeHashes,
     type RejectedUserOp,
@@ -27,7 +28,6 @@ import {
     scaleBigIntByPercent
 } from "@alto/utils"
 import { type Hex, getAddress, getContract } from "viem"
-import type { EntryPointVersion } from "viem/account-abstraction"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import type { AltoConfig } from "../createConfig"
 import { calculateAA95GasFloor } from "../executor/utils"

@@ -32,9 +32,6 @@
             },
             "style": {
                 "useNamingConvention": "off"
-            },
-            "correctness": {
-                "noUndeclaredDependencies": "warn"
             }
         }
     },
@@ -48,7 +45,7 @@
     "javascript": {
         "formatter": {
             "semicolons": "asNeeded",
-            "trailingCommas": "none"
+            "trailingComma": "none"
         }
     }
 }
