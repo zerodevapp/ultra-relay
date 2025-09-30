@@ -9,7 +9,7 @@
         "alto": "./src/esm/cli/alto.js"
     },
     "scripts": {
-        "prepare": "pnpm run build",
+        "prepare": "pnpm run build:contracts && pnpm run build",
         "clean": "rm -rf ./src/lib ./src/*.tsbuildinfo",
         "clean-modules": "rm -rf ./src/node_modules node_modules",
         "build": "pnpm -r run build",
