@@ -35,7 +35,9 @@ import * as sentry from "@sentry/node"
 import {
     BaseError,
     ContractFunctionExecutionError,
+    decodeAbiParameters,
     getContract,
+    type Hex,
     pad,
     slice,
     toHex,
@@ -45,6 +47,23 @@ import { fromZodError } from "zod-validation-error"
 import { GasEstimationHandler } from "../estimation/gasEstimationHandler"
 import type { SimulateHandleOpResult } from "../estimation/types"
 import type { AltoConfig } from "../../createConfig"
+
+function decodeRevertReason(errorData: string): string {
+    // Try to decode hex-encoded revert data if it looks like Error(string) selector (0x08c379a0)
+    if (errorData.startsWith("0x08c379a0")) {
+        try {
+            const dataParams = `0x${errorData.slice(10)}` as Hex
+            const decoded = decodeAbiParameters(
+                [{ name: "err", type: "string" }],
+                dataParams
+            )
+            return decoded[0]
+        } catch {
+            // If decode fails, return original hex string
+        }
+    }
+    return errorData
+}
 
 export class UnsafeValidator implements InterfaceValidator {
     config: AltoConfig
@@ -174,12 +193,14 @@ export class UnsafeValidator implements InterfaceValidator {
         if (error.result === "failed") {
             let errorCode: number = ExecutionErrors.UserOperationReverted
 
-            if (error.data.toString().includes("AA23")) {
+            const errorData = error.data.toString()
+            if (errorData.includes("AA23")) {
                 errorCode = ValidationErrors.SimulateValidation
             }
 
+            const decodedReason = decodeRevertReason(errorData)
             throw new RpcError(
-                `UserOperation reverted during simulation with reason: ${error.data}`,
+                `UserOperation reverted during simulation with reason: ${decodedReason}`,
                 errorCode
             )
         }
@@ -210,12 +231,14 @@ export class UnsafeValidator implements InterfaceValidator {
         if (error.result === "failed") {
             let errorCode: number = ExecutionErrors.UserOperationReverted
 
-            if (error.data.toString().includes("AA23")) {
+            const errorData = error.data.toString()
+            if (errorData.includes("AA23")) {
                 errorCode = ValidationErrors.SimulateValidation
             }
 
+            const decodedReason = decodeRevertReason(errorData)
             throw new RpcError(
-                `UserOperation reverted during simulation with reason: ${error.data}`,
+                `UserOperation reverted during simulation with reason: ${decodedReason}`,
                 errorCode
             )
         }

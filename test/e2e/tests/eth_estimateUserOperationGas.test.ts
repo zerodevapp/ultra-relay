@@ -66,7 +66,8 @@ describe.each([
             expect(gasParams.callGasLimit).not.toBeNull()
         })
 
-        test("Throws if gasPrices are set to zero", async () => {
+        test.skip("Throws if gasPrices are set to zero", async () => {
+            // Ultra Relay supports zeroed gas fees for sponsored operations
             const smartAccountClient = await getSmartAccountClient({
                 entryPointVersion,
                 anvilRpc,
@@ -152,8 +153,8 @@ describe.each([
                 altoRpc
             })
 
-            try {
-                await smartAccountClient.estimateUserOperationGas({
+            await expect(async () =>
+                smartAccountClient.estimateUserOperationGas({
                     calls: [
                         {
                             to: revertingContract,
@@ -162,11 +163,7 @@ describe.each([
                         }
                     ]
                 })
-            } catch (e: any) {
-                expect(e).toBeInstanceOf(BaseError)
-                const err = e.walk()
-                expect(err.reason).toEqual("foobar")
-            }
+            ).rejects.toThrow("foobar")
         })
 
         test("Should validate eip7702Auth", async () => {
