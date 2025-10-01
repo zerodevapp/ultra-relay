@@ -182,7 +182,7 @@ export class Server {
     ): Promise<void> {
         try {
             request.body = JSON.parse(msgBuffer.toString())
-        } catch (err) {
+        } catch (_err) {
             socket.send(
                 JSON.stringify({
                     jsonrpc: "2.0",

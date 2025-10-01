@@ -53,7 +53,7 @@ export function toViemStateOverrides(
             }
 
             result.push(entry)
-        } catch (e) {
+        } catch (_e) {
             console.warn(`Invalid address in state override: ${address}`)
         }
     }

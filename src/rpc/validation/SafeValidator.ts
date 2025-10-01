@@ -443,7 +443,7 @@ export class SafeValidator
 
         const pimlicoSimulationsAddress = this.config.pimlicoSimulationContract
 
-        if (!entryPointSimulationsAddress || !pimlicoSimulationsAddress) {
+        if (!(entryPointSimulationsAddress && pimlicoSimulationsAddress)) {
             throw new Error(
                 "Entrypoint simulations contract not found for this version"
             )

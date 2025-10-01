@@ -9,10 +9,10 @@ import { type PublicClient, parseGwei } from "viem"
 import { polygon } from "viem/chains"
 import type { AltoConfig } from "../createConfig"
 import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
+import { AbstractManager } from "./abstractGasPriceManager"
 import { ArbitrumManager } from "./arbitrumGasPriceManager"
 import { MantleManager } from "./mantleGasPriceManager"
 import { OptimismManager } from "./optimismManager"
-import { AbstractManager } from "./abstractGasPriceManager"
 
 export class GasPriceManager {
     private readonly config: AltoConfig
@@ -399,7 +399,7 @@ export class GasPriceManager {
             this.maxPriorityFeePerGasQueue.getLatestValue()
         ])
 
-        if (!maxFeePerGas || !maxPriorityFeePerGas) {
+        if (!(maxFeePerGas && maxPriorityFeePerGas)) {
             throw new RpcError("No gas price available")
         }
 

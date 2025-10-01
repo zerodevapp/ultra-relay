@@ -83,7 +83,7 @@ export function prepareStateOverride({
     })
 
     // Remove state override if not supported by network.
-    if (!config.balanceOverride && !config.codeOverrideSupport) {
+    if (!(config.balanceOverride || config.codeOverrideSupport)) {
         return undefined
     }
 
@@ -184,7 +184,7 @@ export function decodeSimulateHandleOpError(
 
             errorName = decoded.errorName
             args = decoded.args || []
-        } catch (decodeError) {
+        } catch (_decodeError) {
             logger.warn({ rawRevertBytes }, "Failed to decode raw revert bytes")
             return {
                 result: "failed",

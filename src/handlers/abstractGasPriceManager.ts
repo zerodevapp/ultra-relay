@@ -1,6 +1,6 @@
 // src/gas/abstractGasPriceManager.ts
 import type { AltoConfig } from "../createConfig"
-import { createMinMaxQueue, MinMaxQueue } from "../utils/minMaxQueue"
+import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 
 export class AbstractManager {
     private pubdataPriceQueue: MinMaxQueue

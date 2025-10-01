@@ -713,9 +713,7 @@ export type BundlingMode = z.infer<
     typeof debugSetBundlingModeSchema
 >["params"][0]
 
-// biome-ignore lint/style/useNamingConvention: <explanation>
 export type JSONRPCRequest = z.infer<typeof jsonRpcSchema>
-// biome-ignore lint/style/useNamingConvention: <explanation>
 export type JSONRPCResponse = z.infer<typeof jsonRpcResultSchema>
 
 const OpEventType = z.union([

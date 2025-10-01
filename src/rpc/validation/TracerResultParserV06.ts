@@ -637,10 +637,10 @@ export function tracerResultParserV06(
 
             // if addr is current account/paymaster/factory, then return that title
             // otherwise, return addr as-is
-            function nameAddr(addr: string, currentEntity: string): string {
+            function nameAddr(addr: string, _currentEntity: string): string {
                 const [title] =
                     Object.entries(stakeInfoEntities).find(
-                        ([title, info]) =>
+                        ([_title, info]) =>
                             info?.addr?.toLowerCase() === addr.toLowerCase()
                     ) ?? []
 

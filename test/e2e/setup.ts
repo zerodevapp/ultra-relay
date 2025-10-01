@@ -105,7 +105,6 @@ export const alto = defineInstance(
     }
 )
 
-// biome-ignore lint/style/noDefaultExport: vitest needs this
 export default async function setup({ provide }) {
     const anvilInstance = anvil({
         chainId: foundry.id,

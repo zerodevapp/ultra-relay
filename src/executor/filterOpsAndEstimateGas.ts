@@ -350,7 +350,7 @@ export async function filterOpsAndEstimateGas({
                     })
 
                     decodedReason = formattedError || revertReason
-                } catch (e) {
+                } catch (_e) {
                     // If decoding fails, keep the raw hex
                     decodedReason = revertReason
                 }
