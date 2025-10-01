@@ -8,7 +8,6 @@ import type {
     ValidationResult06,
     ValidationResult07
 } from "@alto/types"
-import type { StateOverride } from "viem"
 import {
     type Address,
     EntryPointV06Abi,
@@ -25,12 +24,13 @@ import {
 import type { Logger, Metrics } from "@alto/utils"
 import { isVersion06 } from "@alto/utils"
 import * as sentry from "@sentry/node"
+import type { StateOverride } from "viem"
 import {
     BaseError,
     ContractFunctionExecutionError,
+    type Hex,
     decodeAbiParameters,
     getContract,
-    type Hex,
     pad,
     slice,
     toHex,
