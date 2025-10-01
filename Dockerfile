@@ -30,5 +30,8 @@ RUN pnpm build
 # install dependencies
 # RUN pnpm install -r
 
+# Always use JSON logs in production
+ENV ALTO_JSON=true
+
 # start app
 ENTRYPOINT ["pnpm", "start"]
