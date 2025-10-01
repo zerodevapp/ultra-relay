@@ -798,6 +798,18 @@ export class ExecutorManager {
         txInfo: TransactionInfo,
         reason: "AA95" | "gas_price" | "stuck"
     ): Promise<void> {
+        this.logger.warn(
+            {
+                event: "replacingStuckTx",
+                reason: reason,
+                oldTxHash: txInfo.transactionHash,
+                nonce: txInfo.transactionRequest.nonce,
+                executor: txInfo.executor.address,
+                submissionAttempts: txInfo.submissionAttempts
+            },
+            `Attempting to replace transaction ${txInfo.transactionHash} due to: ${reason}`
+        )
+
         // Setup vars
         const {
             bundle,
