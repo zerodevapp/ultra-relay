@@ -2,7 +2,6 @@ import { deepHexlify } from "permissionless"
 import {
     http,
     type Address,
-    BaseError,
     type Hex,
     createPublicClient,
     getContract,

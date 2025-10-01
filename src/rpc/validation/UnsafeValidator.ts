@@ -8,6 +8,7 @@ import type {
     ValidationResult06,
     ValidationResult07
 } from "@alto/types"
+import type { StateOverride } from "viem"
 import {
     type Address,
     EntryPointV06Abi,
