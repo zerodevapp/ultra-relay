@@ -242,8 +242,8 @@ describe.each([
                 altoRpc
             })
 
-            try {
-                await smartAccountClient.estimateUserOperationGas({
+            await expect(async () =>
+                smartAccountClient.estimateUserOperationGas({
                     calls: [
                         {
                             to: revertingContract,
@@ -252,14 +252,7 @@ describe.each([
                         }
                     ]
                 })
-            } catch (e: any) {
-                expect(e).toBeInstanceOf(BaseError)
-                const err = e.walk()
-                expect(err.message).toEqual(
-                    "UserOperation reverted during simulation with reason: 0x08c379a000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000006666f6f6261720000000000000000000000000000000000000000000000000000"
-                )
-                expect(err.code).toEqual(-32521)
-            }
+            ).rejects.toThrow("foobar")
         })
 
         test("Should validate eip7702Auth", async () => {

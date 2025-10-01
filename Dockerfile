@@ -49,4 +49,11 @@ RUN pnpm build
 # alto.js was previously in /src/lib/cli but is now in /src/esm/cli after changing to ESM
 RUN mkdir -p /app/src/lib/cli && ln -sf /app/src/esm/cli/alto.js /app/src/lib/cli/alto.js
 
+# install dependencies
+# RUN pnpm install -r
+
+# Always use JSON logs in production
+ENV ALTO_JSON=true
+
+# start app
 ENTRYPOINT ["pnpm", "start"]
