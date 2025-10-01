@@ -717,16 +717,16 @@ async function calcAbstractPvg(
 
     // Get L1 pubdata price (wei per byte)
     let l1PriceWei: bigint
-    if (!validate) {
+    if (validate) {
+        // Use cached minimum for validation
+        l1PriceWei = await gasPriceManager.abstractManager.getMinPubdataPrice()
+    } else {
         // Fetch current pubdata price from zkSync RPC
         const feeParams: any = await (publicClient.request as any)({
             method: "zks_getFeeParams"
         })
         l1PriceWei = BigInt(feeParams.V2.l1_pubdata_price)
         gasPriceManager.abstractManager.savePubdataPrice(l1PriceWei)
-    } else {
-        // Use cached minimum for validation
-        l1PriceWei = await gasPriceManager.abstractManager.getMinPubdataPrice()
     }
 
     // Calculate pubdata gas component
