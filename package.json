@@ -56,10 +56,6 @@
     "engines": {
         "node": ">=18.0.0"
     },
-    "workspaces": [
-        "src/",
-        "test/e2e/*",
-        "scripts/localDeployer"
-    ],
+    "workspaces": ["src/", "test/e2e/*", "scripts/localDeployer"],
     "packageManager": "pnpm@9.9.0"
 }
