@@ -3,9 +3,15 @@ FROM ghcr.io/foundry-rs/foundry:v1.1.0 AS builder
 
 WORKDIR /build
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* .gitmodules ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
 
-COPY contracts ./contracts
+# Copy contracts directory structure
+COPY contracts/src ./contracts/src
+COPY contracts/foundry.toml ./contracts/foundry.toml
+COPY contracts/remappings.txt ./contracts/remappings.txt
+
+# Copy all contract library submodules explicitly
+COPY contracts/lib ./contracts/lib
 
 # --- FIX: Switch to root user to install packages ---
 USER root
