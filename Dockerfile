@@ -41,7 +41,7 @@ COPY --from=builder /build/src/contracts ./src/contracts
 
 RUN pnpm fetch
 
-RUN pnpm install -r --offline --frozen-lockfile
+RUN pnpm install -r --offline --frozen-lockfile --ignore-scripts
 
 RUN pnpm build
 
