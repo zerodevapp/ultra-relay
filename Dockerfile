@@ -5,13 +5,8 @@ WORKDIR /build
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
 
-# Copy contracts directory structure
-COPY contracts/src ./contracts/src
-COPY contracts/foundry.toml ./contracts/foundry.toml
-COPY contracts/remappings.txt ./contracts/remappings.txt
-
-# Copy all contract library submodules explicitly
-COPY contracts/lib ./contracts/lib
+# Copy entire contracts directory including submodules
+COPY contracts ./contracts
 
 # --- FIX: Switch to root user to install packages ---
 USER root
