@@ -228,7 +228,10 @@ export const ethSendUserOperationHandler = createMethodHandler({
         let status: "added" | "queued" | "rejected" = "rejected"
         try {
             let boost = false
-            if (userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n) {
+            if (
+                userOp.maxFeePerGas === 0n &&
+                userOp.maxPriorityFeePerGas === 0n
+            ) {
                 boost = true
             }
             const { result, userOpHash } = await addToMempoolIfValid({
