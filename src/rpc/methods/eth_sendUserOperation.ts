@@ -222,15 +222,21 @@ export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
+        console.log("=== eth_sendUserOperation called ===")
         const [userOp, entryPoint] = params
 
         let status: "added" | "queued" | "rejected" = "rejected"
         try {
+            let boost = false
+            if (userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n) {
+                boost = true
+            }
             const { result, userOpHash } = await addToMempoolIfValid({
                 rpcHandler,
                 userOp,
                 entryPoint,
-                apiVersion
+                apiVersion,
+                boost
             })
 
             status = result
