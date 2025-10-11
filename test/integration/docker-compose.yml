@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ultra_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d ultra_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    environment:
+      ANVIL_IP_ADDR: "0.0.0.0"
+    command: anvil --port 8545 --code-size-limit 100000000
+    ports:
+      - "8545:8545"
+
+  ultra-relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "4337:4337"
+    depends_on:
+      - anvil
+    volumes:
+      - ./start-bundler.sh:/start-bundler.sh
+    entrypoint: ["/bin/sh", "/start-bundler.sh"]
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -X POST -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_supportedEntryPoints\",\"params\":[],\"id\":1}' http://localhost:4337 | grep -q result"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  ultra-relay-provider:
+    image: oven/bun:latest
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ultra-relay:
+        condition: service_healthy
+    ports:
+      - "3333:3333"
+    volumes:
+      - ../../../zerodev-stack/ultra-relay-provider:/app
+    environment:
+      PORT: "3333"
+      NODE_ENV: test
+      DATABASE_URL: postgresql://test:test@postgres:5432/ultra_test
+      REDIS_URL: redis://redis:6379
+      ULTRA_RELAY_URL: http://ultra-relay:4337
+      STRIPE_API_KEY: sk_test_mock
+      LOGTAIL_SOURCE_TOKEN: mock_token
+      LOG_LEVEL: info
+    command: >
+      sh -c "
+        apt-get update && apt-get install -y postgresql-client curl &&
+        bun install &&
+        cat docker/init-db.sql | PGPASSWORD=test psql -h postgres -U test -d ultra_test &&
+        (cat docker/seed-data.sql | PGPASSWORD=test psql -h postgres -U test -d ultra_test || true) &&
+        echo \"INSERT INTO projects (id, user_id, chain_id) VALUES ('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440000', 31337) ON CONFLICT DO NOTHING;\" | PGPASSWORD=test psql -h postgres -U test -d ultra_test &&
+        echo \"INSERT INTO policies (project_id, policy_name, description, strategy, policy_group, chain_id, enabled) VALUES ('550e8400-e29b-41d4-a716-446655440000', 'Allow All Test Transactions', 'Sponsor all transactions for integration testing', 'pay_for_user', 'project', 31337, true) ON CONFLICT DO NOTHING;\" | PGPASSWORD=test psql -h postgres -U test -d ultra_test &&
+        bun run src/index.ts
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "curl http://localhost:3333/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s

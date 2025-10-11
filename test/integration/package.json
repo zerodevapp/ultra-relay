@@ -1,0 +1,23 @@
+{
+  "name": "ultra-relay-zerodev-integration",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx zerodev.test.ts",
+    "deploy:entrypoints": "tsx deploy-entrypoints.ts",
+    "copy:kernel": "tsx copy-kernel-contracts.ts",
+    "docker:test": "./run-provider-test.sh"
+  },
+  "dependencies": {
+    "@zerodev/ecdsa-validator": "^5.4.6",
+    "@zerodev/sdk": "^5.4.6",
+    "permissionless": "^0.2.1",
+    "tslib": "^2.8.1",
+    "viem": "^2.9.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.3.3"
+  }
+}
