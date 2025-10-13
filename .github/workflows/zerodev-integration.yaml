@@ -1,0 +1,90 @@
+name: ZeroDev Integration Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  integration-test:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout ultra-relay
+        uses: actions/checkout@v4
+        with:
+          path: ultra-relay
+
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+
+      - name: Set up Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.9.0
+
+      - name: Install ultra-relay dependencies
+        working-directory: ultra-relay
+        run: pnpm install
+
+      - name: Build ultra-relay
+        working-directory: ultra-relay
+        run: pnpm build
+
+      - name: Start Anvil
+        working-directory: ultra-relay/test/integration
+        run: |
+          docker-compose up -d anvil
+          sleep 5
+          echo "✅ Anvil started"
+
+      - name: Deploy contracts to Anvil
+        working-directory: ultra-relay/test/integration
+        run: ./setup-contracts.sh
+
+      - name: Start ultra-relay bundler
+        working-directory: ultra-relay/test/integration
+        run: |
+          docker-compose up -d ultra-relay
+          sleep 10
+          echo "✅ Ultra-relay started"
+
+      - name: Check ultra-relay health
+        run: |
+          curl -s -X POST http://localhost:4337 \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"eth_supportedEntryPoints","params":[],"id":1}' | grep -q result || \
+            (echo "Ultra-relay health check failed" && docker-compose -f ultra-relay/test/integration/docker-compose.yml logs ultra-relay && exit 1)
+
+      - name: Run integration test
+        working-directory: ultra-relay/test/integration
+        env:
+          BUNDLER_URL: http://localhost:4337
+          RPC_URL: http://localhost:8545
+        run: pnpm run test
+        timeout-minutes: 5
+
+      - name: Show logs on failure
+        if: failure()
+        working-directory: ultra-relay/test/integration
+        run: |
+          echo "=== Docker Compose Services Status ==="
+          docker-compose ps
+          echo "=== Ultra-Relay Bundler Logs ==="
+          docker-compose logs ultra-relay
+          echo "=== Anvil Logs ==="
+          docker-compose logs anvil
+
+      - name: Cleanup
+        if: always()
+        working-directory: ultra-relay/test/integration
+        run: docker-compose down -v
