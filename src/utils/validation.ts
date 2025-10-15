@@ -767,10 +767,9 @@ export async function calcAbstractPreVerificationGas(
     /* ② l1_pubdata_price (wei / byte) */
     let l1PriceWei: bigint
     if (!validate) {
-        // @ts-ignore
         const fp: any = await publicClient.request({
-            method: "zks_getFeeParams",
-            params: []
+            method: "zks_getFeeParams" as any,
+            params: [] as any
         })
         l1PriceWei = BigInt(fp.V2.l1_pubdata_price)
         gasPriceManager.abstractManager.savePubdataPrice(l1PriceWei)
