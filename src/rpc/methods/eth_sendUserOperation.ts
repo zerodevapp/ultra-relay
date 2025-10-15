@@ -1,6 +1,6 @@
+import { sendUserOperationSchema } from "@alto/types"
 import { getUserOperationHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
-import { sendUserOperationSchema } from "@alto/types"
 
 export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",

@@ -1,5 +1,5 @@
 import type { StateOverrides, UserOperation } from "@alto/types"
-import { BaseError, type RawContractError, getAddress, concat } from "viem"
+import { BaseError, type RawContractError, concat, getAddress } from "viem"
 import type { SignedAuthorization } from "viem"
 
 /// Ensure proper equality by converting both addresses into their checksum type
@@ -71,5 +71,5 @@ export function getAuthorizationStateOverrides({
 
 /** Integer-ceil division for bigint — equivalent to Math.ceil(a / b). */
 export function ceilDiv(a: bigint, b: bigint): bigint {
-    return (a + b - 1n) / b;
+    return (a + b - 1n) / b
 }

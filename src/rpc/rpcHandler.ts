@@ -30,10 +30,10 @@ import {
 } from "@alto/utils"
 import { type Hex, getContract, zeroAddress } from "viem"
 import { base, baseSepolia, optimism } from "viem/chains"
+import { recoverAuthorizationAddress } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
 import type { MethodHandler } from "./createMethodHandler"
 import { registerHandlers } from "./methods"
-import { recoverAuthorizationAddress } from "viem/utils"
 
 export class RpcHandler {
     public config: AltoConfig

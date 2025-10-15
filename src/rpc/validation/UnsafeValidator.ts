@@ -35,18 +35,18 @@ import * as sentry from "@sentry/node"
 import {
     BaseError,
     ContractFunctionExecutionError,
+    type Hex,
     decodeAbiParameters,
     getContract,
-    type Hex,
     pad,
     slice,
     toHex,
     zeroAddress
 } from "viem"
 import { fromZodError } from "zod-validation-error"
+import type { AltoConfig } from "../../createConfig"
 import { GasEstimationHandler } from "../estimation/gasEstimationHandler"
 import type { SimulateHandleOpResult } from "../estimation/types"
-import type { AltoConfig } from "../../createConfig"
 
 function decodeRevertReason(errorData: string): string {
     // Try to decode hex-encoded revert data if it looks like Error(string) selector (0x08c379a0)

@@ -27,13 +27,13 @@ import {
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import {
-    getAuthorizationStateOverrides,
     calcVerificationGasAndCallGasLimit,
     getAddressFromInitCodeOrPaymasterAndData,
+    getAuthorizationStateOverrides,
     isVersion06,
     isVersion07,
-    toPackedUserOperation,
-    isVersion08
+    isVersion08,
+    toPackedUserOperation
 } from "@alto/utils"
 import {
     type ExecutionRevertedError,
@@ -43,6 +43,7 @@ import {
     encodeFunctionData,
     zeroAddress
 } from "viem"
+import type { AltoConfig } from "../../createConfig"
 import { getSimulateValidationResult } from "../estimation/gasEstimationsV07"
 import {
     type BundlerTracerResult,
@@ -53,7 +54,6 @@ import { tracerResultParserV06 } from "./TracerResultParserV06"
 import { tracerResultParserV07 } from "./TracerResultParserV07"
 import { UnsafeValidator } from "./UnsafeValidator"
 import { debug_traceCall } from "./tracer"
-import type { AltoConfig } from "../../createConfig"
 
 export class SafeValidator
     extends UnsafeValidator
