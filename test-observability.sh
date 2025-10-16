@@ -20,9 +20,21 @@ cleanup() {
     if [ ! -z "$ALTO_PID" ]; then
         kill $ALTO_PID > /dev/null 2>&1 || true
     fi
+    if [ ! -z "$ANVIL_PID" ]; then
+        kill $ANVIL_PID > /dev/null 2>&1 || true
+    fi
 }
 
 trap cleanup EXIT
+
+# Check if Anvil is available
+if ! command -v anvil &> /dev/null; then
+    echo -e "${YELLOW}⚠${NC}  Anvil not found. Install Foundry: https://book.getfoundry.sh/getting-started/installation"
+    echo -e "${YELLOW}   Falling back to localhost:8545 (may not work)${NC}\n"
+    USE_ANVIL=false
+else
+    USE_ANVIL=true
+fi
 
 # Check if RPC URL is set
 if [ -z "$ALTO_RPC_URL" ]; then
@@ -30,10 +42,16 @@ if [ -z "$ALTO_RPC_URL" ]; then
     ALTO_RPC_URL="http://localhost:8545"
 fi
 
-# Generate test private key if not set
+# Generate test private keys if not set
 if [ -z "$ALTO_EXECUTOR_PRIVATE_KEYS" ]; then
     echo -e "${YELLOW}⚠${NC}  ALTO_EXECUTOR_PRIVATE_KEYS not set, using test key"
     ALTO_EXECUTOR_PRIVATE_KEYS="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+fi
+
+if [ -z "$ALTO_UTILITY_PRIVATE_KEY" ]; then
+    echo -e "${YELLOW}⚠${NC}  ALTO_UTILITY_PRIVATE_KEY not set, using test key"
+    # Use second Anvil test key
+    ALTO_UTILITY_PRIVATE_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 fi
 
 # Set default entrypoint if not set
@@ -85,14 +103,37 @@ wait_for_service "Loki" "http://localhost:3100/ready"
 wait_for_service "Alloy" "http://localhost:12345/-/ready"
 wait_for_service "Grafana" "http://localhost:3003/api/health"
 
-# Step 4: Start Alto with telemetry
-echo -e "\n${BLUE}[4/9]${NC} Starting Alto with telemetry enabled..."
+# Step 4: Start Anvil (local Ethereum node)
+echo -e "\n${BLUE}[4/9]${NC} Starting local Ethereum node..."
+
+if [ "$USE_ANVIL" = true ]; then
+    anvil --host 0.0.0.0 --port 8545 > /tmp/anvil.log 2>&1 &
+    ANVIL_PID=$!
+
+    # Wait for Anvil to be ready
+    sleep 3
+
+    if kill -0 $ANVIL_PID 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Anvil started (PID: $ANVIL_PID)"
+        ALTO_RPC_URL="http://localhost:8545"
+    else
+        echo -e "${RED}✗${NC} Anvil failed to start"
+        cat /tmp/anvil.log
+        ANVIL_PID=""
+    fi
+else
+    echo -e "${YELLOW}⚠${NC}  Skipping (Anvil not installed)"
+fi
+
+# Step 5: Start Alto with telemetry
+echo -e "\n${BLUE}[5/9]${NC} Starting Alto with telemetry enabled..."
 
 ALTO_ENABLE_TELEMETRY=true \
 ALTO_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
 ALTO_RPC_URL="$ALTO_RPC_URL" \
 ALTO_ENTRYPOINTS="$ALTO_ENTRYPOINTS" \
 ALTO_EXECUTOR_PRIVATE_KEYS="$ALTO_EXECUTOR_PRIVATE_KEYS" \
+ALTO_UTILITY_PRIVATE_KEY="$ALTO_UTILITY_PRIVATE_KEY" \
 ALTO_PORT=3000 \
 ALTO_JSON=true \
 ALTO_SAFE_MODE=false \
@@ -123,8 +164,8 @@ else
     ALTO_PID=""
 fi
 
-# Step 5: Generate test traffic
-echo -e "\n${BLUE}[5/9]${NC} Generating test traffic..."
+# Step 6: Generate test traffic
+echo -e "\n${BLUE}[6/10]${NC} Generating test traffic..."
 
 if [ "$ALTO_RUNNING" = true ]; then
     for i in {1..5}; do
@@ -148,8 +189,8 @@ else
     echo -e "${YELLOW}⚠${NC}  Skipping (Alto not running)"
 fi
 
-# Step 6: Validate Metrics
-echo -e "\n${BLUE}[6/9]${NC} Validating metrics collection..."
+# Step 7: Validate Metrics
+echo -e "\n${BLUE}[7/10]${NC} Validating metrics collection..."
 
 if [ "$ALTO_RUNNING" = true ]; then
     METRICS=$(curl -sf http://localhost:3000/metrics)
@@ -172,8 +213,8 @@ else
     echo -e "${BLUE}ℹ${NC}  Prometheus ready at http://localhost:9090"
 fi
 
-# Step 7: Validate Logs
-echo -e "\n${BLUE}[7/9]${NC} Validating logs collection..."
+# Step 8: Validate Logs
+echo -e "\n${BLUE}[8/10]${NC} Validating logs collection..."
 
 if [ "$ALTO_RUNNING" = true ]; then
     LOKI_QUERY=$(curl -sf -G "http://localhost:3100/loki/api/v1/query" \
@@ -190,8 +231,8 @@ else
     echo -e "${BLUE}ℹ${NC}  Loki ready at http://localhost:3100"
 fi
 
-# Step 8: Validate Traces
-echo -e "\n${BLUE}[8/9]${NC} Validating traces collection..."
+# Step 9: Validate Traces
+echo -e "\n${BLUE}[9/10]${NC} Validating traces collection..."
 
 if [ "$ALTO_RUNNING" = true ]; then
     TEMPO_TRACES=$(curl -sf "http://localhost:3200/api/search?limit=100" | jq -r '.traces | length')
@@ -222,8 +263,8 @@ else
     echo -e "${BLUE}ℹ${NC}  Tempo ready at http://localhost:3200"
 fi
 
-# Step 9: Validate Grafana Datasources
-echo -e "\n${BLUE}[9/9]${NC} Validating Grafana datasources..."
+# Step 10: Validate Grafana Datasources
+echo -e "\n${BLUE}[10/10]${NC} Validating Grafana datasources..."
 
 DATASOURCES=$(curl -sf -u admin:admin http://localhost:3003/api/datasources | jq -r '.[].name')
 
