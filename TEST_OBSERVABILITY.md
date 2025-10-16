@@ -5,10 +5,13 @@ Automated end-to-end validation of the Alto observability stack.
 ## Quick Start
 
 ```bash
-# Set your RPC URL
-export ALTO_RPC_URL=https://your-rpc-endpoint.com
+# Run with defaults (uses localhost:8545)
+./test-observability.sh
 
-# Run automated tests
+# Or configure your own RPC/keys
+export ALTO_RPC_URL=https://your-rpc-endpoint.com
+export ALTO_ENTRYPOINTS=0x0000000071727De22E5E9d8BAf0edAc6f37da032
+export ALTO_EXECUTOR_PRIVATE_KEYS=0x...
 ./test-observability.sh
 ```
 

@@ -10,15 +10,10 @@ discovery.docker "containers" {
   }
 }
 
-loki.source.docker "docker_logs" {
-  host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.containers.targets
+// Define relabel rules first
+loki.relabel "docker_labels" {
   forward_to = [loki.write.loki.receiver]
 
-  relabel_rules = loki.relabel.docker_labels.rules
-}
-
-loki.relabel "docker_labels" {
   rule {
     source_labels = ["__meta_docker_container_name"]
     target_label  = "container"
@@ -47,6 +42,13 @@ loki.relabel "docker_labels" {
     regex         = "(.{12}).*"
     replacement   = "$1"
   }
+}
+
+// Collect Docker logs
+loki.source.docker "docker_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.containers.targets
+  forward_to = [loki.relabel.docker_labels.receiver]
 }
 
 loki.write "loki" {
