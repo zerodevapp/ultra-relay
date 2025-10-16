@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: "alto-bundler"
+    environment: "local"
+
+scrape_configs:
+  # Alto Bundler metrics
+  - job_name: "alto-bundler"
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+        labels:
+          service: "alto-bundler"
+    metrics_path: "/metrics"
+    scrape_interval: 10s
