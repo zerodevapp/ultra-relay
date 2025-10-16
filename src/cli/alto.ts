@@ -13,6 +13,7 @@ import {
     gasEstimationOptions,
     logOptions,
     mempoolOptions,
+    observabilityOptions,
     rpcOptions,
     serverOptions
 } from "./config"
@@ -92,6 +93,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(gasEstimationOptions), "Gas Estimation Options:")
         .options(mempoolOptions)
         .group(Object.keys(mempoolOptions), "Mempool Options:")
+        .options(observabilityOptions)
+        .group(Object.keys(observabilityOptions), "Observability Options:")
         // blank scriptName so that help text doesn't display the cli name before each command
         .scriptName("")
         .demandCommand(1)
