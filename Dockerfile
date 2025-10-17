@@ -33,5 +33,9 @@ RUN pnpm build
 # Always use JSON logs in production
 ENV ALTO_JSON=true
 
+# Add labels for log collection
+LABEL logging="alloy"
+LABEL environment="production"
+
 # start app
 ENTRYPOINT ["pnpm", "start"]

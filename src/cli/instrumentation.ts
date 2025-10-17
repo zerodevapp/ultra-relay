@@ -40,22 +40,29 @@ class CustomSampler implements Sampler {
     }
 }
 
-const sdk = new NodeSDK({
-    traceExporter: new OTLPTraceExporter(),
-    instrumentations: [
-        new HttpInstrumentation({
-            requireParentforOutgoingSpans: true
-        }),
-        new UndiciInstrumentation({
-            requireParentforSpans: true
-        }),
-        new FastifyInstrumentation(),
-        new PinoInstrumentation(),
-        new ViemInstrumentation({
-            captureOperationResult: true
-        })
-    ],
-    sampler: new ParentBasedSampler({ root: new CustomSampler() })
-})
+if (process.env.ALTO_ENABLE_TELEMETRY === "true") {
+    const otlpEndpoint =
+        process.env.ALTO_OTLP_ENDPOINT || "http://localhost:4318/v1/traces"
 
-sdk.start()
+    const sdk = new NodeSDK({
+        traceExporter: new OTLPTraceExporter({
+            url: otlpEndpoint
+        }),
+        instrumentations: [
+            new HttpInstrumentation({
+                requireParentforOutgoingSpans: true
+            }),
+            new UndiciInstrumentation({
+                requireParentforSpans: true
+            }),
+            new FastifyInstrumentation(),
+            new PinoInstrumentation(),
+            new ViemInstrumentation({
+                captureOperationResult: true
+            })
+        ],
+        sampler: new ParentBasedSampler({ root: new CustomSampler() })
+    })
+
+    sdk.start()
+}

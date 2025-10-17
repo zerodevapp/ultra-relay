@@ -14,7 +14,7 @@
         "clean-modules": "rm -rf ./src/node_modules node_modules",
         "build": "pnpm -r run build",
         "build:esm": "pnpm -r run build:esm",
-        "start": "node src/lib/cli/alto.js run",
+        "start": "node --require ./src/lib/cli/instrumentation.js src/lib/cli/alto.js run",
         "dev": "nodemon --ext ts,js,json --watch src --exec DOTENV_CONFIG_PATH=$(pwd)/.env ts-node --project src/tsconfig.json -r tsconfig-paths/register src/cli/alto.ts run",
         "test": "pnpm --filter e2e run test",
         "test:ci": "pnpm --filter e2e run test:ci",
