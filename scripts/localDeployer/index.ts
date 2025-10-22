@@ -63,7 +63,6 @@ const verifyDeployed = async (addresses: Address[]) => {
         })
 
         if (bytecode === undefined) {
-            // biome-ignore lint/suspicious/noConsoleLog: it is oke
             console.log(`CONTRACT ${address} NOT DEPLOYED!!!`)
             process.exit(1)
         }
@@ -71,7 +70,6 @@ const verifyDeployed = async (addresses: Address[]) => {
 }
 
 const main = async () => {
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== DEPLOYING V0.7 CORE CONTRACTS ==========")
 
     const txs: Hex[] = []
@@ -103,7 +101,6 @@ const main = async () => {
     )
     console.log("Deployed EntryPointSimulations")
 
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== DEPLOYING V0.6 CORE CONTRACTS ==========")
 
     txs.push(
@@ -124,7 +121,6 @@ const main = async () => {
     )
     console.log("Deployed SimpleAccountFactory v0.6")
 
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== DEPLOYING SAFE CONTRACTS ==========")
 
     txs.push(
@@ -205,7 +201,6 @@ const main = async () => {
     )
     console.log("Deployed Safe Multi Send Call Only")
 
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== DEPLOYING BICONOMY CONTRACTS ==========")
 
     await anvilClient.setCode({
@@ -250,7 +245,6 @@ const main = async () => {
     )
     console.log("Deployed Biconomy Default Fallback Handler")
 
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== DEPLOYING KERNEL CONTRACTS ==========")
 
     txs.push(
@@ -280,7 +274,6 @@ const main = async () => {
     )
     console.log("Deployed Kernel Factory")
 
-    // biome-ignore lint/suspicious/noConsoleLog: []
     console.log("========== MISC ==========")
 
     await anvilClient.setCode({
