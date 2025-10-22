@@ -7,10 +7,10 @@ import type {
     IExecutorArgsInput,
     IGasEstimationArgsInput,
     ILogArgsInput,
+    IMempoolArgsInput,
     IOptionsInput,
     IRpcArgsInput,
-    IServerArgsInput,
-    IMempoolArgsInput
+    IServerArgsInput
 } from "./bundler"
 
 export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
@@ -100,7 +100,8 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         default: "20000000"
     },
     "max-bundle-count": {
-        description: "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+        description:
+            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
         type: "number",
         require: false
     },
@@ -407,7 +408,14 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             description:
                 "Indicates what type of chain the bundler is running on",
             type: "string",
-            choices: ["default", "op-stack", "arbitrum", "hedera", "mantle", "abstract"],
+            choices: [
+                "default",
+                "op-stack",
+                "arbitrum",
+                "hedera",
+                "mantle",
+                "abstract"
+            ],
             default: "default"
         },
         "legacy-transactions": {

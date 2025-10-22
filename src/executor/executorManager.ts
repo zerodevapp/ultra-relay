@@ -8,11 +8,11 @@ import {
     type BundlingMode,
     EntryPointV06Abi,
     type HexData32,
+    type RejectedUserOp,
     type SubmittedUserOp,
     type TransactionInfo,
-    RejectedUserOp,
-    UserOperationBundle,
-    UserOpInfo
+    type UserOpInfo,
+    type UserOperationBundle
 } from "@alto/types"
 import type { BundlingStatus, Logger, Metrics } from "@alto/utils"
 import {
@@ -22,23 +22,23 @@ import {
     parseUserOperationReceipt,
     scaleBigIntByPercent
 } from "@alto/utils"
+import { BaseError } from "abitype"
 import {
     type Address,
     type Block,
     type Hash,
+    type Hex,
+    InsufficientFundsError,
+    NonceTooLowError,
     type TransactionReceipt,
     TransactionReceiptNotFoundError,
     type WatchBlocksReturnType,
     formatEther,
-    getAbiItem,
-    Hex,
-    InsufficientFundsError,
-    NonceTooLowError
+    getAbiItem
 } from "viem"
-import type { Executor } from "./executor"
 import type { AltoConfig } from "../createConfig"
-import { SenderManager } from "./senderManager"
-import { BaseError } from "abitype"
+import type { Executor } from "./executor"
+import type { SenderManager } from "./senderManager"
 import { getUserOpHashes } from "./utils"
 
 function getTransactionsFromUserOperationEntries(
@@ -137,7 +137,9 @@ export class ExecutorManager {
             (timestamp) => now - timestamp < RPM_WINDOW
         )
 
-        const bundles = await this.mempool.getBundles(this.config.maxBundleCount)
+        const bundles = await this.mempool.getBundles(
+            this.config.maxBundleCount
+        )
 
         if (bundles.length > 0) {
             const opsCount: number = bundles
@@ -434,7 +436,7 @@ export class ExecutorManager {
                 blockNumber: bigint // block number is undefined only if transaction is not found
                 transactionHash: `0x${string}`
             }
-        
+
         // Track transaction costs for both included and reverted transactions
         if (
             bundlingStatus.status === "included" ||

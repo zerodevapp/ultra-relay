@@ -15,11 +15,11 @@ import {
     polygonMumbai
 } from "viem/chains"
 import type { AltoConfig } from "../createConfig"
-import { MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
+import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
+import { AbstractManager } from "./abstractGasPriceManager"
 import { ArbitrumManager } from "./arbitrumGasPriceManager"
 import { MantleManager } from "./mantleGasPriceManager"
 import { OptimismManager } from "./optimismManager"
-import { AbstractManager } from "./abstractGasPriceManager";
 
 enum ChainId {
     Goerli = 5,
