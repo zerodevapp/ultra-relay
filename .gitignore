@@ -14,4 +14,15 @@ Alto-Bruno/
 .nx/cache
 .vscode/
 .sentryclirc
-src/contracts
+src/contracts/*
+!src/contracts/PimlicoSimulations.sol/
+!src/contracts/PimlicoSimulations.sol/PimlicoSimulations.json
+!src/contracts/EntryPointSimulations.sol/
+!src/contracts/EntryPointSimulations.sol/EntryPointSimulations07.json
+!src/contracts/EntryPointSimulations.sol/EntryPointSimulations08.json
+!src/contracts/EntryPointFilterOpsOverride.sol/
+!src/contracts/EntryPointFilterOpsOverride.sol/EntryPointFilterOpsOverride06.json
+!src/contracts/EntryPointFilterOpsOverride.sol/EntryPointFilterOpsOverride07.json
+!src/contracts/EntryPointFilterOpsOverride.sol/EntryPointFilterOpsOverride08.json
+!src/contracts/EntryPointGasEstimationOverride.sol/
+!src/contracts/EntryPointGasEstimationOverride.sol/EntryPointGasEstimationOverride06.json
