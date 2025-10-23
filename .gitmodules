@@ -30,3 +30,6 @@
 [submodule "contracts/lib/singleton-paymaster"]
 	path = contracts/lib/singleton-paymaster
 	url = https://github.com/pimlicolabs/singleton-paymaster
+[submodule "contracts/lib/bulk"]
+	path = contracts/lib/bulk
+	url = https://github.com/daimo-eth/bulk
