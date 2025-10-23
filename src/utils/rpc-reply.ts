@@ -20,7 +20,6 @@ class RpcReply {
         return this
     }
 
-    // biome-ignore lint/suspicious/useAwait:
     public async send(data: any) {
         if (this.reply) {
             return this.reply.send(data)

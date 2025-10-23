@@ -9,7 +9,13 @@ import {
 export type Metrics = ReturnType<typeof createMetrics>
 
 export function createMetrics(registry: Registry, register = true) {
-    collectDefaultMetrics({ register: registry })
+    // Skip default metrics collection in development mode or when running in Bun
+    // to avoid compatibility issues
+    const isBun = typeof (globalThis as any).Bun !== "undefined"
+
+    if (!isBun) {
+        collectDefaultMetrics({ register: registry })
+    }
 
     const registers = register ? [registry] : []
 
@@ -86,6 +92,17 @@ export function createMetrics(registry: Registry, register = true) {
         name: "ultra_relay_bundles_submitted_total",
         help: "Number of user operations bundles submitted on-chain",
         labelNames: ["status"] as const,
+        registers
+    })
+    const transactionCosts = new Gauge({
+        name: "ultra_relay_transaction_costs_eth",
+        help: "Cost of transactions in ETH (gas_used * effective_gas_price)",
+        labelNames: [
+            "userOpHash",
+            "transactionHash",
+            "executor_wallet",
+            "transaction_status"
+        ] as const,
         registers
     })
 
@@ -200,15 +217,10 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const transactionCosts = new Gauge({
-        name: "ultra_relay_transaction_costs_eth",
-        help: "Cost of transactions in ETH (gas_used * effective_gas_price)",
-        labelNames: [
-            "userOpHash",
-            "transactionHash",
-            "executor_wallet",
-            "transaction_status"
-        ] as const,
+    const secondValidationFailed = new Counter({
+        name: "ultra_relay_second_validation_failed",
+        help: "Number of times alto's second estimation failed during eth_estimateUserOperationGas and we returned 2x gas limits",
+        labelNames: [] as const,
         registers
     })
 
@@ -222,6 +234,7 @@ export function createMetrics(registry: Registry, register = true) {
         userOperationsSubmitted,
         bundlesIncluded,
         bundlesSubmitted,
+        transactionCosts,
         userOperationsReceived,
         userOperationsValidationSuccess,
         userOperationsValidationFailure,
@@ -236,7 +249,7 @@ export function createMetrics(registry: Registry, register = true) {
         executorWalletsMinBalance,
         emittedOpEvents,
         walletsProcessingTime,
-        transactionCosts,
-        userOperationsSubmissionAttempts
+        userOperationsSubmissionAttempts,
+        secondValidationFailed
     }
 }

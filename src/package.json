@@ -5,6 +5,7 @@
     "repository": "https://github.com/pimlicolabs/alto.git",
     "author": "Pimlico",
     "license": "GPL-3.0-or-later",
+    "type": "module",
     "main": "lib/index.js",
     "types": "lib/index.d.ts",
     "bin": {
@@ -29,7 +30,7 @@
     "scripts": {
         "build": "tsc -p ./tsconfig.json && tsc-alias -p tsconfig.json",
         "build:esm": "tsc -p ./tsconfig.esm.json && tsc-alias -p tsconfig.esm.json",
-        "dev": "nodemon --exec DOTENV_CONFIG_PATH=$(pwd)/../.env ts-node -r tsconfig-paths/register cli/alto.ts run",
+        "dev": "nodemon --exec DOTENV_CONFIG_PATH=$(pwd)/../.env tsx -r tsconfig-paths/register cli/alto.ts run",
         "lint": "eslint src/**/*.ts",
         "lint:fix": "eslint src/**/*.ts --fix"
     },
@@ -55,6 +56,7 @@
         "bull": "^4.15.1",
         "dotenv": "^16.0.3",
         "fastify": "^4.25.2",
+        "import-in-the-middle": "^1.11.2",
         "ioredis": "^5.4.1",
         "opentelemetry-instrumentation-fetch-node": "^1.2.3",
         "pino": "^9.6.0",

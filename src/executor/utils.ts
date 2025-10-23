@@ -3,13 +3,14 @@ import {
     EntryPointV07Abi,
     type PackedUserOperation,
     type UserOpInfo,
-    type UserOperationV07
+    type UserOperation,
+    type UserOperation07
 } from "@alto/types"
 import {
     type Logger,
     isVersion06,
     isVersion07,
-    toPackedUserOperation
+    toPackedUserOp
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
@@ -34,19 +35,19 @@ export const isTransactionUnderpricedError = (e: BaseError) => {
 
 // V7 source: https://github.com/eth-infinitism/account-abstraction/blob/releases/v0.7/contracts/core/EntryPoint.sol
 // V6 source: https://github.com/eth-infinitism/account-abstraction/blob/fa61290d37d079e928d92d53a122efcc63822214/contracts/core/EntryPoint.sol#L236
-export function calculateAA95GasFloor(
-    userOps: UserOpInfo[],
-    beneficiary: Address
-): bigint {
+export function calculateAA95GasFloor({
+    userOps,
+    beneficiary
+}: { userOps: UserOperation[]; beneficiary: Address }): bigint {
     let gasFloor = 0n
 
-    for (const userOpInfo of userOps) {
-        const { userOp } = userOpInfo
+    for (const userOp of userOps) {
         if (isVersion07(userOp)) {
             const totalGas =
                 userOp.callGasLimit +
                 (userOp.paymasterPostOpGasLimit || 0n) +
-                10_000n
+                10_000n // INNER_GAS_OVERHEAD
+
             gasFloor += (totalGas * 64n) / 63n
 
             // AA95 check happens after verification + paymaster verification
@@ -59,7 +60,7 @@ export function calculateAA95GasFloor(
 
             // There is a variable gas overhead for calldata gas when calling handleOps
             const calldata = encodeHandleOpsCalldata({
-                userOps: userOps,
+                userOps: [userOp],
                 beneficiary
             })
             const handleOpsCalldataCost = toBytes(calldata)
@@ -79,7 +80,7 @@ export function calculateAA95GasFloor(
 
             // There is a variable gas overhead for calldata gas when calling handleOps
             const calldata = encodeHandleOpsCalldata({
-                userOps: userOps,
+                userOps: [userOp],
                 beneficiary
             })
             const handleOpsCalldataCost = toBytes(calldata)
@@ -97,12 +98,15 @@ export const getUserOpHashes = (userOpInfos: UserOpInfo[]) => {
     return userOpInfos.map(({ userOpHash }) => userOpHash)
 }
 
-export const packUserOps = (userOpInfos: UserOpInfo[]) => {
-    const userOps = userOpInfos.map(({ userOp }) => userOp)
+export const packUserOps = (userOps: UserOperation[]) => {
+    if (userOps.length === 0) {
+        return []
+    }
+
     const isV06 = isVersion06(userOps[0])
     const packedUserOps = isV06
         ? userOps
-        : userOps.map((op) => toPackedUserOperation(op as UserOperationV07))
+        : userOps.map((op) => toPackedUserOp(op as UserOperation07))
     return packedUserOps as PackedUserOperation[]
 }
 
@@ -110,11 +114,10 @@ export const encodeHandleOpsCalldata = ({
     userOps,
     beneficiary
 }: {
-    userOps: UserOpInfo[]
+    userOps: UserOperation[]
     beneficiary: Address
 }): Hex => {
-    const ops = userOps.map(({ userOp }) => userOp)
-    const isV06 = isVersion06(ops[0])
+    const isV06 = isVersion06(userOps[0])
     const packedUserOps = packUserOps(userOps)
 
     return encodeFunctionData({
@@ -147,7 +150,7 @@ export const getAuthorizationList = (
         )
         .filter(Boolean) as SignedAuthorizationList
 
-    return authList.length ? authList : undefined
+    return authList.length > 0 ? authList : undefined
 }
 
 export async function flushStuckTransaction({
@@ -162,7 +165,7 @@ export async function flushStuckTransaction({
     logger: Logger
 }) {
     const publicClient = config.publicClient
-    const walletClient = config.walletClient
+    const walletClient = config.walletClients.public
 
     const latestNonce = await publicClient.getTransactionCount({
         address: wallet.address,

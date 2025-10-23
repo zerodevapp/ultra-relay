@@ -101,12 +101,15 @@ export class Server {
 
         this.fastify.addHook("onResponse", (request, reply) => {
             const ignoredRoutes = ["/health", "/metrics"]
-            if (ignoredRoutes.includes(request.routeOptions.url)) {
+            if (
+                request.routeOptions.url &&
+                ignoredRoutes.includes(request.routeOptions.url)
+            ) {
                 return
             }
 
             const labels = {
-                route: request.routeOptions.url,
+                route: request.routeOptions.url ?? "unknown",
                 code: reply.statusCode,
                 method: request.method,
                 rpc_method: request.rpcMethod,
@@ -179,7 +182,7 @@ export class Server {
     ): Promise<void> {
         try {
             request.body = JSON.parse(msgBuffer.toString())
-        } catch (err) {
+        } catch (_err) {
             socket.send(
                 JSON.stringify({
                     jsonrpc: "2.0",

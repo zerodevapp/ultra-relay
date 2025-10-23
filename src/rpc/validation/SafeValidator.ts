@@ -2,38 +2,32 @@ import type { SenderManager } from "@alto/executor"
 import type { GasPriceManager } from "@alto/handlers"
 import type {
     InterfaceValidator,
-    UserOperationV06,
-    UserOperationV07,
+    UserOperation06,
+    UserOperation07,
     ValidationResult,
-    ValidationResultV06,
-    ValidationResultV07,
-    ValidationResultWithAggregationV06,
-    ValidationResultWithAggregationV07
+    ValidationResult06,
+    ValidationResult07
 } from "@alto/types"
 import {
     type Address,
     CodeHashGetterAbi,
     CodeHashGetterBytecode,
     EntryPointV06Abi,
-    EntryPointV07SimulationsAbi,
-    PimlicoEntryPointSimulationsAbi,
     type ReferencedCodeHashes,
     RpcError,
     type StakeInfo,
     type StorageMap,
     type UserOperation,
     ValidationErrors,
-    type ValidationResultWithAggregation
+    pimlicoSimulationsAbi
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import {
-    calcVerificationGasAndCallGasLimit,
     getAddressFromInitCodeOrPaymasterAndData,
     getAuthorizationStateOverrides,
-    isVersion06,
-    isVersion07,
     isVersion08,
-    toPackedUserOperation
+    jsonStringifyWithBigint,
+    toPackedUserOp
 } from "@alto/utils"
 import {
     type ExecutionRevertedError,
@@ -44,7 +38,6 @@ import {
     zeroAddress
 } from "viem"
 import type { AltoConfig } from "../../createConfig"
-import { getSimulateValidationResult } from "../estimation/gasEstimationsV07"
 import {
     type BundlerTracerResult,
     type ExitInfo,
@@ -80,75 +73,25 @@ export class SafeValidator
         this.senderManager = senderManager
     }
 
-    async validateUserOperation({
-        shouldCheckPrefund,
-        userOperation,
-        queuedUserOperations,
-        entryPoint,
-        referencedContracts
-    }: {
-        shouldCheckPrefund: boolean
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+    async validateUserOp(args: {
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResult | ValidationResultWithAggregation) & {
+        ValidationResult & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
+        const { userOp, queuedUserOps, entryPoint, referencedContracts } = args
         try {
             const validationResult = await this.getValidationResult({
-                userOperation,
-                queuedUserOperations,
+                userOp,
+                queuedUserOps,
                 entryPoint,
                 codeHashes: referencedContracts
             })
-
-            if (shouldCheckPrefund) {
-                const prefund = validationResult.returnInfo.prefund
-
-                const { verificationGasLimit, callGasLimit } =
-                    calcVerificationGasAndCallGasLimit(
-                        userOperation,
-                        {
-                            preOpGas: validationResult.returnInfo.preOpGas,
-                            paid: validationResult.returnInfo.prefund
-                        },
-                        this.config.chainId
-                    )
-
-                let mul = 1n
-
-                if (
-                    isVersion06(userOperation) &&
-                    userOperation.paymasterAndData
-                ) {
-                    mul = 3n
-                }
-
-                if (
-                    isVersion07(userOperation) &&
-                    userOperation.paymaster === "0x"
-                ) {
-                    mul = 3n
-                }
-
-                const requiredPreFund =
-                    callGasLimit +
-                    verificationGasLimit * mul +
-                    userOperation.preVerificationGas
-
-                if (requiredPreFund > prefund) {
-                    throw new RpcError(
-                        `prefund is not enough, required: ${requiredPreFund}, got: ${prefund}`,
-                        ValidationErrors.SimulateValidation
-                    )
-                }
-
-                // TODO prefund should be greater than it costs us to add it to mempool
-            }
 
             this.metrics.userOperationsValidationSuccess.inc()
 
@@ -189,25 +132,21 @@ export class SafeValidator
         }
     }
 
-    async getValidationResultV07({
-        userOperation,
-        queuedUserOperations,
-        entryPoint,
-        preCodeHashes
-    }: {
-        userOperation: UserOperationV07
-        queuedUserOperations: UserOperationV07[]
+    async getValidationResultV07(args: {
+        userOp: UserOperation07
+        queuedUserOps: UserOperation[]
         entryPoint: Address
-        preCodeHashes?: ReferencedCodeHashes
+        codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResultV07 | ValidationResultWithAggregationV07) & {
+        ValidationResult07 & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        if (preCodeHashes && preCodeHashes.addresses.length > 0) {
-            const { hash } = await this.getCodeHashes(preCodeHashes.addresses)
-            if (hash !== preCodeHashes.hash) {
+        const { userOp, queuedUserOps, entryPoint, codeHashes } = args
+        if (codeHashes && codeHashes.addresses.length > 0) {
+            const { hash } = await this.getCodeHashes(codeHashes.addresses)
+            if (hash !== codeHashes.hash) {
                 throw new RpcError(
                     "code hashes mismatch",
                     ValidationErrors.OpcodeValidation
@@ -216,20 +155,20 @@ export class SafeValidator
         }
 
         const [res, tracerResult] = await this.getValidationResultWithTracerV07(
-            userOperation,
-            queuedUserOperations,
+            userOp,
+            queuedUserOps as UserOperation07[],
             entryPoint
         )
 
         const [contractAddresses, storageMap] = tracerResultParserV07(
-            userOperation,
+            userOp,
             tracerResult,
             res,
             entryPoint.toLowerCase() as Address
         )
 
-        const codeHashes: ReferencedCodeHashes =
-            preCodeHashes || (await this.getCodeHashes(contractAddresses))
+        const referencedContracts: ReferencedCodeHashes =
+            codeHashes || (await this.getCodeHashes(contractAddresses))
 
         // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
         if ((res as any) === "0x") {
@@ -254,28 +193,25 @@ export class SafeValidator
 
         return {
             ...res,
-            referencedContracts: codeHashes,
+            referencedContracts,
             storageMap
         }
     }
 
-    async getValidationResultV06({
-        userOperation,
-        entryPoint,
-        preCodeHashes
-    }: {
-        userOperation: UserOperationV06
+    async getValidationResultV06(args: {
+        userOp: UserOperation06
         entryPoint: Address
-        preCodeHashes?: ReferencedCodeHashes
+        codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (ValidationResultV06 | ValidationResultWithAggregationV06) & {
+        ValidationResult06 & {
             referencedContracts?: ReferencedCodeHashes
             storageMap: StorageMap
         }
     > {
-        if (preCodeHashes && preCodeHashes.addresses.length > 0) {
-            const { hash } = await this.getCodeHashes(preCodeHashes.addresses)
-            if (hash !== preCodeHashes.hash) {
+        const { userOp, entryPoint, codeHashes } = args
+        if (codeHashes && codeHashes.addresses.length > 0) {
+            const { hash } = await this.getCodeHashes(codeHashes.addresses)
+            if (hash !== codeHashes.hash) {
                 throw new RpcError(
                     "code hashes mismatch",
                     ValidationErrors.OpcodeValidation
@@ -284,19 +220,19 @@ export class SafeValidator
         }
 
         const [res, tracerResult] = await this.getValidationResultWithTracerV06(
-            userOperation,
+            userOp,
             entryPoint
         )
 
         const [contractAddresses, storageMap] = tracerResultParserV06(
-            userOperation,
+            userOp,
             tracerResult,
             res,
             entryPoint.toLowerCase() as Address
         )
 
-        const codeHashes: ReferencedCodeHashes =
-            preCodeHashes || (await this.getCodeHashes(contractAddresses))
+        const referencedContracts: ReferencedCodeHashes =
+            codeHashes || (await this.getCodeHashes(contractAddresses))
 
         // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
         if ((res as any) === "0x") {
@@ -306,7 +242,7 @@ export class SafeValidator
         }
         const validationResult = {
             ...res,
-            referencedContracts: codeHashes,
+            referencedContracts,
             storageMap
         }
 
@@ -343,11 +279,11 @@ export class SafeValidator
     }
 
     async getValidationResultWithTracerV06(
-        userOperation: UserOperationV06,
+        userOp: UserOperation06,
         entryPoint: Address
-    ): Promise<[ValidationResultV06, BundlerTracerResult]> {
+    ): Promise<[ValidationResult06, BundlerTracerResult]> {
         const stateOverrides = getAuthorizationStateOverrides({
-            userOperations: [userOperation]
+            userOps: [userOp]
         })
 
         const tracerResult = await debug_traceCall(
@@ -358,7 +294,7 @@ export class SafeValidator
                 data: encodeFunctionData({
                     abi: EntryPointV06Abi,
                     functionName: "simulateValidation",
-                    args: [userOperation]
+                    args: [userOp]
                 })
             },
             {
@@ -385,7 +321,7 @@ export class SafeValidator
             })
 
             const errFullName = `${errorName}(${errorArgs.toString()})`
-            const errorResult = this.parseErrorResultV06(userOperation, {
+            const errorResult = this.parseErrorResultV06(userOp, {
                 errorName,
                 errorArgs
             })
@@ -406,10 +342,10 @@ export class SafeValidator
     }
 
     parseErrorResultV06(
-        userOperation: UserOperationV06,
+        userOp: UserOperation06,
         // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
         errorResult: { errorName: string; errorArgs: any }
-    ): ValidationResult | ValidationResultWithAggregation {
+    ): ValidationResult {
         if (!errorResult?.errorName?.startsWith("ValidationResult")) {
             // parse it as FailedOp
             // if its FailedOp, then we have the paymaster param... otherwise its an Error(string)
@@ -478,13 +414,10 @@ export class SafeValidator
             returnInfo,
             senderInfo: {
                 ...senderInfo,
-                addr: userOperation.sender
+                addr: userOp.sender
             },
-            factoryInfo: fillEntity(userOperation.initCode, factoryInfo),
-            paymasterInfo: fillEntity(
-                userOperation.paymasterAndData,
-                paymasterInfo
-            ),
+            factoryInfo: fillEntity(userOp.initCode, factoryInfo),
+            paymasterInfo: fillEntity(userOp.paymasterAndData, paymasterInfo),
             aggregatorInfo: fillEntityAggregator(
                 aggregatorInfo?.actualAggregator,
                 aggregatorInfo?.stakeInfo
@@ -493,43 +426,50 @@ export class SafeValidator
     }
 
     async getValidationResultWithTracerV07(
-        userOperation: UserOperationV07,
-        queuedUserOperations: UserOperationV07[],
+        userOp: UserOperation07,
+        queuedUserOps: UserOperation07[],
         entryPoint: Address
-    ): Promise<[ValidationResultV07, BundlerTracerResult]> {
-        const packedUserOperation = toPackedUserOperation(userOperation)
-        const packedQueuedUserOperations = queuedUserOperations.map((uop) =>
-            toPackedUserOperation(uop)
+    ): Promise<[ValidationResult07, BundlerTracerResult]> {
+        const packedUserOp = toPackedUserOp(userOp)
+        const packedQueuedUserOps = queuedUserOps.map((uop) =>
+            toPackedUserOp(uop)
         )
 
-        const entryPointSimulationsCallData = encodeFunctionData({
-            abi: EntryPointV07SimulationsAbi,
-            functionName: "simulateValidationLast",
-            args: [[...packedQueuedUserOperations, packedUserOperation]]
-        })
-
-        const callData = encodeFunctionData({
-            abi: PimlicoEntryPointSimulationsAbi,
-            functionName: "simulateEntryPoint",
-            args: [entryPoint, [entryPointSimulationsCallData]]
-        })
-
-        const isV8 = isVersion08(userOperation, entryPoint)
+        const isV8 = isVersion08(userOp, entryPoint)
 
         const entryPointSimulationsAddress = isV8
             ? this.config.entrypointSimulationContractV8
             : this.config.entrypointSimulationContractV7
 
+        const pimlicoSimulationsAddress = this.config.pimlicoSimulationContract
+
+        if (!(entryPointSimulationsAddress && pimlicoSimulationsAddress)) {
+            throw new Error(
+                "Entrypoint simulations contract not found for this version"
+            )
+        }
+
+        const entryPointSimulationsCallData = encodeFunctionData({
+            abi: pimlicoSimulationsAbi,
+            functionName: "simulateValidation",
+            args: [
+                entryPointSimulationsAddress,
+                entryPoint,
+                packedQueuedUserOps,
+                packedUserOp
+            ]
+        })
+
         const stateOverrides = getAuthorizationStateOverrides({
-            userOperations: [userOperation]
+            userOps: [userOp]
         })
 
         const tracerResult = await debug_traceCall(
             this.config.publicClient,
             {
                 from: zeroAddress,
-                to: entryPointSimulationsAddress,
-                data: callData
+                to: pimlicoSimulationsAddress,
+                data: entryPointSimulationsCallData
             },
             {
                 tracer: bundlerCollectorTracer,
@@ -538,9 +478,7 @@ export class SafeValidator
         )
 
         this.logger.info(
-            `tracerResult: ${JSON.stringify(tracerResult, (_k, v) =>
-                typeof v === "bigint" ? v.toString() : v
-            )}`
+            `tracerResult: ${jsonStringifyWithBigint(tracerResult)}`
         )
 
         const lastResult = tracerResult.calls.slice(-1)[0]
@@ -549,11 +487,15 @@ export class SafeValidator
         }
         const resultData = lastResult.data as Hex
 
-        const simulateValidationResult = getSimulateValidationResult(resultData)
+        // Decode the validation result from the revert data
+        const { errorName, args } = decodeErrorResult({
+            abi: pimlicoSimulationsAbi,
+            data: resultData
+        })
 
-        if (simulateValidationResult.status === "failed") {
+        if (errorName !== "ValidationResult") {
             let errorCode = ValidationErrors.SimulateValidation
-            const errorMessage = simulateValidationResult.data as string
+            const errorMessage = errorName || "Unknown validation error"
 
             if (errorMessage.includes("AA24")) {
                 errorCode = ValidationErrors.InvalidSignature
@@ -566,8 +508,7 @@ export class SafeValidator
             throw new RpcError(errorMessage, errorCode)
         }
 
-        const validationResult =
-            simulateValidationResult.data as ValidationResultWithAggregationV07
+        const validationResult = args[0] as ValidationResult07
 
         const mergedValidation = this.mergeValidationDataValues(
             validationResult.returnInfo.accountValidationData,
@@ -584,27 +525,27 @@ export class SafeValidator
             },
             senderInfo: {
                 ...validationResult.senderInfo,
-                addr: userOperation.sender
+                addr: userOp.sender
             },
             factoryInfo:
-                userOperation.factory && validationResult.factoryInfo
+                userOp.factory && validationResult.factoryInfo
                     ? {
                           ...validationResult.factoryInfo,
-                          addr: userOperation.factory
+                          addr: userOp.factory
                       }
                     : undefined,
             paymasterInfo:
-                userOperation.paymaster && validationResult.paymasterInfo
+                userOp.paymaster && validationResult.paymasterInfo
                     ? {
                           ...validationResult.paymasterInfo,
-                          addr: userOperation.paymaster
+                          addr: userOp.paymaster
                       }
                     : undefined,
             aggregatorInfo: validationResult.aggregatorInfo,
             storageMap: {}
         }
 
-        // this.validateStorageAccessList(userOperation, res, accessList)
+        // this.validateStorageAccessList(userOp, res, accessList)
 
         if (res.returnInfo.accountSigFailed) {
             throw new RpcError(

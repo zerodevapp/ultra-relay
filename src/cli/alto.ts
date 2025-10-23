@@ -13,6 +13,7 @@ import {
     gasEstimationOptions,
     logOptions,
     mempoolOptions,
+    redisOptions,
     rpcOptions,
     serverOptions
 } from "./config"
@@ -35,8 +36,10 @@ if (process.env.SENTRY_DSN) {
     sentry.init({
         dsn: process.env.SENTRY_DSN,
         environment: process.env.ENVIRONMENT,
+        skipOpenTelemetrySetup: true,
         tracesSampleRate: 0,
         profilesSampleRate: 0,
+        integrations: [sentry.httpIntegration({ spans: false })],
         beforeSend(event, hint) {
             const errorType = event.exception?.values?.[0]?.type
 
@@ -92,6 +95,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(gasEstimationOptions), "Gas Estimation Options:")
         .options(mempoolOptions)
         .group(Object.keys(mempoolOptions), "Mempool Options:")
+        .options(redisOptions)
+        .group(Object.keys(redisOptions), "Redis Options:")
         // blank scriptName so that help text doesn't display the cli name before each command
         .scriptName("")
         .demandCommand(1)

@@ -1,27 +1,28 @@
+import type { GasPriceManager } from "@alto/handlers"
 import type { UserOperation } from "@alto/types"
-import type { StateOverrides, UserOperationV07 } from "@alto/types"
+import type { StateOverrides, UserOperation07 } from "@alto/types"
 import { deepHexlify, isVersion06 } from "@alto/utils"
 import { type Hex, parseEther, toHex } from "viem"
 import type { Address } from "viem"
 import type { AltoConfig } from "../../createConfig"
-import { GasEstimatorV06 } from "./gasEstimationsV06"
-import { GasEstimatorV07 } from "./gasEstimationsV07"
+import { GasEstimator06 } from "./gasEstimations06"
+import { GasEstimator07 } from "./gasEstimations07"
 import type { SimulateHandleOpResult } from "./types"
 
 function getStateOverrides({
     addSenderBalanceOverride,
-    userOperation,
+    userOp,
     stateOverrides = {}
 }: {
     addSenderBalanceOverride: boolean
     stateOverrides: StateOverrides
-    userOperation: UserOperation
+    userOp: UserOperation
 }) {
     const result: StateOverrides = { ...stateOverrides }
 
     if (addSenderBalanceOverride) {
-        result[userOperation.sender] = {
-            ...deepHexlify(stateOverrides?.[userOperation.sender] || {}),
+        result[userOp.sender] = {
+            ...deepHexlify(stateOverrides?.[userOp.sender] || {}),
             balance: toHex(parseEther("1000000"))
         }
     }
@@ -30,88 +31,89 @@ function getStateOverrides({
 }
 
 export class GasEstimationHandler {
-    gasEstimatorV06: GasEstimatorV06
-    gasEstimatorV07: GasEstimatorV07
+    gasEstimator06: GasEstimator06
+    gasEstimator07: GasEstimator07
 
-    constructor(config: AltoConfig) {
-        this.gasEstimatorV06 = new GasEstimatorV06(config)
-
-        this.gasEstimatorV07 = new GasEstimatorV07(config)
+    constructor(config: AltoConfig, gasPriceManager: GasPriceManager) {
+        this.gasEstimator06 = new GasEstimator06(config)
+        this.gasEstimator07 = new GasEstimator07(config, gasPriceManager)
     }
 
     validateHandleOp({
-        userOperation,
-        queuedUserOperations,
+        userOp,
+        queuedUserOps,
         entryPoint,
         targetAddress,
         targetCallData,
         stateOverrides = {}
     }: {
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         targetAddress: Address
         targetCallData: Hex
         stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult> {
         const finalStateOverride = getStateOverrides({
-            userOperation,
+            userOp,
             addSenderBalanceOverride: false,
             stateOverrides
         })
-        if (isVersion06(userOperation)) {
-            return this.gasEstimatorV06.simulateHandleOpV06({
-                userOperation,
+
+        if (isVersion06(userOp)) {
+            return this.gasEstimator06.simulateHandleOp06({
+                userOp,
                 entryPoint,
                 targetAddress,
                 targetCallData,
-                stateOverrides: finalStateOverride
+                userStateOverrides: finalStateOverride
             })
         }
 
-        return this.gasEstimatorV07.validateHandleOpV07({
-            userOperation: userOperation as UserOperationV07,
-            queuedUserOperations: queuedUserOperations as UserOperationV07[],
+        return this.gasEstimator07.validateHandleOp07({
+            userOp: userOp as UserOperation07,
+            queuedUserOps: queuedUserOps as UserOperation07[],
             entryPoint,
             stateOverrides: finalStateOverride
         })
     }
 
     simulateHandleOp({
-        userOperation,
-        queuedUserOperations,
+        userOp,
+        queuedUserOps,
         entryPoint,
         targetAddress,
         targetCallData,
         stateOverrides = {}
     }: {
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         targetAddress: Address
         targetCallData: Hex
         stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult> {
         const finalStateOverride = getStateOverrides({
-            userOperation,
+            userOp,
             addSenderBalanceOverride: false,
             stateOverrides
         })
-        if (isVersion06(userOperation)) {
-            return this.gasEstimatorV06.simulateHandleOpV06({
-                userOperation,
+
+        if (isVersion06(userOp)) {
+            return this.gasEstimator06.simulateHandleOp06({
+                userOp,
                 entryPoint,
                 targetAddress,
                 targetCallData,
-                stateOverrides: finalStateOverride
+                userStateOverrides: finalStateOverride
             })
         }
 
-        return this.gasEstimatorV07.simulateHandleOpV07({
-            userOperation: userOperation as UserOperationV07,
-            queuedUserOperations: queuedUserOperations as UserOperationV07[],
+        return this.gasEstimator07.simulateHandleOp07({
+            userOp: userOp as UserOperation07,
+            queuedUserOps: queuedUserOps as UserOperation07[],
             entryPoint,
-            stateOverrides: finalStateOverride
+            userStateOverrides: finalStateOverride
         })
     }
 }

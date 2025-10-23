@@ -1,4 +1,5 @@
 import {
+    type EntryPointVersion,
     RpcError,
     type UserOpInfo,
     type UserOperationBundle,
@@ -6,9 +7,10 @@ import {
     pimlicoSendUserOperationNowSchema
 } from "@alto/types"
 import {
-    getUserOperationHash,
-    isVersion06,
-    parseUserOperationReceipt
+    getUserOpHash,
+    isVersion07,
+    isVersion08,
+    parseUserOpReceipt
 } from "@alto/utils"
 import { createMethodHandler } from "../createMethodHandler"
 
@@ -23,28 +25,28 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
             )
         }
 
-        const [userOperation, entryPoint] = params
-
+        const [userOp, entryPoint] = params
         rpcHandler.ensureEntryPointIsSupported(entryPoint)
-        const opHash = await getUserOperationHash({
-            userOperation: userOperation,
+
+        const opHash = await getUserOpHash({
+            userOp,
             entryPointAddress: entryPoint,
             chainId: rpcHandler.config.chainId,
             publicClient: rpcHandler.config.publicClient
         })
 
-        await rpcHandler.preMempoolChecks(
-            opHash,
-            userOperation,
-            apiVersion,
-            entryPoint
-        )
+        const [preMempoolValid, preMempoolError] =
+            await rpcHandler.preMempoolChecks(userOp, apiVersion)
+
+        if (!preMempoolValid) {
+            throw new RpcError(preMempoolError, ValidationErrors.InvalidFields)
+        }
 
         // Prepare bundle
-        const userOperationInfo: UserOpInfo = {
-            userOp: userOperation,
-            userOpHash: await getUserOperationHash({
-                userOperation: userOperation,
+        const userOpInfo: UserOpInfo = {
+            userOp,
+            userOpHash: await getUserOpHash({
+                userOp,
                 entryPointAddress: entryPoint,
                 chainId: rpcHandler.config.chainId,
                 publicClient: rpcHandler.config.publicClient
@@ -52,13 +54,24 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
             addedToMempool: Date.now(),
             submissionAttempts: 0
         }
+
+        // Derive version
+        let version: EntryPointVersion
+        if (isVersion08(userOp, entryPoint)) {
+            version = "0.8"
+        } else if (isVersion07(userOp)) {
+            version = "0.7"
+        } else {
+            version = "0.6"
+        }
+
         const bundle: UserOperationBundle = {
             entryPoint,
-            userOps: [userOperationInfo],
-            version: isVersion06(userOperation)
-                ? ("0.6" as const)
-                : ("0.7" as const)
+            userOps: [userOpInfo],
+            version,
+            submissionAttempts: 0
         }
+        rpcHandler.mempool.store.addProcessing({ entryPoint, userOpInfo })
         const result =
             await rpcHandler.executorManager.sendBundleToExecutor(bundle)
 
@@ -76,6 +89,6 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
                 pollingInterval: 100
             })
 
-        return parseUserOperationReceipt(opHash, receipt)
+        return parseUserOpReceipt(opHash, receipt)
     }
 })
