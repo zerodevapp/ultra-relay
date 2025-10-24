@@ -304,11 +304,6 @@ export const mempoolArgsSchema = z.object({
     "enforce-unique-senders-per-bundle": z.boolean().default(true)
 })
 
-export const observabilityArgsSchema = z.object({
-    "enable-telemetry": z.boolean().default(false),
-    "otlp-endpoint": z.string().url().optional()
-})
-
 export const redisArgsSchema = z.object({
     "enable-horizontal-scaling": z.boolean().default(false),
     "enable-redis-receipt-cache": z.boolean().default(false),
@@ -345,9 +340,6 @@ export type IGasEstimationArgsInput = z.input<typeof gasEstimationArgsSchema>
 export type IMempoolArgs = z.infer<typeof mempoolArgsSchema>
 export type IMempoolArgsInput = z.input<typeof mempoolArgsSchema>
 
-export type IObservabilityArgs = z.infer<typeof observabilityArgsSchema>
-export type IObservabilityArgsInput = z.input<typeof observabilityArgsSchema>
-
 export type IRedisArgs = z.infer<typeof redisArgsSchema>
 export type IRedisArgsInput = z.input<typeof redisArgsSchema>
 
@@ -361,7 +353,6 @@ export const optionArgsSchema = z.object({
     ...gasEstimationArgsSchema.shape,
     ...executorArgsSchema.shape,
     ...mempoolArgsSchema.shape,
-    ...observabilityArgsSchema.shape,
     ...redisArgsSchema.shape
 })
 

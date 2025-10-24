@@ -8,7 +8,6 @@ import type {
     IGasEstimationArgsInput,
     ILogArgsInput,
     IMempoolArgsInput,
-    IObservabilityArgsInput,
     IOptionsInput,
     IRedisArgsInput,
     IRpcArgsInput,
@@ -733,22 +732,6 @@ export const debugOptions: CliCommandOptions<IDebugArgsInput> = {
         default: true
     }
 }
-
-export const observabilityOptions: CliCommandOptions<IObservabilityArgsInput> =
-    {
-        "enable-telemetry": {
-            description: "Enable OpenTelemetry distributed tracing",
-            type: "boolean",
-            require: false,
-            default: false
-        },
-        "otlp-endpoint": {
-            description:
-                "OTLP endpoint URL for trace export (e.g., http://tempo:4318/v1/traces)",
-            type: "string",
-            require: false
-        }
-    }
 
 export const bundlerCommand: CliCommand<IOptionsInput> = {
     command: "$0",
