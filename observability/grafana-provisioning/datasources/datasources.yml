@@ -4,6 +4,7 @@ datasources:
   # Prometheus datasource for metrics
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
@@ -14,6 +15,7 @@ datasources:
   # Tempo datasource for distributed tracing
   - name: Tempo
     type: tempo
+    uid: tempo
     access: proxy
     url: http://tempo:3200
     editable: false
@@ -33,6 +35,7 @@ datasources:
   # Loki datasource for logs
   - name: Loki
     type: loki
+    uid: loki
     access: proxy
     url: http://loki:3100
     editable: false

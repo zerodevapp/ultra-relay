@@ -27,6 +27,17 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Check if jq is available
+if ! command -v jq &> /dev/null; then
+    echo -e "${RED}✗${NC}  jq is required but not installed"
+    echo -e "${YELLOW}   Install jq:${NC}"
+    echo -e "${YELLOW}   - macOS: brew install jq${NC}"
+    echo -e "${YELLOW}   - Ubuntu/Debian: apt-get install jq${NC}"
+    echo -e "${YELLOW}   - Fedora: dnf install jq${NC}"
+    echo -e "${YELLOW}   - Or visit: https://jqlang.github.io/jq/download/${NC}"
+    exit 1
+fi
+
 # Check if Anvil is available
 if ! command -v anvil &> /dev/null; then
     echo -e "${YELLOW}⚠${NC}  Anvil not found. Install Foundry: https://book.getfoundry.sh/getting-started/installation"

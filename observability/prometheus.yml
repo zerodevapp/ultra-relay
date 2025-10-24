@@ -7,9 +7,11 @@ global:
 
 scrape_configs:
   # Alto Bundler metrics
+  # Using service name (ultra-relay-provider) for cross-platform Docker compatibility
+  # This works on Linux, macOS, and Windows when bundler runs in the same Docker network
   - job_name: "alto-bundler"
     static_configs:
-      - targets: ["host.docker.internal:3000"]
+      - targets: ["ultra-relay-provider:3000"]
         labels:
           service: "alto-bundler"
     metrics_path: "/metrics"
