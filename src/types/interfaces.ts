@@ -4,86 +4,73 @@ import type {
     ReferencedCodeHashes,
     StateOverrides,
     UserOperation,
-    UserOperationV06,
-    UserOperationV07
+    UserOperation06,
+    UserOperation07
 } from "./schemas"
 import type * as validation from "./validation"
 
 export interface InterfaceValidator {
     validateHandleOp(args: {
-        userOperation: UserOperation
+        userOp: UserOperation
         entryPoint: Address
-        queuedUserOperations: UserOperation[]
+        queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }): Promise<SimulateHandleOpResult<"execution">>
+    }): Promise<{
+        callGasLimit: bigint
+        verificationGasLimit: bigint
+        paymasterVerificationGasLimit: bigint | null
+        paymasterPostOpGasLimit: bigint | null
+    }>
 
     getExecutionResult(args: {
-        userOperation: UserOperation
+        userOp: UserOperation
         entryPoint: Address
-        queuedUserOperations: UserOperation[]
+        queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }): Promise<SimulateHandleOpResult<"execution">>
+    }): Promise<SimulateHandleOpResult>
 
     getValidationResultV06(args: {
-        userOperation: UserOperationV06
+        userOp: UserOperation06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (
-            | validation.ValidationResult
-            | validation.ValidationResultWithAggregation
-        ) & {
+        validation.ValidationResult & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     >
 
     getValidationResultV07(args: {
-        userOperation: UserOperationV07
-        queuedUserOperations: UserOperation[]
+        userOp: UserOperation07
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (
-            | validation.ValidationResult
-            | validation.ValidationResultWithAggregation
-        ) & {
+        validation.ValidationResult & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     >
 
     getValidationResult(args: {
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        (
-            | validation.ValidationResult
-            | validation.ValidationResultWithAggregation
-        ) & {
+        validation.ValidationResult & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     >
 
-    validatePreVerificationGas(args: {
-        userOperation: UserOperation
-        entryPoint: Address
-    }): Promise<void>
-
-    validateUserOperation(args: {
-        shouldCheckPrefund: boolean
-        userOperation: UserOperation
-        queuedUserOperations: UserOperation[]
+    validateUserOp(args: {
+        userOp: UserOperation
+        queuedUserOps: UserOperation[]
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        (
-            | validation.ValidationResult
-            | validation.ValidationResultWithAggregation
-        ) & {
+        validation.ValidationResult & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }

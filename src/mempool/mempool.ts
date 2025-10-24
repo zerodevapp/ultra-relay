@@ -4,28 +4,33 @@ import {
     type Address,
     EntryPointV06Abi,
     EntryPointV07Abi,
+    type EntryPointVersion,
     type InterfaceValidator,
     type ReferencedCodeHashes,
+    type RejectedUserOp,
     RpcError,
     type StorageMap,
-    type SubmittedUserOp,
-    type TransactionInfo,
     type UserOpInfo,
     type UserOperation,
     type UserOperationBundle,
     ValidationErrors,
     type ValidationResult
 } from "@alto/types"
-import type { Logger } from "@alto/utils"
+import type { Logger, Metrics } from "@alto/utils"
 import {
+    getAAError,
     getAddressFromInitCodeOrPaymasterAndData,
-    getUserOperationHash,
+    getUserOpHash,
     isVersion06,
     isVersion07,
+    isVersion08,
+    jsonStringifyWithBigint,
     scaleBigIntByPercent
 } from "@alto/utils"
-import { getAddress, getContract } from "viem"
+import { type Hex, getAddress, getContract } from "viem"
+import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import type { AltoConfig } from "../createConfig"
+import { calculateAA95GasFloor } from "../executor/utils"
 import type { Monitor } from "./monitoring"
 import {
     type InterfaceReputationManager,
@@ -34,9 +39,10 @@ import {
 
 export class Mempool {
     private config: AltoConfig
+    private metrics: Metrics
     private monitor: Monitor
     private reputationManager: InterfaceReputationManager
-    private store: MempoolStore
+    public store: MempoolStore
     private throttledEntityBundleCount: number
     private logger: Logger
     private validator: InterfaceValidator
@@ -44,6 +50,7 @@ export class Mempool {
 
     constructor({
         config,
+        metrics,
         monitor,
         reputationManager,
         validator,
@@ -51,12 +58,14 @@ export class Mempool {
         eventManager
     }: {
         config: AltoConfig
+        metrics: Metrics
         monitor: Monitor
         reputationManager: InterfaceReputationManager
         validator: InterfaceValidator
         store: MempoolStore
         eventManager: EventManager
     }) {
+        this.metrics = metrics
         this.store = store
         this.config = config
         this.reputationManager = reputationManager
@@ -72,65 +81,133 @@ export class Mempool {
         this.eventManager = eventManager
     }
 
-    async replaceSubmitted({
-        userOpInfo,
-        transactionInfo
+    // === Methods for handling changing userOp state === //
+
+    async markUserOpsAsSubmitted({
+        userOps,
+        entryPoint,
+        transactionHash
     }: {
-        userOpInfo: UserOpInfo
-        transactionInfo: TransactionInfo
+        userOps: UserOpInfo[]
+        entryPoint: Address
+        transactionHash: Hex
     }) {
-        const entryPoint = transactionInfo.bundle.entryPoint
-        const { userOpHash } = userOpInfo
-        const sumbittedUserOps = await this.store.dumpSubmitted(entryPoint)
-        const existingUserOpToReplace = sumbittedUserOps.find(
-            (userOpInfo: SubmittedUserOp) =>
-                userOpInfo.userOpHash === userOpHash
+        await Promise.all(
+            userOps.map(async (userOpInfo) => {
+                const { userOpHash } = userOpInfo
+                await this.store.removeProcessing({ entryPoint, userOpHash })
+                await this.store.addSubmitted({ entryPoint, userOpInfo })
+                await this.monitor.setUserOpStatus(userOpHash, {
+                    status: "submitted",
+                    transactionHash
+                })
+            })
         )
 
-        if (existingUserOpToReplace) {
-            await this.store.removeSubmitted({ entryPoint, userOpHash })
-            await this.store.addSubmitted({
-                entryPoint,
-                submittedUserOp: {
-                    ...userOpInfo,
-                    transactionInfo
-                }
-            })
-            await this.monitor.setUserOperationStatus(userOpHash, {
-                status: "submitted",
-                transactionHash: transactionInfo.transactionHash
-            })
-        }
+        this.metrics.userOperationsSubmitted
+            .labels({ status: "success" })
+            .inc(userOps.length)
     }
 
-    async markSubmitted({
-        userOpHash,
-        transactionInfo
+    async resubmitUserOps({
+        userOps,
+        entryPoint,
+        reason
     }: {
-        userOpHash: Address
-        transactionInfo: TransactionInfo
+        userOps: UserOpInfo[]
+        entryPoint: Address
+        reason: string
     }) {
-        const entryPoint = transactionInfo.bundle.entryPoint
-        const processingUserOps = await this.store.dumpProcessing(entryPoint)
-        const processingUserOp = processingUserOps.find(
-            (userOpInfo: UserOpInfo) => userOpInfo.userOpHash === userOpHash
+        await Promise.all(
+            userOps.map(async (userOpInfo) => {
+                const { userOpHash, userOp } = userOpInfo
+                this.logger.warn(
+                    {
+                        userOpHash,
+                        reason
+                    },
+                    "resubmitting user operation"
+                )
+                await this.store.removeProcessing({ entryPoint, userOpHash })
+                await this.store.removeSubmitted({ entryPoint, userOpHash })
+                const [success, failureReason] = await this.add(
+                    userOp,
+                    entryPoint
+                )
+
+                if (!success) {
+                    this.logger.error(
+                        { userOpHash, failureReason },
+                        "Failed to resubmit user operation"
+                    )
+                    const rejectedUserOp = {
+                        ...userOpInfo,
+                        reason: failureReason
+                    }
+                    this.dropUserOps(entryPoint, [rejectedUserOp])
+                }
+            })
         )
 
-        if (processingUserOp) {
-            await this.store.removeProcessing({ entryPoint, userOpHash })
-            await this.store.addSubmitted({
-                entryPoint,
-                submittedUserOp: {
-                    ...processingUserOp,
-                    transactionInfo
-                }
-            })
-            await this.monitor.setUserOperationStatus(userOpHash, {
-                status: "submitted",
-                transactionHash: transactionInfo.transactionHash
-            })
-        }
+        this.metrics.userOperationsResubmitted.inc(userOps.length)
     }
+
+    async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {
+        await Promise.all(
+            rejectedUserOps.map(async (rejectedUserOp) => {
+                const { userOp, reason, userOpHash } = rejectedUserOp
+                await this.store.removeProcessing({ entryPoint, userOpHash })
+                await this.store.removeSubmitted({ entryPoint, userOpHash })
+                this.eventManager.emitDropped(
+                    userOpHash,
+                    reason,
+                    getAAError(reason)
+                )
+                await this.monitor.setUserOpStatus(userOpHash, {
+                    status: "rejected",
+                    transactionHash: null
+                })
+                this.logger.warn(
+                    {
+                        userOperation: jsonStringifyWithBigint(userOp),
+                        userOpHash,
+                        reason
+                    },
+                    "user operation rejected"
+                )
+            })
+        )
+    }
+
+    async removeProcessingUserOps({
+        userOps,
+        entryPoint
+    }: {
+        userOps: UserOpInfo[]
+        entryPoint: Address
+    }) {
+        await Promise.all(
+            userOps.map(async ({ userOpHash }) => {
+                await this.store.removeProcessing({ entryPoint, userOpHash })
+            })
+        )
+    }
+
+    async removeSubmittedUserOps({
+        userOps,
+        entryPoint
+    }: {
+        userOps: UserOpInfo[]
+        entryPoint: Address
+    }) {
+        await Promise.all(
+            userOps.map(async ({ userOpHash }) => {
+                await this.store.removeSubmitted({ entryPoint, userOpHash })
+            })
+        )
+    }
+
+    // === Methods for dropping mempool entries === //
 
     async dumpOutstanding(entryPoint: Address): Promise<UserOpInfo[]> {
         return await this.store.dumpOutstanding(entryPoint)
@@ -140,23 +217,11 @@ export class Mempool {
         return await this.store.dumpProcessing(entryPoint)
     }
 
-    async dumpSubmittedOps(entryPoint: Address): Promise<SubmittedUserOp[]> {
+    async dumpSubmittedOps(entryPoint: Address): Promise<UserOpInfo[]> {
         return await this.store.dumpSubmitted(entryPoint)
     }
 
-    async removeSubmitted({
-        entryPoint,
-        userOpHash
-    }: { entryPoint: Address; userOpHash: `0x${string}` }) {
-        await this.store.removeSubmitted({ entryPoint, userOpHash })
-    }
-
-    async removeProcessing({
-        entryPoint,
-        userOpHash
-    }: { entryPoint: Address; userOpHash: `0x${string}` }) {
-        await this.store.removeProcessing({ entryPoint, userOpHash })
-    }
+    // === Methods for entity management === //
 
     async checkEntityMultipleRoleViolation(
         entryPoint: Address,
@@ -255,13 +320,15 @@ export class Mempool {
         return entities
     }
 
+    // === Methods for adding userOps / creating bundles === //
+
     async add(
         userOp: UserOperation,
         entryPoint: Address,
         referencedContracts?: ReferencedCodeHashes
     ): Promise<[boolean, string]> {
-        const userOpHash = await getUserOperationHash({
-            userOperation: userOp,
+        const userOpHash = await getUserOpHash({
+            userOp,
             entryPointAddress: entryPoint,
             chainId: this.config.chainId,
             publicClient: this.config.publicClient
@@ -341,13 +408,13 @@ export class Mempool {
                 `Replacing user operation ${userOpInfo.userOpHash} due to higher gas fees.`
             )
 
-            await this.reputationManager.replaceUserOperationSeenStatus(
+            await this.reputationManager.replaceUserOpSeenStatus(
                 conflictingUserOp,
                 entryPoint
             )
         }
 
-        await this.reputationManager.increaseUserOperationSeenStatus(
+        await this.reputationManager.increaseUserOpSeenStatus(
             userOp,
             entryPoint
         )
@@ -363,12 +430,12 @@ export class Mempool {
             }
         })
 
-        await this.monitor.setUserOperationStatus(userOpHash, {
+        await this.monitor.setUserOpStatus(userOpHash, {
             status: "not_submitted",
             transactionHash: null
         })
 
-        await this.eventManager.emitAddedToMempool(userOpHash)
+        this.eventManager.emitAddedToMempool(userOpHash)
         return [true, ""]
     }
 
@@ -538,19 +605,18 @@ export class Mempool {
         let validationResult: ValidationResult & { storageMap: StorageMap }
 
         try {
-            let queuedUserOperations: UserOperation[] = []
+            let queuedUserOps: UserOperation[] = []
 
             if (!isUserOpV06) {
-                queuedUserOperations = await this.getQueuedOustandingUserOps({
+                queuedUserOps = await this.getQueuedOutstandingUserOps({
                     userOp,
                     entryPoint
                 })
             }
 
-            validationResult = await this.validator.validateUserOperation({
-                shouldCheckPrefund: false,
-                userOperation: userOp,
-                queuedUserOperations,
+            validationResult = await this.validator.validateUserOp({
+                userOp,
+                queuedUserOps,
                 entryPoint,
                 referencedContracts
             })
@@ -563,7 +629,7 @@ export class Mempool {
                 "2nd Validation error"
             )
             this.store.removeOutstanding({ entryPoint, userOpHash })
-            this.reputationManager.decreaseUserOperationSeenStatus(
+            this.reputationManager.decreaseUserOpSeenStatus(
                 userOp,
                 entryPoint,
                 e instanceof RpcError ? e.message : JSON.stringify(e)
@@ -695,7 +761,6 @@ export class Mempool {
         }
 
         // Get EntryPoint version
-        const isV6 = isVersion06(firstOp.userOp)
         const bundles: UserOperationBundle[] = []
         const seenOps = new Set()
         let breakLoop = false
@@ -707,11 +772,22 @@ export class Mempool {
                 break
             }
 
+            // Derive version
+            let version: EntryPointVersion
+            if (isVersion08(firstOp.userOp, entryPoint)) {
+                version = "0.8"
+            } else if (isVersion07(firstOp.userOp)) {
+                version = "0.7"
+            } else {
+                version = "0.6"
+            }
+
             // Setup for next bundle
             const currentBundle: UserOperationBundle = {
                 entryPoint,
-                version: isV6 ? "0.6" : "0.7",
-                userOps: []
+                version,
+                userOps: [],
+                submissionAttempts: 0
             }
             let gasUsed = 0n
             let paymasterDeposit: { [paymaster: string]: bigint } = {}
@@ -766,13 +842,14 @@ export class Mempool {
                     continue
                 }
 
-                gasUsed +=
-                    userOp.callGasLimit +
-                    userOp.verificationGasLimit +
-                    (isVersion07(userOp)
-                        ? (userOp.paymasterPostOpGasLimit || 0n) +
-                          (userOp.paymasterVerificationGasLimit || 0n)
-                        : 0n)
+                const beneficiary =
+                    this.config.utilityPrivateKey?.address ||
+                    privateKeyToAddress(generatePrivateKey())
+
+                gasUsed += calculateAA95GasFloor({
+                    userOps: [userOp],
+                    beneficiary
+                })
 
                 // Only break on gas limit if we've hit minOpsPerBundle
                 if (
@@ -810,7 +887,7 @@ export class Mempool {
                 senders = skipResult.senders
                 storageMap = skipResult.storageMap
 
-                this.reputationManager.decreaseUserOperationCount(userOp)
+                this.reputationManager.decreaseUserOpCount(userOp)
                 this.store.addProcessing({ entryPoint, userOpInfo })
 
                 // Add op to current bundle
@@ -831,7 +908,7 @@ export class Mempool {
         }
     }
 
-    public async getQueuedOustandingUserOps(args: {
+    public async getQueuedOutstandingUserOps(args: {
         userOp: UserOperation
         entryPoint: Address
     }) {

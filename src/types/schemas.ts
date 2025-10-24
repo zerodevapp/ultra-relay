@@ -1,4 +1,4 @@
-import { type Hash, type Hex, getAddress, maxUint256 } from "viem"
+import { type Hash, type Hex, getAddress, maxUint256, pad } from "viem"
 import { z } from "zod"
 
 const hexDataPattern = /^0x[0-9A-Fa-f]*$/
@@ -49,6 +49,47 @@ export type HexData = z.infer<typeof hexDataSchema>
 export type HexData32 = z.infer<typeof hexData32Schema>
 export type StateOverrides = z.infer<typeof stateOverridesSchema>
 
+const partialAuthorizationSchema = z.union([
+    z.object({
+        contractAddress: addressSchema,
+        chainId: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 1)),
+        nonce: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 0)),
+        r: hexDataSchema
+            .optional()
+            .transform((val) => (val as Hex) ?? pad("0x", { size: 32 })),
+        s: hexDataSchema
+            .optional()
+            .transform((val) => (val as Hex) ?? pad("0x", { size: 32 })),
+        v: hexNumberSchema.optional(),
+        yParity: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 0))
+    }),
+    z.object({
+        address: addressSchema,
+        chainId: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 1)),
+        nonce: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 0)),
+        r: hexDataSchema
+            .optional()
+            .transform((val) => (val as Hex) ?? pad("0x", { size: 32 })),
+        s: hexDataSchema
+            .optional()
+            .transform((val) => (val as Hex) ?? pad("0x", { size: 32 })),
+        v: hexNumberSchema.optional(),
+        yParity: hexNumberSchema
+            .optional()
+            .transform((val) => (val ? Number(val) : 0))
+    })
+])
+
 const signedAuthorizationSchema = z.union([
     z.object({
         contractAddress: addressSchema,
@@ -70,7 +111,7 @@ const signedAuthorizationSchema = z.union([
     })
 ])
 
-const userOperationV06Schema = z
+const userOperation06Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -90,7 +131,7 @@ const userOperationV06Schema = z
         return val
     })
 
-const userOperationV07Schema = z
+const userOperation07Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -130,7 +171,7 @@ const userOperationV07Schema = z
     .strict()
     .transform((val) => val)
 
-const userOperationV08Schema = z
+const userOperation08Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -171,7 +212,7 @@ const userOperationV08Schema = z
     .strict()
     .transform((val) => val)
 
-const partialUserOperationV06Schema = z
+const partialUserOperation06Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -184,14 +225,14 @@ const partialUserOperationV06Schema = z
         maxFeePerGas: hexNumberSchema.default(1n),
         paymasterAndData: hexDataSchema,
         signature: hexDataSchema,
-        eip7702Auth: signedAuthorizationSchema.optional().nullable()
+        eip7702Auth: partialAuthorizationSchema.optional().nullable()
     })
     .strict()
     .transform((val) => {
         return val
     })
 
-const partialUserOperationV07Schema = z
+const partialUserOperation07Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -226,12 +267,12 @@ const partialUserOperationV07Schema = z
             .optional()
             .transform((val) => val ?? null),
         signature: hexDataSchema,
-        eip7702Auth: signedAuthorizationSchema.optional().nullable()
+        eip7702Auth: partialAuthorizationSchema.optional().nullable()
     })
     .strict()
     .transform((val) => val)
 
-const partialUserOperationV08Schema = z
+const partialUserOperation08Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -267,7 +308,7 @@ const partialUserOperationV08Schema = z
             .optional()
             .transform((val) => val ?? null),
         signature: hexDataSchema,
-        eip7702Auth: signedAuthorizationSchema.optional().nullable()
+        eip7702Auth: partialAuthorizationSchema.optional().nullable()
     })
     .strict()
     .transform((val) => val)
@@ -288,20 +329,20 @@ const packerUserOperationSchema = z
     .transform((val) => val)
 
 const partialUserOperationSchema = z.union([
-    partialUserOperationV06Schema,
-    partialUserOperationV07Schema,
-    partialUserOperationV08Schema
+    partialUserOperation06Schema,
+    partialUserOperation07Schema,
+    partialUserOperation08Schema
 ])
 
 export const userOperationSchema = z.union([
-    userOperationV06Schema,
-    userOperationV07Schema,
-    userOperationV08Schema
+    userOperation06Schema,
+    userOperation07Schema,
+    userOperation08Schema
 ])
 
-export type UserOperationV06 = z.infer<typeof userOperationV06Schema>
-export type UserOperationV07 = z.infer<typeof userOperationV07Schema>
-export type UserOperationV08 = z.infer<typeof userOperationV08Schema>
+export type UserOperation06 = z.infer<typeof userOperation06Schema>
+export type UserOperation07 = z.infer<typeof userOperation07Schema>
+export type UserOperation08 = z.infer<typeof userOperation08Schema>
 export type PackedUserOperation = z.infer<typeof packerUserOperationSchema>
 export type UserOperation = z.infer<typeof userOperationSchema>
 
@@ -355,21 +396,19 @@ export const receiptSchema = z.object({
     //type: hexNumberSchema
 })
 
-const userOperationReceiptSchema = z
-    .object({
-        userOpHash: hexData32Schema,
-        entryPoint: addressSchema,
-        sender: addressSchema,
-        nonce: hexNumberSchema,
-        paymaster: addressSchema.optional(),
-        actualGasCost: hexNumberSchema,
-        actualGasUsed: hexNumberSchema,
-        success: z.boolean(),
-        reason: hexDataSchema.optional(), // revert reason
-        logs: z.array(logSchema),
-        receipt: receiptSchema
-    })
-    .or(z.null())
+export const userOperationReceiptSchema = z.object({
+    userOpHash: hexData32Schema,
+    entryPoint: addressSchema,
+    sender: addressSchema,
+    nonce: hexNumberSchema,
+    paymaster: addressSchema.optional(),
+    actualGasCost: hexNumberSchema,
+    actualGasUsed: hexNumberSchema,
+    success: z.boolean(),
+    reason: hexDataSchema.optional(), // revert reason
+    logs: z.array(logSchema),
+    receipt: receiptSchema
+})
 
 export type UserOperationReceipt = z.infer<typeof userOperationReceiptSchema>
 
@@ -449,6 +488,12 @@ export const sendUserOperationSchema = z.object({
     result: hexData32Schema
 })
 
+export const boostSendUserOperationSchema = z.object({
+    method: z.literal("boost_sendUserOperation"),
+    params: z.tuple([userOperationSchema, addressSchema]),
+    result: hexData32Schema
+})
+
 export const getUserOperationByHashSchema = z.object({
     method: z.literal("eth_getUserOperationByHash"),
     params: z.tuple([
@@ -476,7 +521,7 @@ export const getUserOperationReceiptSchema = z.object({
             .regex(hexData32Pattern, { message: "Missing/invalid userOpHash" })
             .transform((val) => val as Hex)
     ]),
-    result: userOperationReceiptSchema
+    result: userOperationReceiptSchema.or(z.null())
 })
 
 export const debugClearStateSchema = z.object({
@@ -579,7 +624,38 @@ export const pimlicoGetUserOperationGasPriceSchema = z.object({
 export const pimlicoSendUserOperationNowSchema = z.object({
     method: z.literal("pimlico_sendUserOperationNow"),
     params: z.tuple([userOperationSchema, addressSchema]),
-    result: userOperationReceiptSchema
+    result: userOperationReceiptSchema.or(z.null())
+})
+
+export const pimlicoSimulateAssetChangeSchema = z.object({
+    method: z.literal("pimlico_simulateAssetChange"),
+    params: z.union([
+        z.tuple([
+            userOperationSchema,
+            addressSchema, // entryPoint
+            z.object({
+                addresses: z.array(addressSchema),
+                tokens: z.array(addressSchema)
+            })
+        ]),
+        z.tuple([
+            userOperationSchema,
+            addressSchema, // entryPoint
+            z.object({
+                addresses: z.array(addressSchema),
+                tokens: z.array(addressSchema)
+            }),
+            stateOverridesSchema // optional state overrides
+        ])
+    ]),
+    result: z.array(
+        z.object({
+            address: addressSchema,
+            token: addressSchema,
+            balanceBefore: hexNumberSchema,
+            balanceAfter: hexNumberSchema
+        })
+    )
 })
 
 export const altoVersions = z.enum(["v1", "v2"])
@@ -591,6 +667,7 @@ export const bundlerRequestSchema = z.discriminatedUnion("method", [
     supportedEntryPointsSchema.omit({ result: true }),
     estimateUserOperationGasSchema.omit({ result: true }),
     sendUserOperationSchema.omit({ result: true }),
+    boostSendUserOperationSchema.omit({ result: true }),
     getUserOperationByHashSchema.omit({ result: true }),
     getUserOperationReceiptSchema.omit({ result: true }),
     debugClearStateSchema.omit({ result: true }),
@@ -604,7 +681,8 @@ export const bundlerRequestSchema = z.discriminatedUnion("method", [
     debugGetStakeStatusSchema.omit({ result: true }),
     pimlicoGetUserOperationStatusSchema.omit({ result: true }),
     pimlicoGetUserOperationGasPriceSchema.omit({ result: true }),
-    pimlicoSendUserOperationNowSchema.omit({ result: true })
+    pimlicoSendUserOperationNowSchema.omit({ result: true }),
+    pimlicoSimulateAssetChangeSchema.omit({ result: true })
 ])
 export type BundlerRequest = z.infer<typeof bundlerRequestSchema>
 
@@ -613,6 +691,7 @@ export const bundlerRpcSchema = z.union([
     supportedEntryPointsSchema,
     estimateUserOperationGasSchema,
     sendUserOperationSchema,
+    boostSendUserOperationSchema,
     getUserOperationByHashSchema,
     getUserOperationReceiptSchema,
     debugClearStateSchema,
@@ -626,16 +705,15 @@ export const bundlerRpcSchema = z.union([
     debugGetStakeStatusSchema,
     pimlicoGetUserOperationStatusSchema,
     pimlicoGetUserOperationGasPriceSchema,
-    pimlicoSendUserOperationNowSchema
+    pimlicoSendUserOperationNowSchema,
+    pimlicoSimulateAssetChangeSchema
 ])
 
 export type BundlingMode = z.infer<
     typeof debugSetBundlingModeSchema
 >["params"][0]
 
-// biome-ignore lint/style/useNamingConvention: <explanation>
 export type JSONRPCRequest = z.infer<typeof jsonRpcSchema>
-// biome-ignore lint/style/useNamingConvention: <explanation>
 export type JSONRPCResponse = z.infer<typeof jsonRpcResultSchema>
 
 const OpEventType = z.union([
@@ -707,19 +785,15 @@ export const referencedCodeHashesSchema = z.object({
     hash: z.string()
 })
 
-export const userOpDetailsSchema = z.object({
+export const userOpInfoSchema = z.object({
+    userOp: userOperationSchema,
+    // === userOp Details ===
     userOpHash: hexData32Schema,
-    // timestamp when the bundling process begins (when it leaves outstanding mempool)
-    addedToMempool: z.number(),
+    addedToMempool: z.number(), // timestamp when the bundling process begins (when it leaves outstanding mempool)
     referencedContracts: referencedCodeHashesSchema.optional(),
     submissionAttempts: z.number()
 })
 
-export const userOpInfoSchema = userOpDetailsSchema.extend({
-    userOp: userOperationSchema
-})
-
 // Export types derived from schemas
 export type ReferencedCodeHashes = z.infer<typeof referencedCodeHashesSchema>
-export type UserOpDetails = z.infer<typeof userOpDetailsSchema>
 export type UserOpInfo = z.infer<typeof userOpInfoSchema>

@@ -1,14 +1,9 @@
-import type {
-    HexData32,
-    SubmittedUserOp,
-    UserOpInfo,
-    UserOperation
-} from "@alto/types"
+import type { HexData32, UserOperation } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Logger } from "@alto/utils"
+import * as sentry from "@sentry/node"
 import type { Address } from "viem"
 import type {
-    EntryPointSubmittedUserOpParam,
     EntryPointUserOpHashParam,
     EntryPointUserOpInfoParam,
     MempoolStore,
@@ -36,8 +31,8 @@ export const createMempoolStore = ({
     const storeHandlers: Map<
         Address,
         {
-            processing: Store<UserOpInfo>
-            submitted: Store<SubmittedUserOp>
+            processing: Store
+            submitted: Store
             outstanding: OutstandingStore
         }
     > = new Map()
@@ -55,34 +50,48 @@ export const createMempoolStore = ({
 
     for (const entryPoint of config.entrypoints) {
         let outstanding: OutstandingStore
-        let processing: Store<UserOpInfo>
-        let submitted: Store<SubmittedUserOp>
-        if (config.redisMempoolUrl) {
+        let processing: Store
+        let submitted: Store
+        if (config.enableHorizontalScaling && config.redisEndpoint) {
             outstanding = createRedisOutstandingQueue({
                 config,
-                entryPoint
+                entryPoint,
+                redisEndpoint: config.redisEndpoint
             })
-            processing = createRedisStore<UserOpInfo>({
+            processing = createRedisStore({
                 config,
                 entryPoint,
-                storeType: "processing"
+                storeType: "processing",
+                redisEndpoint: config.redisEndpoint
             })
-            submitted = createRedisStore<SubmittedUserOp>({
+            submitted = createRedisStore({
                 config,
                 entryPoint,
-                storeType: "submitted"
+                storeType: "submitted",
+                redisEndpoint: config.redisEndpoint
             })
+
+            // Log the Redis keys being used
+            const outstandingKey = `${config.chainId}:outstanding:pending-queue:${entryPoint}`
+            const processingKey = `${config.chainId}:processing:*:${entryPoint}`
+            const submittedKey = `${config.chainId}:submitted:*:${entryPoint}`
+
             logger.info(
-                "Using redis for outstanding, processing, submitted mempools"
+                {
+                    outstandingKey,
+                    processingKey,
+                    submittedKey
+                },
+                "Using redis for outstanding, processing, submitted mempools with keys"
             )
         } else {
             outstanding = createMemoryOutstandingQueue({
                 config
             })
-            processing = createMemoryStore<UserOpInfo>({
+            processing = createMemoryStore({
                 config
             })
-            submitted = createMemoryStore<SubmittedUserOp>({
+            submitted = createMemoryStore({
                 config
             })
             logger.info(
@@ -138,12 +147,30 @@ export const createMempoolStore = ({
     return {
         // Methods used for bundling
         popOutstanding: async (entryPoint: Address) => {
-            const { outstanding } = getStoreHandlers(entryPoint)
-            return await outstanding.pop()
+            try {
+                const { outstanding } = getStoreHandlers(entryPoint)
+                return await outstanding.pop()
+            } catch (err) {
+                logger.error(
+                    { err },
+                    "Failed to pop from outstanding mempool, defaulting to undefined"
+                )
+                sentry.captureException(err)
+                return undefined
+            }
         },
         peekOutstanding: async (entryPoint: Address) => {
-            const { outstanding } = getStoreHandlers(entryPoint)
-            return await outstanding.peek()
+            try {
+                const { outstanding } = getStoreHandlers(entryPoint)
+                return await outstanding.peek()
+            } catch (err) {
+                logger.error(
+                    { err },
+                    "Failed to peek from outstanding mempool, defaulting to undefined"
+                )
+                sentry.captureException(err)
+                return undefined
+            }
         },
 
         // State handling
@@ -153,49 +180,90 @@ export const createMempoolStore = ({
         }: EntryPointUserOpInfoParam) => {
             const { outstanding } = getStoreHandlers(entryPoint)
             logAddOperation(userOpInfo.userOpHash, "outstanding")
-            await outstanding.add(userOpInfo)
+            try {
+                await outstanding.add(userOpInfo)
+            } catch (err) {
+                logger.error({ err }, "Failed to add to outstanding mempool")
+                sentry.captureException(err)
+            }
         },
         addProcessing: ({
             entryPoint,
             userOpInfo
         }: EntryPointUserOpInfoParam) => {
-            const { processing } = getStoreHandlers(entryPoint)
-            logAddOperation(userOpInfo.userOpHash, "processing")
-            processing.add(userOpInfo)
-            return Promise.resolve()
+            try {
+                const { processing } = getStoreHandlers(entryPoint)
+                logAddOperation(userOpInfo.userOpHash, "processing")
+                processing.add(userOpInfo)
+                return Promise.resolve()
+            } catch (err) {
+                logger.error({ err }, "Failed to add to processing mempool")
+                sentry.captureException(err)
+                return Promise.resolve()
+            }
         },
         addSubmitted: ({
             entryPoint,
-            submittedUserOp
-        }: EntryPointSubmittedUserOpParam) => {
-            const { submitted } = getStoreHandlers(entryPoint)
-            logAddOperation(submittedUserOp.userOpHash, "submitted")
-            submitted.add(submittedUserOp)
-            return Promise.resolve()
+            userOpInfo
+        }: EntryPointUserOpInfoParam) => {
+            try {
+                const { submitted } = getStoreHandlers(entryPoint)
+                logAddOperation(userOpInfo.userOpHash, "submitted")
+                submitted.add(userOpInfo)
+                return Promise.resolve()
+            } catch (err) {
+                logger.error({ err }, "Failed to add to submitted mempool")
+                sentry.captureException(err)
+                return Promise.resolve()
+            }
         },
         removeOutstanding: async ({
             entryPoint,
             userOpHash
         }: EntryPointUserOpHashParam) => {
-            const { outstanding } = getStoreHandlers(entryPoint)
-            const removed = await outstanding.remove(userOpHash)
-            logRemoveOperation(userOpHash, "outstanding", removed)
+            try {
+                const { outstanding } = getStoreHandlers(entryPoint)
+                const removed = await outstanding.remove(userOpHash)
+                logRemoveOperation(userOpHash, "outstanding", removed)
+            } catch (err) {
+                logger.error(
+                    { err },
+                    "Failed to remove from outstanding mempool"
+                )
+                sentry.captureException(err)
+                return Promise.resolve()
+            }
         },
         removeProcessing: async ({
             entryPoint,
             userOpHash
         }: EntryPointUserOpHashParam) => {
-            const { processing } = getStoreHandlers(entryPoint)
-            const removed = await processing.remove(userOpHash)
-            logRemoveOperation(userOpHash, "processing", removed)
+            try {
+                const { processing } = getStoreHandlers(entryPoint)
+                const removed = await processing.remove(userOpHash)
+                logRemoveOperation(userOpHash, "processing", removed)
+            } catch (err) {
+                logger.error(
+                    { err },
+                    "Failed to remove from processing mempool"
+                )
+                sentry.captureException(err)
+                return Promise.resolve()
+            }
         },
         removeSubmitted: async ({
             entryPoint,
             userOpHash
         }: EntryPointUserOpHashParam) => {
-            const { submitted } = getStoreHandlers(entryPoint)
-            const removed = await submitted.remove(userOpHash)
-            logRemoveOperation(userOpHash, "submitted", removed)
+            try {
+                const { submitted } = getStoreHandlers(entryPoint)
+                const removed = await submitted.remove(userOpHash)
+                logRemoveOperation(userOpHash, "submitted", removed)
+            } catch (err) {
+                logger.error({ err }, "Failed to remove from submitted mempool")
+                sentry.captureException(err)
+                return Promise.resolve()
+            }
         },
         dumpOutstanding: async (entryPoint: Address) => {
             const { outstanding } = getStoreHandlers(entryPoint)
@@ -265,8 +333,17 @@ export const createMempoolStore = ({
             entryPoint,
             userOp
         }: { entryPoint: Address; userOp: UserOperation }) => {
-            const { outstanding } = getStoreHandlers(entryPoint)
-            return await outstanding.popConflicting(userOp)
+            try {
+                const { outstanding } = getStoreHandlers(entryPoint)
+                return await outstanding.popConflicting(userOp)
+            } catch (err) {
+                logger.error(
+                    { err },
+                    "Failed to popConflicting from outstanding mempool, defaulting to undefined"
+                )
+                sentry.captureException(err)
+                return undefined
+            }
         },
 
         validateSenderLimits: ({

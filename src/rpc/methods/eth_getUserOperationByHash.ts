@@ -4,8 +4,8 @@ import {
     type HexData32,
     type PackedUserOperation,
     type UserOperation,
-    type UserOperationV06,
-    type UserOperationV07,
+    type UserOperation06,
+    type UserOperation07,
     getUserOperationByHashSchema
 } from "@alto/types"
 import {
@@ -17,10 +17,10 @@ import {
     slice,
     toFunctionSelector
 } from "viem"
-import { toUnpackedUserOperation } from "../../utils/userop"
+import { toUnpackedUserOp } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 
-const userOperationEventAbiItem = getAbiItem({
+const userOpEventAbiItem = getAbiItem({
     abi: EntryPointV06Abi,
     name: "UserOperationEvent"
 })
@@ -29,7 +29,7 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
     method: "eth_getUserOperationByHash",
     schema: getUserOperationByHashSchema,
     handler: async ({ rpcHandler, params }) => {
-        const [userOperationHash] = params
+        const [userOpHash] = params
 
         let fromBlock: bigint | undefined
         let toBlock: "latest" | undefined
@@ -45,11 +45,11 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
 
         const filterResult = await rpcHandler.config.publicClient.getLogs({
             address: rpcHandler.config.entrypoints,
-            event: userOperationEventAbiItem,
+            event: userOpEventAbiItem,
             fromBlock,
             toBlock,
             args: {
-                userOpHash: userOperationHash
+                userOpHash
             }
         })
 
@@ -86,7 +86,7 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
             return null
         }
 
-        let op: UserOperationV06 | UserOperationV07
+        let op: UserOperation06 | UserOperation07
         try {
             const decoded = decodeFunctionData({
                 abi: [...EntryPointV06Abi, ...EntryPointV07Abi],
@@ -99,7 +99,7 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
 
             const ops = decoded.args[0]
             const foundOp = ops.find(
-                (op: UserOperationV06 | PackedUserOperation) =>
+                (op: UserOperation06 | PackedUserOperation) =>
                     op.sender === userOperationEvent.args.sender &&
                     op.nonce === userOperationEvent.args.nonce
             )
@@ -115,9 +115,9 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
             const handleOpsV07Selector = toFunctionSelector(handleOpsV07AbiItem)
 
             if (slice(tx.input, 0, 4) === handleOpsV07Selector) {
-                op = toUnpackedUserOperation(foundOp as PackedUserOperation)
+                op = toUnpackedUserOp(foundOp as PackedUserOperation)
             } else {
-                op = foundOp as UserOperationV06
+                op = foundOp as UserOperation06
             }
         } catch {
             return null

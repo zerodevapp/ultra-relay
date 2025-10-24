@@ -90,6 +90,7 @@ export const initDebugLogger = (level = "debug"): Logger => {
 let transport: any
 
 if (process.env.BETTER_STACK_TOKEN) {
+    // @ts-ignore - pino.transport exists at runtime but types may be incomplete
     transport = pino.transport({
         target: "@logtail/pino",
         options: { sourceToken: process.env.BETTER_STACK_TOKEN }
