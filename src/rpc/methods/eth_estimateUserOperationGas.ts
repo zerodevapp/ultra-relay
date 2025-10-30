@@ -6,7 +6,6 @@ import {
     ValidationErrors,
     estimateUserOperationGasSchema
 } from "@alto/types"
-import { parseEther, toHex } from "viem"
 import { maxBigInt, scaleBigIntByPercent } from "../../utils/bigInt"
 import {
     calcExecutionPvgComponent,
@@ -113,32 +112,32 @@ const getGasEstimates = async ({
 
     const simulationUserOp = {
         ...userOp,
-        maxFeePerGas: 1n,
-        maxPriorityFeePerGas: 1n,
+        // maxFeePerGas: 1n,
+        // maxPriorityFeePerGas: 1n,
         preVerificationGas: 0n,
         verificationGasLimit: simulationVerificationGasLimit,
         callGasLimit: simulationCallGasLimit
     }
 
     // Boosted userOperation must be simulated with maxFeePerGas/maxPriorityFeePerGas = 0.
-    const isBoosted =
-        userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+    // const isBoosted =
+    //     userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
 
-    if (isBoosted) {
-        const sender = userOp.sender
-        if (mutableStateOverrides === undefined) {
-            mutableStateOverrides = {}
-        }
+    // if (isBoosted) {
+    //     const sender = userOp.sender
+    //     if (mutableStateOverrides === undefined) {
+    //         mutableStateOverrides = {}
+    //     }
 
-        // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
-        // Because of this, sender must have atleast maxGas of wei.
-        const maxGas = parseEther("100")
+    //     // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
+    //     // Because of this, sender must have atleast maxGas of wei.
+    //     const maxGas = parseEther("100")
 
-        mutableStateOverrides[sender] = {
-            ...deepHexlify(mutableStateOverrides[sender] || {}),
-            balance: toHex(maxGas)
-        }
-    }
+    //     mutableStateOverrides[sender] = {
+    //         ...deepHexlify(mutableStateOverrides[sender] || {}),
+    //         balance: toHex(maxGas)
+    //     }
+    // }
 
     if (isVersion07(simulationUserOp)) {
         simulationUserOp.paymasterVerificationGasLimit =
