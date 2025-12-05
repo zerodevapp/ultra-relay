@@ -40,7 +40,7 @@ export const ethGetUserOperationByHashHandler = createMethodHandler({
             if (fromBlock < 0n) {
                 fromBlock = 0n
             }
-            toBlock = "latest"
+            toBlock = rpcHandler.config.blockTagSupport ? "latest" : undefined
         }
 
         const filterResult = await rpcHandler.config.publicClient.getLogs({

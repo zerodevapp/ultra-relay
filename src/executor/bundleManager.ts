@@ -453,7 +453,7 @@ export class BundleManager {
                 fromBlock = 0n
             }
 
-            toBlock = "latest"
+            toBlock = this.config.blockTagSupport ? "latest" : undefined
         }
 
         const filterResult = await this.config.publicClient.getLogs({
