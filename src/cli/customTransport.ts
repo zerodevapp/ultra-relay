@@ -15,6 +15,31 @@ import { formatAbiItem, rpc } from "viem/utils"
 import { simulationErrors } from "../rpc/estimation/utils"
 import { EntryPointV06Abi } from "../types/contracts"
 
+export function getRpcFetchOptions({
+    rpcUrl,
+    rpcBasicAuthUsername,
+    rpcBasicAuthPassword
+}: {
+    rpcUrl: string
+    rpcBasicAuthUsername?: string
+    rpcBasicAuthPassword?: string
+}): { headers: Record<string, string> } | undefined {
+    const headers: Record<string, string> = {}
+
+    // Basic auth
+    if (rpcBasicAuthUsername && rpcBasicAuthPassword) {
+        const credentials = `${rpcBasicAuthUsername}:${rpcBasicAuthPassword}`
+        headers.authorization = `Basic ${Buffer.from(credentials).toString("base64")}`
+    }
+
+    // Tenderly-specific header
+    if (rpcUrl.includes("tenderly")) {
+        headers["Accept-Encoding"] = "gzip"
+    }
+
+    return Object.keys(headers).length > 0 ? { headers } : undefined
+}
+
 export type RpcRequest = {
     jsonrpc?: "2.0" | undefined
     method: string

@@ -19,7 +19,7 @@ import { type AltoConfig, createConfig } from "../createConfig"
 import { getSenderManager } from "../executor/senderManager/index"
 import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
 import type { IOptionsInput } from "./config"
-import { customTransport } from "./customTransport"
+import { customTransport, getRpcFetchOptions } from "./customTransport"
 import { deploySimulationsContract } from "./deploySimulationsContract"
 import { parseArgs } from "./parseArgs"
 import { setupServer } from "./setupServer"
@@ -121,6 +121,12 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)
 
+    const fetchOptions = getRpcFetchOptions({
+        rpcUrl: args.rpcUrl,
+        rpcBasicAuthUsername: args.rpcBasicAuthUsername,
+        rpcBasicAuthPassword: args.rpcBasicAuthPassword
+    })
+
     const getChainId = async () => {
         const client = createPublicClient({
             transport: customTransport(args.rpcUrl, {
@@ -129,7 +135,8 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                     {
                         level: args.publicClientLogLevel || args.logLevel
                     }
-                )
+                ),
+                fetchOptions
             })
         })
         return await client.getChainId()
@@ -153,13 +160,6 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             public: { http: [args.rpcUrl] }
         }
     }
-    const fetchOptions = args.rpcUrl.includes("tenderly")
-        ? {
-              headers: {
-                  "Accept-Encoding": "gzip"
-              }
-          }
-        : {}
 
     let publicClient = createPublicClient({
         transport: customTransport(args.rpcUrl, {
@@ -194,7 +194,8 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             logger: logger.child(
                 { module: "wallet_client" },
                 { level: args.walletClientLogLevel || args.logLevel }
-            )
+            ),
+            fetchOptions
         })
 
     const walletClients = {

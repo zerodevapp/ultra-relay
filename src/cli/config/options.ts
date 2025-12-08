@@ -581,6 +581,16 @@ export const rpcOptions: CliCommandOptions<IRpcArgsInput> = {
         alias: "r",
         require: true
     },
+    "rpc-basic-auth-username": {
+        description: "Username for basic auth on RPC requests",
+        type: "string",
+        require: false
+    },
+    "rpc-basic-auth-password": {
+        description: "Password for basic auth on RPC requests",
+        type: "string",
+        require: false
+    },
     "send-transaction-rpc-url": {
         description: "RPC url to send transactions to (e.g. flashbots relay)",
         type: "string",
