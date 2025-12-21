@@ -56,5 +56,9 @@ RUN mkdir -p /app/src/lib/cli && ln -sf /app/src/esm/cli/alto.js /app/src/lib/cl
 # Always use JSON logs in production
 ENV ALTO_JSON=true
 
+# Add labels for log collection
+LABEL logging="alloy"
+LABEL environment="production"
+
 # start app
 ENTRYPOINT ["pnpm", "start"]

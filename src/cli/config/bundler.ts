@@ -340,9 +340,6 @@ export type IGasEstimationArgsInput = z.input<typeof gasEstimationArgsSchema>
 export type IMempoolArgs = z.infer<typeof mempoolArgsSchema>
 export type IMempoolArgsInput = z.input<typeof mempoolArgsSchema>
 
-export type IOptions = z.infer<typeof optionArgsSchema>
-export type IOptionsInput = z.input<typeof optionArgsSchema>
-
 export type IRedisArgs = z.infer<typeof redisArgsSchema>
 export type IRedisArgsInput = z.input<typeof redisArgsSchema>
 
@@ -358,3 +355,6 @@ export const optionArgsSchema = z.object({
     ...mempoolArgsSchema.shape,
     ...redisArgsSchema.shape
 })
+
+export type IOptions = z.infer<typeof optionArgsSchema>
+export type IOptionsInput = z.input<typeof optionArgsSchema>

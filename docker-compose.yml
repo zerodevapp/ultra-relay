@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  # Alto ERC-4337 Bundler
+  ultra-relay-provider:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ultra-relay-provider
+    labels:
+      logging: "alloy"
+    networks:
+      - alto-observability
+    environment:
+      # Override with your configuration
+      - ALTO_RPC_URL=${ALTO_RPC_URL}
+      - ALTO_PORT=3000
+      - ALTO_ENABLE_TELEMETRY=true
+      - ALTO_OTLP_ENDPOINT=http://tempo:4318
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+networks:
+  alto-observability:
+    name: alto-observability

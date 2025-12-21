@@ -22,7 +22,7 @@
         "build:contracts:EPSimulations07": "forge build --quiet --root contracts --evm-version paris --out ../src/contracts/ src/v07/EntryPointSimulations.sol",
         "build:contracts:EPSimulations08": "forge build --quiet --root contracts --evm-version cancun --out ../src/contracts/ src/v08/EntryPointSimulations.sol",
         "build:contracts": "pnpm run build:contracts:PimlicoSimulations && pnpm run build:contracts:EPFilterOpsOverride06 && pnpm run build:contracts:EPFilterOpsOverride07 && pnpm run build:contracts:EPFilterOpsOverride08 && pnpm run build:contracts:EPGasEstimationOverride06 && pnpm run build:contracts:EPSimulations07 && pnpm run build:contracts:EPSimulations08",
-        "start": "node src/esm/cli/alto.js run",
+        "start": "node --require ./src/esm/cli/instrumentation.js src/esm/cli/alto.js run",
         "dev": "nodemon --ext ts,js,json --watch src --exec DOTENV_CONFIG_PATH=$(pwd)/.env tsx --tsconfig src/tsconfig.json src/cli/alto.ts run",
         "test": "pnpm --filter e2e run test",
         "test:ci": "pnpm --filter e2e run test:ci",
