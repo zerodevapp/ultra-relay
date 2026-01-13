@@ -29,7 +29,11 @@ import type { AltoConfig } from "../createConfig"
 import { pimlicoSimulationsAbi } from "../types/contracts/PimlicoSimulations"
 import { getEip7702DelegationOverrides } from "../utils/eip7702"
 import { getFilterOpsStateOverride } from "../utils/entryPointOverrides"
-import { calculateAA95GasFloor, encodeHandleOpsCalldata } from "./utils"
+import {
+    calculateAA95GasFloor,
+    encodeHandleOpsCalldata,
+    getAuthorizationList
+} from "./utils"
 
 export type FilterOpsResult =
     | {
@@ -115,13 +119,18 @@ const getBundleGasLimit = async ({
 
     // On some chains we can't rely on local calculations and have to estimate the gasLimit from RPC
     if (rpcGasEstimate) {
+        // For 7702 userOps, we need to include the authorizationList so the RPC
+        // can properly simulate with the delegated code in place
+        const authorizationList = getAuthorizationList(userOpBundle)
+
         gasLimit = await publicClient.estimateGas({
             to: entryPoint,
             account: executorAddress,
             data: encodeHandleOpsCalldata({
                 userOps: userOpBundle.map(({ userOp }) => userOp),
                 beneficiary: executorAddress
-            })
+            }),
+            ...(authorizationList ? { authorizationList } : {})
         })
     } else {
         const aa95GasFloor = calculateAA95GasFloor({
