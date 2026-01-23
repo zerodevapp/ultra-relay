@@ -20,6 +20,7 @@ import entrypointSimulationsJsonV8 from "../contracts/EntryPointSimulations.sol/
 import pimlicoSimulationsJson from "../contracts/PimlicoSimulations.sol/PimlicoSimulations.json" with {
     type: "json"
 }
+import { getRpcFetchOptions } from "./customTransport"
 import type { CamelCasedProperties } from "./parseArgs"
 
 export const DETERMINISTIC_DEPLOYER_TRANSACTION =
@@ -109,8 +110,14 @@ export const deploySimulationsContract = async ({
         }
     }
 
+    const fetchOptions = getRpcFetchOptions({
+        rpcUrl: args.rpcUrl,
+        rpcBasicAuthUsername: args.rpcBasicAuthUsername,
+        rpcBasicAuthPassword: args.rpcBasicAuthPassword
+    })
+
     const walletClient = createWalletClient({
-        transport: http(args.rpcUrl),
+        transport: http(args.rpcUrl, { fetchOptions }),
         account: utilityPrivateKey
     })
 

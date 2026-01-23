@@ -204,6 +204,8 @@ export const serverArgsSchema = z.object({
 
 export const rpcArgsSchema = z.object({
     "rpc-url": z.string().url(),
+    "rpc-basic-auth-username": z.string().optional(),
+    "rpc-basic-auth-password": z.string().optional(),
     "send-transaction-rpc-url": z.string().url().optional(),
     "block-time": z.number().int().min(0),
     "max-block-wait-count": z.number().int().min(0).optional().default(2),
