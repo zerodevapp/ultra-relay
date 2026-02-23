@@ -189,7 +189,9 @@ export class Server {
                 chainId: this.config.chainId
             })
         } catch {
-            await reply.status(500).send({ error: "Failed to retrieve wallets" })
+            await reply
+                .status(500)
+                .send({ error: "Failed to retrieve wallets" })
         }
     }
 
