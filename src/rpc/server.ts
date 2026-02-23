@@ -154,6 +154,7 @@ export class Server {
 
         this.fastify.get("/health", this.healthCheck.bind(this))
         this.fastify.get("/metrics", this.serveMetrics.bind(this))
+        this.fastify.get("/wallets", this.getWallets.bind(this))
 
         this.rpcEndpoint = rpcEndpoint
         this.registry = registry
@@ -173,6 +174,25 @@ export class Server {
         reply: FastifyReply
     ): Promise<void> {
         await reply.status(200).send("OK")
+    }
+
+    public async getWallets(
+        _request: FastifyRequest,
+        reply: FastifyReply
+    ): Promise<void> {
+        try {
+            const wallets = this.config.executorPrivateKeys.map(
+                (account) => account.address
+            )
+            await reply.status(200).send({
+                wallets,
+                chainId: this.config.chainId
+            })
+        } catch {
+            await reply
+                .status(500)
+                .send({ error: "Failed to retrieve wallets" })
+        }
     }
 
     private async rpcSocket(
