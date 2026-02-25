@@ -11,6 +11,7 @@ import {
     calcExecutionPvgComponent,
     calcL2PvgComponent
 } from "../../utils/preVerificationGasCalulator"
+import { parseEther, toHex } from "viem"
 import { deepHexlify, isVersion06, isVersion07 } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
@@ -112,32 +113,33 @@ const getGasEstimates = async ({
 
     const simulationUserOp = {
         ...userOp,
-        // maxFeePerGas: 1n,
-        // maxPriorityFeePerGas: 1n,
         preVerificationGas: 0n,
         verificationGasLimit: simulationVerificationGasLimit,
         callGasLimit: simulationCallGasLimit
     }
 
-    // Boosted userOperation must be simulated with maxFeePerGas/maxPriorityFeePerGas = 0.
-    // const isBoosted =
-    //     userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+    // For v0.6 boosted userOps (maxFeePerGas=0), simulate with maxFeePerGas=1
+    // so the EntryPoint returns meaningful `paid` values for callGasLimit calculation.
+    if (
+        isVersion06(simulationUserOp) &&
+        userOp.maxFeePerGas === 0n &&
+        userOp.maxPriorityFeePerGas === 0n
+    ) {
+        // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
+        // Because of this, sender must have atleast maxGas of wei.
+        const maxGas = parseEther("100000000")
 
-    // if (isBoosted) {
-    //     const sender = userOp.sender
-    //     if (mutableStateOverrides === undefined) {
-    //         mutableStateOverrides = {}
-    //     }
+        simulationUserOp.maxFeePerGas = 1n
+        simulationUserOp.maxPriorityFeePerGas = 1n
 
-    //     // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
-    //     // Because of this, sender must have atleast maxGas of wei.
-    //     const maxGas = parseEther("100")
-
-    //     mutableStateOverrides[sender] = {
-    //         ...deepHexlify(mutableStateOverrides[sender] || {}),
-    //         balance: toHex(maxGas)
-    //     }
-    // }
+        if (mutableStateOverrides === undefined) {
+            mutableStateOverrides = {}
+        }
+        mutableStateOverrides[userOp.sender] = {
+            ...deepHexlify(mutableStateOverrides[userOp.sender] || {}),
+            balance: toHex(maxGas)
+        }
+    }
 
     if (isVersion07(simulationUserOp)) {
         simulationUserOp.paymasterVerificationGasLimit =
