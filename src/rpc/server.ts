@@ -186,7 +186,9 @@ export class Server {
             )
             await reply.status(200).send({
                 wallets,
-                chainId: this.config.chainId
+                chainId: this.config.chainId,
+                utilityWalletAddress: this.config.utilityWalletAddress,
+                refillingWallets: this.config.refillingWallets,
             })
         } catch {
             await reply
