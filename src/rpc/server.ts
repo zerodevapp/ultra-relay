@@ -188,7 +188,7 @@ export class Server {
                 wallets,
                 chainId: this.config.chainId,
                 utilityWalletAddress: this.config.utilityWalletAddress,
-                refillingWallets: this.config.refillingWallets,
+                refillingWallets: this.config.refillingWallets
             })
         } catch {
             await reply
