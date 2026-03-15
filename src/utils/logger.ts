@@ -95,6 +95,10 @@ if (process.env.BETTER_STACK_TOKEN) {
         target: "@logtail/pino",
         options: { sourceToken: process.env.BETTER_STACK_TOKEN }
     })
+
+    transport.on("error", (err: Error) => {
+        console.error(`Logtail transport error: ${err.message}`)
+    })
 }
 
 export const initProductionLogger = (level: string): Logger => {
