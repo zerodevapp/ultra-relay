@@ -97,11 +97,11 @@ if (process.env.BETTER_STACK_TOKEN) {
     })
 
     transport.on("error", (err: Error) => {
-        console.error(`Logtail transport error: ${err.message}`)
-        if (err.message === "the worker has exited") {
+        try {
+            console.error(`Logtail transport error: ${err.message}`)
             transport.write = () => true
             transport.end = () => {}
-        }
+        } catch {}
     })
 }
 
