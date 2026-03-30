@@ -111,8 +111,7 @@ if (process.env.BETTER_STACK_TOKEN) {
                         const revived = pino.transport({
                             target: "@logtail/pino",
                             options: {
-                                sourceToken:
-                                    process.env.BETTER_STACK_TOKEN
+                                sourceToken: process.env.BETTER_STACK_TOKEN
                             }
                         })
                         revived.on("error", handleTransportError)
