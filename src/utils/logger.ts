@@ -96,9 +96,36 @@ if (process.env.BETTER_STACK_TOKEN) {
         options: { sourceToken: process.env.BETTER_STACK_TOKEN }
     })
 
-    transport.on("error", (err: Error) => {
-        console.error(`Logtail transport error: ${err.message}`)
-    })
+    let reviving = false
+    function handleTransportError(err: Error) {
+        try {
+            console.error(`Logtail transport error: ${err.message}`)
+            if (err.message === "the worker has exited" && !reviving) {
+                reviving = true
+                transport.write = () => true
+                transport.end = () => {}
+
+                setTimeout(() => {
+                    try {
+                        // @ts-ignore
+                        const revived = pino.transport({
+                            target: "@logtail/pino",
+                            options: {
+                                sourceToken: process.env.BETTER_STACK_TOKEN
+                            }
+                        })
+                        revived.on("error", handleTransportError)
+                        transport.write = revived.write.bind(revived)
+                        transport.end = revived.end.bind(revived)
+                        reviving = false
+                        console.error("Logtail transport revived")
+                    } catch {}
+                }, 30_000).unref()
+            }
+        } catch {}
+    }
+
+    transport.on("error", handleTransportError)
 }
 
 export const initProductionLogger = (level: string): Logger => {
