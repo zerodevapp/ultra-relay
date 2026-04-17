@@ -16,6 +16,7 @@ import {
     scaleBigIntByPercent
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
+import { encryptSeismicTx } from "seismic-encrypt"
 import {
     type Account,
     BaseError,
@@ -88,6 +89,57 @@ export class Executor {
             }
         )
         this.eventManager = eventManager
+    }
+
+    async sendSeismicTransaction({
+        request,
+        account,
+        childLogger
+    }: {
+        request: {
+            to: Address
+            data: Hex
+            nonce: number
+            gas: bigint
+            gasPrice?: bigint
+            maxFeePerGas?: bigint
+        }
+        account: Account
+        childLogger: Logger
+    }): Promise<Hex> {
+        const { publicClient, rpcUrl, chainId } = this.config
+
+        const gasPrice =
+            request.gasPrice ?? request.maxFeePerGas ?? 0n
+
+        childLogger.debug("encrypting transaction for seismic chain")
+
+        const { seismicTx, serialize } = await encryptSeismicTx({
+            tx: {
+                to: request.to,
+                data: request.data,
+                nonce: request.nonce,
+                gasPrice,
+                gas: request.gas,
+                chainId
+            },
+            sender: account.address,
+            rpcUrl
+        })
+
+        const signed = await account.signTransaction!(
+            { ...seismicTx } as any,
+            {
+                serializer: (_tx: any, sig: any) =>
+                    serialize(sig!)
+            }
+        )
+
+        childLogger.debug("sending encrypted seismic transaction")
+
+        return publicClient.sendRawTransaction({
+            serializedTransaction: signed
+        })
     }
 
     getBundleGasPrice({
@@ -247,7 +299,18 @@ export class Executor {
                     multiple: this.config.gasLimitRoundingMultiple
                 })
 
-                transactionHash = await walletClient.sendTransaction(request)
+                // Seismic testnet chain id is 5124
+                if (this.config.chainId === 5124) {
+                    transactionHash =
+                        await this.sendSeismicTransaction({
+                            request,
+                            account,
+                            childLogger
+                        })
+                } else {
+                    transactionHash =
+                        await walletClient.sendTransaction(request)
+                }
 
                 childLogger.info(
                     {
