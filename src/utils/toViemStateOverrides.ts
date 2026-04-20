@@ -54,7 +54,7 @@ export function toViemStateOverrides(
 
             result.push(entry)
         } catch (_e) {
-            console.warn(`Invalid address in state override: ${address}`)
+            // Invalid address in state override - silently skip
         }
     }
 
