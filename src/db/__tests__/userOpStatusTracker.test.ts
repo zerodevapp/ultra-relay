@@ -160,6 +160,7 @@ describe("UserOpStatusTracker", () => {
 
             await tracker.trackSubmitted(
                 hashes,
+                8453,
                 "0xtxhash" as any,
                 100000n,
                 50000n
@@ -178,6 +179,7 @@ describe("UserOpStatusTracker", () => {
 
             await tracker.trackIncluded(
                 "0xhash123" as any,
+                8453,
                 "0xtxhash" as any,
                 1000000n
             )
@@ -208,6 +210,7 @@ describe("UserOpStatusTracker", () => {
 
             await tracker.trackDropped(
                 "0xhash123" as any,
+                8453,
                 "gas too low",
                 "AA21"
             )
@@ -223,7 +226,7 @@ describe("UserOpStatusTracker", () => {
                 metrics: mockMetrics
             })
 
-            await tracker.trackFrontran("0xhash123" as any, "0xtxhash" as any)
+            await tracker.trackFrontran("0xhash123" as any, 8453, "0xtxhash" as any)
 
             expect(mockInsert).toHaveBeenCalled()
             expect(mockOnConflictDoUpdate).toHaveBeenCalled()

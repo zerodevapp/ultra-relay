@@ -142,7 +142,8 @@ export class Mempool {
 
                 if (success) {
                     await this.userOpStatusTracker.incrementRetryCount(
-                        userOpInfo.userOpHash
+                        userOpInfo.userOpHash,
+                        this.config.chainId
                     )
                 } else {
                     this.logger.error(
@@ -174,6 +175,7 @@ export class Mempool {
                 )
                 await this.userOpStatusTracker.trackDropped(
                     userOpHash,
+                    this.config.chainId,
                     reason,
                     getAAError(reason)
                 )

@@ -20,7 +20,7 @@ ON CONFLICT DO NOTHING;
 
 -- Main tracking table
 CREATE TABLE IF NOT EXISTS userop_status (
-    user_op_hash TEXT PRIMARY KEY,
+    user_op_hash TEXT NOT NULL,
     chain_id INTEGER NOT NULL,
     entry_point TEXT,
     sender TEXT,
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS userop_status (
     sent_at TIMESTAMPTZ,
     included_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_op_hash, chain_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_userop_status_chain_sender

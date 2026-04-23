@@ -9,6 +9,8 @@ type UserOpLike = {
     nonce: bigint
 }
 
+const compositeTarget = [userOpStatus.userOpHash, userOpStatus.chainId]
+
 export class UserOpStatusTracker {
     private db: DbClient | null = null
     private logger: Logger
@@ -70,7 +72,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "pending_offchain",
                         updatedAt: now
@@ -106,7 +108,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "failure_offchain",
                         errorMessage: reason,
@@ -137,7 +139,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "queued_offchain",
                         updatedAt: now
@@ -151,7 +153,10 @@ export class UserOpStatusTracker {
         }
     }
 
-    async trackAddedToMempool(userOpHash: Hex, chainId: number): Promise<void> {
+    async trackAddedToMempool(
+        userOpHash: Hex,
+        chainId: number
+    ): Promise<void> {
         if (!this.enabled || !this.db) return
 
         try {
@@ -166,7 +171,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "added_to_mempool",
                         updatedAt: now
@@ -182,6 +187,7 @@ export class UserOpStatusTracker {
 
     async trackSubmitted(
         userOpHashes: Hex[],
+        chainId: number,
         transactionHash: Hex,
         maxFeePerGas: bigint,
         maxPriorityFeePerGas: bigint
@@ -195,7 +201,7 @@ export class UserOpStatusTracker {
                     .insert(userOpStatus)
                     .values({
                         userOpHash,
-                        chainId: 0,
+                        chainId,
                         status: "pending_onchain",
                         transactionHash,
                         maxFeePerGas: toHex(maxFeePerGas),
@@ -204,12 +210,14 @@ export class UserOpStatusTracker {
                         updatedAt: now
                     })
                     .onConflictDoUpdate({
-                        target: userOpStatus.userOpHash,
+                        target: compositeTarget,
                         set: {
                             status: "pending_onchain",
                             transactionHash,
                             maxFeePerGas: toHex(maxFeePerGas),
-                            maxPriorityFeePerGas: toHex(maxPriorityFeePerGas),
+                            maxPriorityFeePerGas: toHex(
+                                maxPriorityFeePerGas
+                            ),
                             updatedAt: now
                         }
                     })
@@ -224,6 +232,7 @@ export class UserOpStatusTracker {
 
     async trackIncluded(
         userOpHash: Hex,
+        chainId: number,
         transactionHash: Hex,
         effectiveGasPrice?: bigint
     ): Promise<void> {
@@ -235,7 +244,7 @@ export class UserOpStatusTracker {
                 .insert(userOpStatus)
                 .values({
                     userOpHash,
-                    chainId: 0,
+                    chainId,
                     status: "success_onchain",
                     transactionHash,
                     effectiveGasPrice: effectiveGasPrice
@@ -246,7 +255,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "success_onchain",
                         transactionHash,
@@ -267,6 +276,7 @@ export class UserOpStatusTracker {
 
     async trackExecutionReverted(
         userOpHash: Hex,
+        chainId: number,
         transactionHash: Hex,
         reason?: string
     ): Promise<void> {
@@ -278,7 +288,7 @@ export class UserOpStatusTracker {
                 .insert(userOpStatus)
                 .values({
                     userOpHash,
-                    chainId: 0,
+                    chainId,
                     status: "failure_onchain",
                     transactionHash,
                     errorMessage: reason,
@@ -287,7 +297,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "failure_onchain",
                         transactionHash,
@@ -306,6 +316,7 @@ export class UserOpStatusTracker {
 
     async trackFailedOnChain(
         userOpHash: Hex,
+        chainId: number,
         transactionHash: Hex
     ): Promise<void> {
         if (!this.enabled || !this.db) return
@@ -316,7 +327,7 @@ export class UserOpStatusTracker {
                 .insert(userOpStatus)
                 .values({
                     userOpHash,
-                    chainId: 0,
+                    chainId,
                     status: "failure_onchain",
                     transactionHash,
                     includedAt: now,
@@ -324,7 +335,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "failure_onchain",
                         transactionHash,
@@ -342,6 +353,7 @@ export class UserOpStatusTracker {
 
     async trackDropped(
         userOpHash: Hex,
+        chainId: number,
         reason?: string,
         aaError?: string
     ): Promise<void> {
@@ -353,7 +365,7 @@ export class UserOpStatusTracker {
                 .insert(userOpStatus)
                 .values({
                     userOpHash,
-                    chainId: 0,
+                    chainId,
                     status: "dropped",
                     errorMessage: reason,
                     aaError,
@@ -361,7 +373,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "dropped",
                         errorMessage: reason,
@@ -377,7 +389,11 @@ export class UserOpStatusTracker {
         }
     }
 
-    async trackFrontran(userOpHash: Hex, transactionHash: Hex): Promise<void> {
+    async trackFrontran(
+        userOpHash: Hex,
+        chainId: number,
+        transactionHash: Hex
+    ): Promise<void> {
         if (!this.enabled || !this.db) return
 
         try {
@@ -386,7 +402,7 @@ export class UserOpStatusTracker {
                 .insert(userOpStatus)
                 .values({
                     userOpHash,
-                    chainId: 0,
+                    chainId,
                     status: "frontran",
                     transactionHash,
                     includedAt: now,
@@ -394,7 +410,7 @@ export class UserOpStatusTracker {
                     updatedAt: now
                 })
                 .onConflictDoUpdate({
-                    target: userOpStatus.userOpHash,
+                    target: compositeTarget,
                     set: {
                         status: "frontran",
                         transactionHash,
@@ -410,18 +426,26 @@ export class UserOpStatusTracker {
         }
     }
 
-    async incrementRetryCount(userOpHash: Hex): Promise<void> {
+    async incrementRetryCount(
+        userOpHash: Hex,
+        chainId: number
+    ): Promise<void> {
         if (!this.enabled || !this.db) return
 
         try {
-            const { sql } = await import("drizzle-orm")
+            const { sql, and, eq } = await import("drizzle-orm")
             await this.db
                 .update(userOpStatus)
                 .set({
                     retryCount: sql`${userOpStatus.retryCount} + 1`,
                     updatedAt: new Date()
                 })
-                .where(sql`${userOpStatus.userOpHash} = ${userOpHash}`)
+                .where(
+                    and(
+                        eq(userOpStatus.userOpHash, userOpHash),
+                        eq(userOpStatus.chainId, chainId)
+                    )
+                )
         } catch (error) {
             this.logger.warn(
                 { error, userOpHash },

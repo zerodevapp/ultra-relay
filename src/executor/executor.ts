@@ -489,6 +489,7 @@ export class Executor {
 
             await this.userOpStatusTracker.trackSubmitted(
                 getUserOpHashes(userOpsToBundle),
+                this.config.chainId,
                 transactionHash,
                 maxFeePerGas,
                 maxPriorityFeePerGas

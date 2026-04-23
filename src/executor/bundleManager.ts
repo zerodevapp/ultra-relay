@@ -225,6 +225,7 @@ export class BundleManager {
                     )
                     await this.userOpStatusTracker.trackFailedOnChain(
                         userOpInfo.userOpHash,
+                        this.config.chainId,
                         transactionHash
                     )
 
@@ -312,6 +313,7 @@ export class BundleManager {
             )
             await this.userOpStatusTracker.trackIncluded(
                 userOpHash,
+                this.config.chainId,
                 transactionHash,
                 userOpReceipt.receipt?.effectiveGasPrice ?? undefined
             )
@@ -324,6 +326,7 @@ export class BundleManager {
             )
             await this.userOpStatusTracker.trackExecutionReverted(
                 userOpHash,
+                this.config.chainId,
                 transactionHash,
                 userOpReceipt.reason || "0x"
             )
@@ -410,6 +413,7 @@ export class BundleManager {
                 )
                 await this.userOpStatusTracker.trackFrontran(
                     userOpHash,
+                    this.config.chainId,
                     transactionHash
                 )
 

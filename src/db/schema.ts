@@ -1,4 +1,11 @@
-import { index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core"
+import {
+    index,
+    integer,
+    pgTable,
+    primaryKey,
+    text,
+    timestamp
+} from "drizzle-orm/pg-core"
 
 export const userOpStatusType = pgTable("userop_status_type", {
     status: text("status").primaryKey()
@@ -7,7 +14,7 @@ export const userOpStatusType = pgTable("userop_status_type", {
 export const userOpStatus = pgTable(
     "userop_status",
     {
-        userOpHash: text("user_op_hash").primaryKey(),
+        userOpHash: text("user_op_hash").notNull(),
         chainId: integer("chain_id").notNull(),
         entryPoint: text("entry_point"),
         sender: text("sender"),
@@ -32,6 +39,9 @@ export const userOpStatus = pgTable(
             .defaultNow()
     },
     (table) => ({
+        pk: primaryKey({
+            columns: [table.userOpHash, table.chainId]
+        }),
         chainSenderIdx: index("idx_userop_status_chain_sender").on(
             table.chainId,
             table.sender
