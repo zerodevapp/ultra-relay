@@ -1,3 +1,4 @@
+import type { UserOpStatusTracker } from "@alto/db"
 import {
     type Executor,
     type ExecutorManager,
@@ -41,6 +42,7 @@ export class RpcHandler {
     public eventManager: EventManager
     public gasPriceManager: GasPriceManager
     public bundleManager: BundleManager
+    public userOpStatusTracker: UserOpStatusTracker
     public logger: Logger
 
     private methodHandlers: Map<string, MethodHandler>
@@ -57,7 +59,8 @@ export class RpcHandler {
         bundleManager,
         metrics,
         eventManager,
-        gasPriceManager
+        gasPriceManager,
+        userOpStatusTracker
     }: {
         config: AltoConfig
         validator: InterfaceValidator
@@ -70,6 +73,7 @@ export class RpcHandler {
         metrics: Metrics
         eventManager: EventManager
         gasPriceManager: GasPriceManager
+        userOpStatusTracker: UserOpStatusTracker
     }) {
         this.config = config
         this.validator = validator
@@ -82,6 +86,7 @@ export class RpcHandler {
         this.eventManager = eventManager
         this.gasPriceManager = gasPriceManager
         this.bundleManager = bundleManager
+        this.userOpStatusTracker = userOpStatusTracker
 
         this.logger = config.getLogger(
             { module: "rpc" },

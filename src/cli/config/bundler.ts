@@ -348,6 +348,13 @@ export type IOptionsInput = z.input<typeof optionArgsSchema>
 export type IRedisArgs = z.infer<typeof redisArgsSchema>
 export type IRedisArgsInput = z.input<typeof redisArgsSchema>
 
+export const databaseArgsSchema = z.object({
+    "database-url": z.string().optional()
+})
+
+export type IDatabaseArgs = z.infer<typeof databaseArgsSchema>
+export type IDatabaseArgsInput = z.input<typeof databaseArgsSchema>
+
 export const optionArgsSchema = z.object({
     ...bundlerArgsSchema.shape,
     ...compatibilityArgsSchema.shape,
@@ -358,5 +365,6 @@ export const optionArgsSchema = z.object({
     ...gasEstimationArgsSchema.shape,
     ...executorArgsSchema.shape,
     ...mempoolArgsSchema.shape,
-    ...redisArgsSchema.shape
+    ...redisArgsSchema.shape,
+    ...databaseArgsSchema.shape
 })

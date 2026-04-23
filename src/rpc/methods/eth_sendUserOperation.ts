@@ -128,6 +128,11 @@ export async function addToMempoolIfValid({
             userOpHash,
             validEip7702AuthError
         )
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
+            validEip7702AuthError
+        )
         throw new RpcError(
             validEip7702AuthError,
             ValidationErrors.InvalidFields
@@ -140,12 +145,22 @@ export async function addToMempoolIfValid({
             userOpHash,
             preMempoolError
         )
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
+            preMempoolError
+        )
         throw new RpcError(preMempoolError, ValidationErrors.InvalidFields)
     }
 
     // PreVerificationGas validation
     if (!pvgSuccess) {
         rpcHandler.eventManager.emitFailedValidation(userOpHash, pvgErrorReason)
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
+            pvgErrorReason
+        )
         throw new RpcError(pvgErrorReason, ValidationErrors.SimulateValidation)
     }
 
@@ -155,6 +170,12 @@ export async function addToMempoolIfValid({
         const reason =
             "UserOperation failed validation with reason: AA25 invalid account nonce"
         rpcHandler.eventManager.emitFailedValidation(userOpHash, reason, "AA25")
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
+            reason,
+            "AA25"
+        )
         throw new RpcError(reason, ValidationErrors.InvalidFields)
     }
 
@@ -162,12 +183,22 @@ export async function addToMempoolIfValid({
         const reason =
             "UserOperation failed validaiton with reason: AA25 invalid account nonce"
         rpcHandler.eventManager.emitFailedValidation(userOpHash, reason, "AA25")
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
+            reason,
+            "AA25"
+        )
         throw new RpcError(reason, ValidationErrors.InvalidFields)
     }
 
     if (userOpNonceSeq > currentNonceSeq + BigInt(queuedUserOps.length)) {
         rpcHandler.mempool.add(userOp, entryPoint)
         rpcHandler.eventManager.emitQueued(userOpHash)
+        await rpcHandler.userOpStatusTracker.trackQueued(
+            userOpHash,
+            rpcHandler.config.chainId
+        )
         return { result: "queued", userOpHash }
     }
 
@@ -179,6 +210,12 @@ export async function addToMempoolIfValid({
         if (!isMempoolAddSuccess) {
             rpcHandler.eventManager.emitFailedValidation(
                 userOpHash,
+                mempoolAddError,
+                getAAError(mempoolAddError)
+            )
+            await rpcHandler.userOpStatusTracker.trackFailedValidation(
+                userOpHash,
+                rpcHandler.config.chainId,
                 mempoolAddError,
                 getAAError(mempoolAddError)
             )
@@ -209,6 +246,12 @@ export async function addToMempoolIfValid({
     if (!isMempoolAddSuccess) {
         rpcHandler.eventManager.emitFailedValidation(
             userOpHash,
+            mempoolAddError,
+            getAAError(mempoolAddError)
+        )
+        await rpcHandler.userOpStatusTracker.trackFailedValidation(
+            userOpHash,
+            rpcHandler.config.chainId,
             mempoolAddError,
             getAAError(mempoolAddError)
         )
@@ -245,6 +288,12 @@ export const ethSendUserOperationHandler = createMethodHandler({
             status = result
 
             rpcHandler.eventManager.emitReceived(userOpHash)
+            await rpcHandler.userOpStatusTracker.trackReceived(
+                userOpHash,
+                rpcHandler.config.chainId,
+                entryPoint,
+                userOp
+            )
 
             return userOpHash
         } catch (error) {

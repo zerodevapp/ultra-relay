@@ -1,3 +1,4 @@
+import { UserOpStatusTracker } from "@alto/db"
 import { Executor, ExecutorManager, type SenderManager } from "@alto/executor"
 import { EventManager, type GasPriceManager } from "@alto/handlers"
 import {
@@ -63,7 +64,8 @@ const getMempool = ({
     reputationManager,
     validator,
     metrics,
-    eventManager
+    eventManager,
+    userOpStatusTracker
 }: {
     config: AltoConfig
     monitor: Monitor
@@ -71,6 +73,7 @@ const getMempool = ({
     validator: InterfaceValidator
     metrics: Metrics
     eventManager: EventManager
+    userOpStatusTracker: UserOpStatusTracker
 }): Mempool => {
     return new Mempool({
         config,
@@ -79,7 +82,8 @@ const getMempool = ({
         store: createMempoolStore({ config, metrics }),
         reputationManager,
         validator,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     })
 }
 
@@ -93,16 +97,29 @@ const getEventManager = ({
     return new EventManager({ config, metrics })
 }
 
+const getUserOpStatusTracker = ({
+    config,
+    metrics
+}: {
+    config: AltoConfig
+    metrics: Metrics
+}) => {
+    return new UserOpStatusTracker({ config, metrics })
+}
+
 const getExecutor = ({
     config,
-    eventManager
+    eventManager,
+    userOpStatusTracker
 }: {
     config: AltoConfig
     eventManager: EventManager
+    userOpStatusTracker: UserOpStatusTracker
 }): Executor => {
     return new Executor({
         config,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     })
 }
 
@@ -145,7 +162,8 @@ const getRpcHandler = ({
     bundleManager,
     metrics,
     gasPriceManager,
-    eventManager
+    eventManager,
+    userOpStatusTracker
 }: {
     config: AltoConfig
     validator: InterfaceValidator
@@ -158,6 +176,7 @@ const getRpcHandler = ({
     metrics: Metrics
     eventManager: EventManager
     gasPriceManager: GasPriceManager
+    userOpStatusTracker: UserOpStatusTracker
 }) => {
     return new RpcHandler({
         config,
@@ -170,7 +189,8 @@ const getRpcHandler = ({
         bundleManager,
         metrics,
         eventManager,
-        gasPriceManager
+        gasPriceManager,
+        userOpStatusTracker
     })
 }
 
@@ -215,6 +235,11 @@ export const setupServer = async ({
     const reputationManager = getReputationManager(config)
 
     const eventManager = getEventManager({
+        config,
+        metrics
+    })
+
+    const userOpStatusTracker = getUserOpStatusTracker({
         config,
         metrics
     })
@@ -264,12 +289,14 @@ export const setupServer = async ({
         reputationManager,
         validator,
         metrics,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     })
 
     const executor = getExecutor({
         config,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     })
 
     const bundleManager = new BundleManager({
@@ -280,7 +307,8 @@ export const setupServer = async ({
         reputationManager,
         gasPriceManager,
         eventManager,
-        senderManager
+        senderManager,
+        userOpStatusTracker
     })
 
     const executorManager = getExecutorManager({
@@ -304,7 +332,8 @@ export const setupServer = async ({
         bundleManager,
         metrics,
         gasPriceManager,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     })
 
     if (config.flushStuckTransactionsDuringStartup) {
@@ -362,6 +391,8 @@ export const setupServer = async ({
             bundleManager,
             logger: shutdownLogger
         })
+
+        await userOpStatusTracker.close()
 
         // mark all executors as processed
         for (const account of senderManager.getActiveWallets()) {

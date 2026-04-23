@@ -57,6 +57,12 @@ export const boostSendUserOperationHandler = createMethodHandler({
             status = result
 
             rpcHandler.eventManager.emitReceived(userOpHash)
+            await rpcHandler.userOpStatusTracker.trackReceived(
+                userOpHash,
+                rpcHandler.config.chainId,
+                entryPoint,
+                userOp
+            )
 
             return userOpHash
         } catch (error) {

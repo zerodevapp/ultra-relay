@@ -43,6 +43,9 @@
             ],
             "@alto/receiptCache": [
                 "./receiptCache"
+            ],
+            "@alto/db": [
+                "./db"
             ]
         }
     },
