@@ -1,3 +1,4 @@
+import type { UserOpStatusTracker } from "@alto/db"
 import type { EventManager } from "@alto/handlers"
 import type {
     Address,
@@ -72,13 +73,16 @@ export class Executor {
     config: AltoConfig
     logger: Logger
     eventManager: EventManager
+    private userOpStatusTracker: UserOpStatusTracker
 
     constructor({
         config,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     }: {
         config: AltoConfig
         eventManager: EventManager
+        userOpStatusTracker: UserOpStatusTracker
     }) {
         this.config = config
         this.logger = config.getLogger(
@@ -88,6 +92,7 @@ export class Executor {
             }
         )
         this.eventManager = eventManager
+        this.userOpStatusTracker = userOpStatusTracker
     }
 
     getBundleGasPrice({
@@ -481,6 +486,13 @@ export class Executor {
                 userOpHashes: getUserOpHashes(userOpsToBundle),
                 transactionHash
             })
+
+            await this.userOpStatusTracker.trackSubmitted(
+                getUserOpHashes(userOpsToBundle),
+                transactionHash,
+                maxFeePerGas,
+                maxPriorityFeePerGas
+            )
         } catch (err: unknown) {
             const { rejectedUserOps, userOpsToBundle } = filterOpsResult
 

@@ -8,6 +8,7 @@ import {
     bundlerCommand,
     bundlerOptions,
     compatibilityOptions,
+    databaseOptions,
     debugOptions,
     executorOptions,
     gasEstimationOptions,
@@ -97,6 +98,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(mempoolOptions), "Mempool Options:")
         .options(redisOptions)
         .group(Object.keys(redisOptions), "Redis Options:")
+        .options(databaseOptions)
+        .group(Object.keys(databaseOptions), "Database Options:")
         // blank scriptName so that help text doesn't display the cli name before each command
         .scriptName("")
         .demandCommand(1)

@@ -1,3 +1,4 @@
+import type { UserOpStatusTracker } from "@alto/db"
 import type { SenderManager } from "@alto/executor"
 import type { EventManager, GasPriceManager } from "@alto/handlers"
 import type {
@@ -40,6 +41,7 @@ export class BundleManager {
     private pendingBundles: Map<string, SubmittedBundleInfo> = new Map()
     private receiptCache: ReceiptCache
     private gasPriceManager: GasPriceManager
+    private userOpStatusTracker: UserOpStatusTracker
 
     constructor({
         config,
@@ -49,7 +51,8 @@ export class BundleManager {
         reputationManager,
         eventManager,
         senderManager,
-        gasPriceManager
+        gasPriceManager,
+        userOpStatusTracker
     }: {
         config: AltoConfig
         mempool: Mempool
@@ -59,6 +62,7 @@ export class BundleManager {
         eventManager: EventManager
         senderManager: SenderManager
         gasPriceManager: GasPriceManager
+        userOpStatusTracker: UserOpStatusTracker
     }) {
         this.reputationManager = reputationManager
         this.config = config
@@ -69,6 +73,7 @@ export class BundleManager {
         this.senderManager = senderManager
         this.cachedLatestBlock = null
         this.gasPriceManager = gasPriceManager
+        this.userOpStatusTracker = userOpStatusTracker
         this.logger = config.getLogger(
             { module: "userop_monitor" },
             {
@@ -218,6 +223,10 @@ export class BundleManager {
                         transactionHash,
                         blockNumber
                     )
+                    await this.userOpStatusTracker.trackFailedOnChain(
+                        userOpInfo.userOpHash,
+                        transactionHash
+                    )
 
                     this.logger.info(
                         {
@@ -301,12 +310,22 @@ export class BundleManager {
                 transactionHash,
                 blockNumber
             )
+            await this.userOpStatusTracker.trackIncluded(
+                userOpHash,
+                transactionHash,
+                userOpReceipt.receipt?.effectiveGasPrice ?? undefined
+            )
         } else {
             this.eventManager.emitExecutionRevertedOnChain(
                 userOpHash,
                 transactionHash,
                 userOpReceipt.reason || "0x",
                 blockNumber
+            )
+            await this.userOpStatusTracker.trackExecutionReverted(
+                userOpHash,
+                transactionHash,
+                userOpReceipt.reason || "0x"
             )
         }
 
@@ -388,6 +407,10 @@ export class BundleManager {
                     userOpHash,
                     transactionHash,
                     blockNumber
+                )
+                await this.userOpStatusTracker.trackFrontran(
+                    userOpHash,
+                    transactionHash
                 )
 
                 this.logger.info(

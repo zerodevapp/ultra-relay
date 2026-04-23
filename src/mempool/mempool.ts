@@ -1,3 +1,4 @@
+import type { UserOpStatusTracker } from "@alto/db"
 import type { EventManager } from "@alto/handlers"
 import type { MempoolStore } from "@alto/store"
 import {
@@ -47,6 +48,7 @@ export class Mempool {
     private logger: Logger
     private validator: InterfaceValidator
     private eventManager: EventManager
+    private userOpStatusTracker: UserOpStatusTracker
 
     constructor({
         config,
@@ -55,7 +57,8 @@ export class Mempool {
         reputationManager,
         validator,
         store,
-        eventManager
+        eventManager,
+        userOpStatusTracker
     }: {
         config: AltoConfig
         metrics: Metrics
@@ -64,6 +67,7 @@ export class Mempool {
         validator: InterfaceValidator
         store: MempoolStore
         eventManager: EventManager
+        userOpStatusTracker: UserOpStatusTracker
     }) {
         this.metrics = metrics
         this.store = store
@@ -79,6 +83,7 @@ export class Mempool {
         )
         this.throttledEntityBundleCount = 4 // we don't have any config for this as of now
         this.eventManager = eventManager
+        this.userOpStatusTracker = userOpStatusTracker
     }
 
     // === Methods for handling changing userOp state === //
@@ -135,7 +140,11 @@ export class Mempool {
                     entryPoint
                 )
 
-                if (!success) {
+                if (success) {
+                    await this.userOpStatusTracker.incrementRetryCount(
+                        userOpInfo.userOpHash
+                    )
+                } else {
                     this.logger.error(
                         { userOpHash, failureReason },
                         "Failed to resubmit user operation"
@@ -159,6 +168,11 @@ export class Mempool {
                 await this.store.removeProcessing({ entryPoint, userOpHash })
                 await this.store.removeSubmitted({ entryPoint, userOpHash })
                 this.eventManager.emitDropped(
+                    userOpHash,
+                    reason,
+                    getAAError(reason)
+                )
+                await this.userOpStatusTracker.trackDropped(
                     userOpHash,
                     reason,
                     getAAError(reason)
@@ -436,6 +450,10 @@ export class Mempool {
         })
 
         this.eventManager.emitAddedToMempool(userOpHash)
+        await this.userOpStatusTracker.trackAddedToMempool(
+            userOpHash,
+            this.config.chainId
+        )
         return [true, ""]
     }
 

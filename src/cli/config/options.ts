@@ -3,6 +3,7 @@ import type { CliCommand, CliCommandOptions } from "../util"
 import type {
     IBundlerArgsInput,
     ICompatibilityArgsInput,
+    IDatabaseArgsInput,
     IDebugArgsInput,
     IExecutorArgsInput,
     IGasEstimationArgsInput,
@@ -166,6 +167,14 @@ export const redisOptions: CliCommandOptions<IRedisArgsInput> = {
         type: "string",
         require: false,
         default: "UserOperationStatusBullEventsQueue"
+    }
+}
+
+export const databaseOptions: CliCommandOptions<IDatabaseArgsInput> = {
+    "database-url": {
+        description: "PostgreSQL connection URL for UserOp status tracking",
+        type: "string",
+        require: false
     }
 }
 
