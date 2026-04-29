@@ -742,7 +742,15 @@ const OpEventType = z.union([
     }),
     z.object({
         eventType: z.literal("submitted"),
-        transactionHash: hexData32Schema
+        transactionHash: hexData32Schema,
+        data: z.object({
+            submissionAttempts: z.number(),
+            bundlerMaxFeePerGas: z.string(),
+            bundlerMaxPriorityFeePerGas: z.string(),
+            networkMaxFeePerGas: z.string(),
+            networkMaxPriorityFeePerGas: z.string(),
+            networkBaseFee: z.string()
+        })
     }),
     z.object({
         eventType: z.literal("included_onchain"),

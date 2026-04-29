@@ -479,7 +479,14 @@ export class Executor {
 
             this.eventManager.emitSubmitted({
                 userOpHashes: getUserOpHashes(userOpsToBundle),
-                transactionHash
+                transactionHash,
+                submissionAttempts: userOpBundle.submissionAttempts,
+                bundlerMaxFeePerGas: maxFeePerGas,
+                bundlerMaxPriorityFeePerGas: maxPriorityFeePerGas,
+                networkMaxFeePerGas: networkGasPrice.maxFeePerGas,
+                networkMaxPriorityFeePerGas:
+                    networkGasPrice.maxPriorityFeePerGas,
+                networkBaseFee
             })
         } catch (err: unknown) {
             const { rejectedUserOps, userOpsToBundle } = filterOpsResult
