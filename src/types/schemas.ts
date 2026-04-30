@@ -745,11 +745,11 @@ const OpEventType = z.union([
         transactionHash: hexData32Schema,
         data: z.object({
             submissionAttempts: z.number(),
-            bundlerMaxFeePerGas: z.string(),
-            bundlerMaxPriorityFeePerGas: z.string(),
-            networkMaxFeePerGas: z.string(),
-            networkMaxPriorityFeePerGas: z.string(),
-            networkBaseFee: z.string()
+            bundlerMaxFeePerGas: hexDataSchema,
+            bundlerMaxPriorityFeePerGas: hexDataSchema,
+            networkMaxFeePerGas: hexDataSchema,
+            networkMaxPriorityFeePerGas: hexDataSchema,
+            networkBaseFee: hexDataSchema
         })
     }),
     z.object({
