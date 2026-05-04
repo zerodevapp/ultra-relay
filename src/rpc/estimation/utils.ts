@@ -17,9 +17,12 @@ import {
     type Hex,
     type StateOverride,
     decodeErrorResult,
+    encodeAbiParameters,
     getAbiItem,
     keccak256,
+    pad,
     parseAbi,
+    parseEther,
     toHex
 } from "viem"
 import { entryPoint06Abi } from "viem/account-abstraction"
@@ -63,6 +66,39 @@ export function parseFailedOpWithRevert(data: Hex) {
     } catch {}
 
     return data
+}
+
+// Compute the storage slot for `deposits[sender].deposit` in EntryPoint v0.7/v0.8
+// storage. EntryPoint inherits StakeManager first (after the interface IEntryPoint
+// which contributes no storage), so the `deposits` mapping lives at slot 0. The
+// DepositInfo struct's first field is `uint256 deposit`, which sits exactly at the
+// computed mapping slot.
+//
+// Why we override this: during simulation of a non-sponsored userOp, the EntryPoint
+// reads `bal = balanceOf(sender)` (= `deposits[sender].deposit`) to compute
+// `missingAccountFunds`. If the sender has zero EP deposit (the common case — users
+// fund their wallet, not the EP), the account is asked to transfer the prefund out
+// of its own balance. For accounts that don't hold native ETH (e.g., UR-sponsored
+// flows), this prevents the binary-search probes from succeeding and the estimator
+// returns verificationGasLimit=0.
+//
+// By overriding the EP's deposit slot for the sender to a large value, we make
+// `missingAccountFunds = 0` during simulation. The account's `_payPrefund(0)` is a
+// no-op, so the wallet balance is never touched — meaning callData simulation still
+// uses the *real* wallet balance, and ETH transfers in callData fail truthfully if
+// the account is under-funded.
+export function getEntryPointDepositOverride(
+    sender: Address,
+    amount: bigint = parseEther("100")
+): { slot: Hex; value: Hex } {
+    const slot = keccak256(
+        encodeAbiParameters(
+            [{ type: "address" }, { type: "uint256" }],
+            [sender, 0n]
+        )
+    )
+    const value = pad(toHex(amount), { size: 32 })
+    return { slot, value }
 }
 
 // Helper function that adds EIP-7702 overrides if needed, and converts to viem format.

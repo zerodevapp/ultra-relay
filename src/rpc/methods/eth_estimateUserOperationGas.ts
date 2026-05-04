@@ -6,7 +6,6 @@ import {
     ValidationErrors,
     estimateUserOperationGasSchema
 } from "@alto/types"
-import { parseEther, toHex } from "viem"
 import { maxBigInt, scaleBigIntByPercent } from "../../utils/bigInt"
 import {
     calcExecutionPvgComponent,
@@ -14,6 +13,7 @@ import {
 } from "../../utils/preVerificationGasCalulator"
 import { deepHexlify, isVersion06, isVersion07 } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
+import { getEntryPointDepositOverride } from "../estimation/utils"
 import type { RpcHandler } from "../rpcHandler"
 
 type GasEstimateResult =
@@ -111,33 +111,35 @@ const getGasEstimates = async ({
         entryPoint
     })
 
+    // Force simulation fees to 1 wei so the EntryPoint returns meaningful `paid` values
+    // for callGasLimit calculation (v0.6 derives it via `paid / maxFeePerGas`, undefined
+    // at 0; v0.7+ also keeps the binary-search math well-defined).
     const simulationUserOp = {
         ...userOp,
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n,
         preVerificationGas: 0n,
         verificationGasLimit: simulationVerificationGasLimit,
         callGasLimit: simulationCallGasLimit
     }
 
-    // For v0.6 boosted userOps (maxFeePerGas=0), simulate with maxFeePerGas=1
-    // so the EntryPoint returns meaningful `paid` values for callGasLimit calculation.
-    if (
-        isVersion06(simulationUserOp) &&
-        userOp.maxFeePerGas === 0n &&
-        userOp.maxPriorityFeePerGas === 0n
-    ) {
-        // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
-        // Because of this, sender must have atleast maxGas of wei.
-        const maxGas = parseEther("100000000")
-
-        simulationUserOp.maxFeePerGas = 1n
-        simulationUserOp.maxPriorityFeePerGas = 1n
-
+    // For boosted userOps (original fees=0), pre-deposit funds for the sender at the
+    // EntryPoint so the resulting 1-wei-fee prefund check passes without touching the
+    // sender's wallet balance — preserving the ability for callData ETH transfers to
+    // fail truthfully if the wallet is under-funded.
+    const isBoosted =
+        userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+    if (isBoosted) {
         if (mutableStateOverrides === undefined) {
             mutableStateOverrides = {}
         }
-        mutableStateOverrides[userOp.sender] = {
-            ...deepHexlify(mutableStateOverrides[userOp.sender] || {}),
-            balance: toHex(maxGas)
+        const deposit = getEntryPointDepositOverride(userOp.sender)
+        mutableStateOverrides[entryPoint] = {
+            ...deepHexlify(mutableStateOverrides[entryPoint] || {}),
+            stateDiff: {
+                ...(mutableStateOverrides[entryPoint]?.stateDiff || {}),
+                [deposit.slot]: deposit.value
+            }
         }
     }
 
