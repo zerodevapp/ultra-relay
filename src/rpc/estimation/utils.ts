@@ -71,16 +71,21 @@ export function parseFailedOpWithRevert(data: Hex) {
 // Compute the storage slot for `deposits[sender].deposit` in EntryPoint storage.
 // Works uniformly for EntryPoint v0.6, v0.7, and v0.8: in all three, EntryPoint
 // inherits StakeManager first (after the interface IEntryPoint, which contributes
-// no storage), so the `deposits` mapping lives at slot 0. The DepositInfo struct's
-// first field is `uint256 deposit`, which sits exactly at the computed mapping slot.
+// no storage), so the `deposits` mapping lives at slot 0. `DepositInfo`'s first
+// field — `uint112 deposit` in v0.6 (see contracts/src/v06/...) and `uint256
+// deposit` in v0.7/v0.8 — sits at the low bytes of the computed mapping slot.
+// Writing a 32-byte value works for both layouts because the override amount
+// fits in uint112 and Solidity reads the low bits of the slot for the field.
 //
-// Why we override this: during simulation of a non-sponsored userOp, the EntryPoint
-// reads `bal = balanceOf(sender)` (= `deposits[sender].deposit`) to compute
-// `missingAccountFunds`. If the sender has zero EP deposit (the common case — users
-// fund their wallet, not the EP), the account is asked to transfer the prefund out
-// of its own balance. For accounts that don't hold native ETH (e.g., UR-sponsored
-// flows), this prevents the binary-search probes from succeeding and the estimator
-// returns verificationGasLimit=0.
+// Why we override this: during simulation we coerce the userOp's fees to 1 wei
+// (see eth_estimateUserOperationGas) so gas math stays well-defined, but only
+// for *boosted* userOps (original fees=0). The EntryPoint then computes
+// `missingAccountFunds` as the prefund minus `balanceOf(sender)` (i.e.
+// `deposits[sender].deposit`) and asks the account to transfer the difference
+// out of its own wallet balance. A boosted userOp typically comes from an
+// unfunded sender — by the time it reaches us the wallet has neither ETH nor
+// any EP deposit — so the prefund transfer fails and the binary-search probes
+// return verificationGasLimit=0, surfacing later as AA23 on send.
 //
 // By overriding the EP's deposit slot for the sender to a large value, we make
 // `missingAccountFunds = 0` during simulation. The account's `_payPrefund(0)` is a
