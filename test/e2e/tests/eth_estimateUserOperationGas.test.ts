@@ -234,6 +234,84 @@ describe.each([
             expect(estimation.callGasLimit).toBe(0n)
         })
 
+        // Regression: estimation must succeed for "boosted" userOps (fees=0)
+        // even when the sender has zero wallet balance AND zero EntryPoint
+        // deposit. Without the EntryPoint deposit slot stateDiff override
+        // (see getEntryPointDepositOverride), the prefund check fails during
+        // simulation and the estimator returns verificationGasLimit=0,
+        // causing AA23 on later send.
+        //
+        // We bypass viem's prepareUserOperation here because it internally
+        // calls estimateUserOperationGas with the account's *real* fees
+        // (from estimateFeesPerGas), which would itself fail on an unfunded
+        // sender — defeating the point of the regression. Building the userOp
+        // directly with fees=0 from the start exercises the boosted path.
+        test("Can estimate boosted userOp (fees=0) for unfunded sender", async () => {
+            const smartAccountClient = await getSmartAccountClient({
+                entryPointVersion,
+                anvilRpc,
+                altoRpc,
+                fundAccount: false
+            })
+
+            const bundlerClient = createBundlerClient({
+                chain: foundry,
+                transport: http(altoRpc)
+            })
+
+            const account = smartAccountClient.account
+            const callData = await account.encodeCalls([
+                {
+                    to: "0x23B608675a2B2fB1890d3ABBd85c5775c51691d5",
+                    data: "0x",
+                    value: 0n
+                }
+            ])
+            const nonce = await account.getNonce()
+            const factoryArgs = await account.getFactoryArgs()
+            const stubSignature = await account.getStubSignature()
+
+            const baseUserOp = {
+                sender: account.address,
+                nonce,
+                callData,
+                callGasLimit: 0n,
+                verificationGasLimit: 0n,
+                preVerificationGas: 0n,
+                maxFeePerGas: 0n,
+                maxPriorityFeePerGas: 0n,
+                signature: stubSignature
+            }
+            const userOp =
+                entryPointVersion === "0.6"
+                    ? {
+                          ...baseUserOp,
+                          initCode:
+                              factoryArgs.factory && factoryArgs.factoryData
+                                  ? `${factoryArgs.factory}${factoryArgs.factoryData.slice(2)}`
+                                  : "0x",
+                          paymasterAndData: "0x"
+                      }
+                    : {
+                          ...baseUserOp,
+                          factory: factoryArgs.factory,
+                          factoryData: factoryArgs.factoryData
+                      }
+
+            const estimation = (await bundlerClient.request({
+                method: "eth_estimateUserOperationGas",
+                params: [deepHexlify(userOp), entryPoint]
+            })) as {
+                verificationGasLimit: Hex
+                callGasLimit: Hex
+                preVerificationGas: Hex
+            }
+
+            expect(BigInt(estimation.verificationGasLimit)).toBeGreaterThan(0n)
+            expect(BigInt(estimation.callGasLimit)).toBeGreaterThan(0n)
+            expect(BigInt(estimation.preVerificationGas)).toBeGreaterThan(0n)
+        })
+
         test("Should throw revert reason if simulation reverted during callphase", async () => {
             const smartAccountClient = await getSmartAccountClient({
                 entryPointVersion,

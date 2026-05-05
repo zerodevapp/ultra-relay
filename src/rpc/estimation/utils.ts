@@ -68,11 +68,11 @@ export function parseFailedOpWithRevert(data: Hex) {
     return data
 }
 
-// Compute the storage slot for `deposits[sender].deposit` in EntryPoint v0.7/v0.8
-// storage. EntryPoint inherits StakeManager first (after the interface IEntryPoint
-// which contributes no storage), so the `deposits` mapping lives at slot 0. The
-// DepositInfo struct's first field is `uint256 deposit`, which sits exactly at the
-// computed mapping slot.
+// Compute the storage slot for `deposits[sender].deposit` in EntryPoint storage.
+// Works uniformly for EntryPoint v0.6, v0.7, and v0.8: in all three, EntryPoint
+// inherits StakeManager first (after the interface IEntryPoint, which contributes
+// no storage), so the `deposits` mapping lives at slot 0. The DepositInfo struct's
+// first field is `uint256 deposit`, which sits exactly at the computed mapping slot.
 //
 // Why we override this: during simulation of a non-sponsored userOp, the EntryPoint
 // reads `bal = balanceOf(sender)` (= `deposits[sender].deposit`) to compute
