@@ -2,7 +2,7 @@ import type { Logger, Metrics } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import Queue, { type Queue as QueueType } from "bull"
 import Redis from "ioredis"
-import type { Hex } from "viem"
+import { type Hex, toHex } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { OpEventType } from "../types/schemas"
 import { AsyncTimeoutError, asyncCallWithTimeout } from "../utils/asyncTimeout"
@@ -173,14 +173,41 @@ export class EventManager {
     // emits when the userOperation has been submitted to the network
     emitSubmitted({
         userOpHashes,
-        transactionHash
-    }: { userOpHashes: Hex[]; transactionHash: Hex }) {
+        transactionHash,
+        submissionAttempts,
+        bundlerMaxFeePerGas,
+        bundlerMaxPriorityFeePerGas,
+        networkMaxFeePerGas,
+        networkMaxPriorityFeePerGas,
+        networkBaseFee
+    }: {
+        userOpHashes: Hex[]
+        transactionHash: Hex
+        submissionAttempts: number
+        bundlerMaxFeePerGas: bigint
+        bundlerMaxPriorityFeePerGas: bigint
+        networkMaxFeePerGas: bigint
+        networkMaxPriorityFeePerGas: bigint
+        networkBaseFee: bigint
+    }) {
         for (const hash of userOpHashes) {
             this.emitEvent({
                 userOpHash: hash,
                 event: {
                     eventType: "submitted",
-                    transactionHash
+                    transactionHash,
+                    data: {
+                        submissionAttempts,
+                        bundlerMaxFeePerGas: toHex(bundlerMaxFeePerGas),
+                        bundlerMaxPriorityFeePerGas: toHex(
+                            bundlerMaxPriorityFeePerGas
+                        ),
+                        networkMaxFeePerGas: toHex(networkMaxFeePerGas),
+                        networkMaxPriorityFeePerGas: toHex(
+                            networkMaxPriorityFeePerGas
+                        ),
+                        networkBaseFee: toHex(networkBaseFee)
+                    }
                 }
             })
         }
