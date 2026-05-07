@@ -134,7 +134,12 @@ export class Executor {
         ]
 
         if (bundle.submissionAttempts > 0) {
-            const multiplier = 100n + BigInt(bundle.submissionAttempts) * 20n
+            // Geometric: keeps retry/prev ratio at 1.20; linear `100+20·N`
+            // drops below the 1.10 mempool replacement floor at N=7.
+            let multiplier = 100n
+            for (let i = 0; i < bundle.submissionAttempts; i++) {
+                multiplier = (multiplier * 120n) / 100n
+            }
 
             networkMaxFeePerGas = scaleBigIntByPercent(
                 networkMaxFeePerGas,
