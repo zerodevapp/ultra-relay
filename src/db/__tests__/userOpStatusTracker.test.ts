@@ -226,7 +226,11 @@ describe("UserOpStatusTracker", () => {
                 metrics: mockMetrics
             })
 
-            await tracker.trackFrontran("0xhash123" as any, 8453, "0xtxhash" as any)
+            await tracker.trackFrontran(
+                "0xhash123" as any,
+                8453,
+                "0xtxhash" as any
+            )
 
             expect(mockInsert).toHaveBeenCalled()
             expect(mockOnConflictDoUpdate).toHaveBeenCalled()

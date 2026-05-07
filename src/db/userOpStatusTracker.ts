@@ -153,10 +153,7 @@ export class UserOpStatusTracker {
         }
     }
 
-    async trackAddedToMempool(
-        userOpHash: Hex,
-        chainId: number
-    ): Promise<void> {
+    async trackAddedToMempool(userOpHash: Hex, chainId: number): Promise<void> {
         if (!this.enabled || !this.db) return
 
         try {
@@ -215,9 +212,7 @@ export class UserOpStatusTracker {
                             status: "pending_onchain",
                             transactionHash,
                             maxFeePerGas: toHex(maxFeePerGas),
-                            maxPriorityFeePerGas: toHex(
-                                maxPriorityFeePerGas
-                            ),
+                            maxPriorityFeePerGas: toHex(maxPriorityFeePerGas),
                             updatedAt: now
                         }
                     })
@@ -426,10 +421,7 @@ export class UserOpStatusTracker {
         }
     }
 
-    async incrementRetryCount(
-        userOpHash: Hex,
-        chainId: number
-    ): Promise<void> {
+    async incrementRetryCount(userOpHash: Hex, chainId: number): Promise<void> {
         if (!this.enabled || !this.db) return
 
         try {
