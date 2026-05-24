@@ -10,11 +10,11 @@ export async function timed<T>(
     context: Record<string, unknown>,
     fn: () => T | Promise<T>
 ): Promise<T> {
-    const start = Date.now()
+    const start = performance.now()
     try {
         const result = await fn()
         logger.info(
-            { ...context, step, ms: Date.now() - start },
+            { ...context, step, ms: Math.round(performance.now() - start) },
             `[timing] ${step}`
         )
         return result
@@ -23,7 +23,7 @@ export async function timed<T>(
             {
                 ...context,
                 step,
-                ms: Date.now() - start,
+                ms: Math.round(performance.now() - start),
                 err: err instanceof Error ? err.message : String(err)
             },
             `[timing] ${step} failed`

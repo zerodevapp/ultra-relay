@@ -239,7 +239,7 @@ export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
-        const handlerStart = Date.now()
+        const handlerStart = performance.now()
         const [userOp, entryPoint] = params
 
         const boost =
@@ -285,7 +285,7 @@ export const ethSendUserOperationHandler = createMethodHandler({
                     boost,
                     status,
                     userOpHash: resolvedUserOpHash,
-                    ms: Date.now() - handlerStart
+                    ms: Math.round(performance.now() - handlerStart)
                 },
                 "[timing] eth_sendUserOperation total"
             )
