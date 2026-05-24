@@ -11,7 +11,8 @@ import type * as validation from "@alto/types"
 import {
     calcExecutionPvgComponent,
     calcL2PvgComponent,
-    getAAError
+    getAAError,
+    timed
 } from "@alto/utils"
 import type { Hex } from "viem"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
@@ -97,7 +98,11 @@ export async function addToMempoolIfValid({
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
-    // Execute multiple async operations in parallel
+    const logCtx = { sender: userOp.sender, apiVersion, boost }
+
+    // Execute multiple async operations in parallel. Each step is timed
+    // individually so the slowest can be identified from logs (wall-clock
+    // latency = slowest step, not the sum).
     const [
         userOpHash,
         { queuedUserOps, validationResult },
@@ -106,20 +111,32 @@ export async function addToMempoolIfValid({
         [preMempoolSuccess, preMempoolError],
         [validEip7702Auth, validEip7702AuthError]
     ] = await Promise.all([
-        getUserOpHash({
-            userOp,
-            entryPointAddress: entryPoint,
-            chainId: rpcHandler.config.chainId,
-            publicClient: rpcHandler.config.publicClient
-        }),
-        getUserOpValidationResult(rpcHandler, userOp, entryPoint),
-        rpcHandler.getNonceSeq(userOp, entryPoint),
-        validatePvg(apiVersion, rpcHandler, userOp, entryPoint, boost),
-        rpcHandler.preMempoolChecks(userOp, apiVersion, boost),
-        rpcHandler.validateEip7702Auth({
-            userOp,
-            validateSender: true
-        })
+        timed(rpcHandler.logger, "getUserOpHash", logCtx, () =>
+            getUserOpHash({
+                userOp,
+                entryPointAddress: entryPoint,
+                chainId: rpcHandler.config.chainId,
+                publicClient: rpcHandler.config.publicClient
+            })
+        ),
+        timed(rpcHandler.logger, "getUserOpValidationResult", logCtx, () =>
+            getUserOpValidationResult(rpcHandler, userOp, entryPoint)
+        ),
+        timed(rpcHandler.logger, "getNonceSeq", logCtx, () =>
+            rpcHandler.getNonceSeq(userOp, entryPoint)
+        ),
+        timed(rpcHandler.logger, "validatePvg", logCtx, () =>
+            validatePvg(apiVersion, rpcHandler, userOp, entryPoint, boost)
+        ),
+        timed(rpcHandler.logger, "preMempoolChecks", logCtx, () =>
+            rpcHandler.preMempoolChecks(userOp, apiVersion, boost)
+        ),
+        timed(rpcHandler.logger, "validateEip7702Auth", logCtx, () =>
+            rpcHandler.validateEip7702Auth({
+                userOp,
+                validateSender: true
+            })
+        )
     ])
 
     // Validate eip7702Auth
@@ -222,18 +239,20 @@ export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
-        console.log("=== eth_sendUserOperation called ===")
+        const handlerStart = Date.now()
         const [userOp, entryPoint] = params
 
+        const boost =
+            userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+
+        rpcHandler.logger.info(
+            { sender: userOp.sender, apiVersion, boost, entryPoint },
+            "[timing] eth_sendUserOperation received"
+        )
+
         let status: "added" | "queued" | "rejected" = "rejected"
+        let resolvedUserOpHash: Hex | undefined
         try {
-            let boost = false
-            if (
-                userOp.maxFeePerGas === 0n &&
-                userOp.maxPriorityFeePerGas === 0n
-            ) {
-                boost = true
-            }
             const { result, userOpHash } = await addToMempoolIfValid({
                 rpcHandler,
                 userOp,
@@ -243,6 +262,7 @@ export const ethSendUserOperationHandler = createMethodHandler({
             })
 
             status = result
+            resolvedUserOpHash = userOpHash
 
             rpcHandler.eventManager.emitReceived(userOpHash)
 
@@ -257,6 +277,18 @@ export const ethSendUserOperationHandler = createMethodHandler({
                     type: userOp.eip7702Auth ? "7702" : "regular"
                 })
                 .inc()
+
+            rpcHandler.logger.info(
+                {
+                    sender: userOp.sender,
+                    apiVersion,
+                    boost,
+                    status,
+                    userOpHash: resolvedUserOpHash,
+                    ms: Date.now() - handlerStart
+                },
+                "[timing] eth_sendUserOperation total"
+            )
         }
     }
 })
