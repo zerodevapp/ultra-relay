@@ -38,20 +38,10 @@ export async function debug_traceCall(
         })
         .catch((e: unknown) => {
             if (e instanceof Error) {
-                // console.log("ex=", e.message)
-                // console.log(
-                //     "tracer=",
-                //     traceOptions.tracer
-                //         ?.toString()
-                //         .split("\n")
-                //         .map((line, index) => `${index + 1}: ${line}`)
-                //         .join("\n")
-                // )
                 throw e
             }
             sentry.captureException(e)
         })
-    // console.log("ret=", ret)
     return ret
 }
 

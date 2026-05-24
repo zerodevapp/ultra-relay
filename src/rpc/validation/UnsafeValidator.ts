@@ -617,7 +617,6 @@ export class UnsafeValidator implements InterfaceValidator {
 
             return validationResult
         } catch (e) {
-            // console.log(e)
             this.metrics.userOperationsValidationFailure.inc()
             throw e
         }

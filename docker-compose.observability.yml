@@ -1,0 +1,100 @@
+version: "3.8"
+
+services:
+  # Prometheus - Metrics collection and storage
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    container_name: alto-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - alto-observability
+    restart: unless-stopped
+
+  # Grafana Tempo - Distributed tracing backend
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: alto-tempo
+    command: ["-config.file=/etc/tempo.yml"]
+    ports:
+      - "3200:3200" # Tempo query frontend
+      - "4318:4318" # OTLP HTTP receiver
+      - "4317:4317" # OTLP gRPC receiver
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    networks:
+      - alto-observability
+    restart: unless-stopped
+
+  # Grafana Loki - Log aggregation
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: alto-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - alto-observability
+    restart: unless-stopped
+
+  # Grafana Alloy - Log collector
+  alloy:
+    image: grafana/alloy:v1.0.0
+    container_name: alto-alloy
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+    environment:
+      - ALTO_CLUSTER_NAME=${ALTO_CLUSTER_NAME:-alto-bundler}
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./observability/alloy.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy
+    networks:
+      - alto-observability
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # Grafana - Unified observability dashboard
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: alto-grafana
+    ports:
+      - "3003:3000"
+    environment:
+      # Default credentials: admin/admin (change in production)
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./observability/grafana-provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - alto-observability
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    restart: unless-stopped
+
+networks:
+  alto-observability:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  tempo-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
