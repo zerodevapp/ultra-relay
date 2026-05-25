@@ -90,10 +90,17 @@ export const initDebugLogger = (level = "debug"): Logger => {
 let transport: any
 
 if (process.env.BETTER_STACK_TOKEN) {
+    const logtailOptions: { sourceToken: string; endpoint?: string } = {
+        sourceToken: process.env.BETTER_STACK_TOKEN
+    }
+    if (process.env.BETTER_STACK_ENDPOINT) {
+        logtailOptions.endpoint = process.env.BETTER_STACK_ENDPOINT
+    }
+
     // @ts-ignore - pino.transport exists at runtime but types may be incomplete
     transport = pino.transport({
         target: "@logtail/pino",
-        options: { sourceToken: process.env.BETTER_STACK_TOKEN }
+        options: logtailOptions
     })
 
     let reviving = false
@@ -110,9 +117,7 @@ if (process.env.BETTER_STACK_TOKEN) {
                         // @ts-ignore
                         const revived = pino.transport({
                             target: "@logtail/pino",
-                            options: {
-                                sourceToken: process.env.BETTER_STACK_TOKEN
-                            }
+                            options: logtailOptions
                         })
                         revived.on("error", handleTransportError)
                         transport.write = revived.write.bind(revived)
