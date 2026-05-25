@@ -130,7 +130,18 @@ if (process.env.BETTER_STACK_TOKEN) {
 
 export const initProductionLogger = (level: string): Logger => {
     if (!transport) {
-        return initDebugLogger(level)
+        // No Betterstack token: emit single-line JSON to STDOUT so external
+        // log shippers (syslog, Render's collector) treat each log as one
+        // record. pino-pretty here splits structured objects across lines and
+        // makes them unsearchable downstream.
+        const l = pino({
+            formatters: {
+                level: logLevel,
+                log: customSerializer
+            }
+        })
+        l.level = level
+        return l
     }
     const l = pino(transport)
     l.level = level
