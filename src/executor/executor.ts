@@ -286,7 +286,17 @@ export class Executor {
                     }
                 }
 
-                transactionHash = await walletClient.sendTransaction(request)
+                transactionHash = await timed(
+                    childLogger,
+                    "walletClient.sendTransaction",
+                    {
+                        attempt: attempts,
+                        isPrivate: usePrivateEndpoint,
+                        executor: account.address,
+                        entryPoint
+                    },
+                    () => walletClient.sendTransaction(request)
+                )
 
                 childLogger.info(
                     {
