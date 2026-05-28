@@ -7,7 +7,12 @@ import type {
     UserOperationBundle
 } from "@alto/types"
 import type { GasPriceParameters } from "@alto/types"
-import { type Logger, type Metrics, scaleBigIntByPercent } from "@alto/utils"
+import {
+    type Logger,
+    type Metrics,
+    scaleBigIntByPercent,
+    timed
+} from "@alto/utils"
 import {
     type Account,
     type Address,
@@ -225,13 +230,29 @@ export class ExecutorManager {
         // was already tracked (handleBlock then owns its recovery).
         let bundleSubmitted = false
         try {
+            const bundleCtx = {
+                entryPoint,
+                bundleSize: userOps.length,
+                executor: wallet.address
+            }
+
             const [gasPriceParams, baseFee, nonce] = await Promise.all([
-                this.gasPriceManager.tryGetNetworkGasPrice(),
-                this.getBaseFee(),
-                this.config.publicClient.getTransactionCount({
-                    address: wallet.address,
-                    blockTag: "latest"
-                })
+                timed(this.logger, "preBundle.networkGasPrice", bundleCtx, () =>
+                    this.gasPriceManager.tryGetNetworkGasPrice()
+                ),
+                timed(this.logger, "preBundle.baseFee", bundleCtx, () =>
+                    this.getBaseFee()
+                ),
+                timed(
+                    this.logger,
+                    "preBundle.getTransactionCount",
+                    bundleCtx,
+                    () =>
+                        this.config.publicClient.getTransactionCount({
+                            address: wallet.address,
+                            blockTag: "latest"
+                        })
+                )
             ]).catch((_) => {
                 return []
             })
