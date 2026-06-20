@@ -152,6 +152,9 @@ importers:
       prom-client:
         specifier: ^14.2.0
         version: 14.2.0
+      seismic-encrypt:
+        specifier: ^0.1.1
+        version: 0.1.1(viem@2.27.0(typescript@5.3.3)(zod@3.22.4))
       type-fest:
         specifier: ^4.35.0
         version: 4.39.1
@@ -3528,6 +3531,11 @@ packages:
 
   secure-json-parse@2.7.0:
     resolution: {integrity: sha512-6aU+Rwsezw7VR8/nyvKTx8QpWH9FrcYiXXlqC4z5d5XQBDRqtbfsRjnwGyqbi3gddNtWHuEk9OANUotL26qKUw==}
+
+  seismic-encrypt@0.1.1:
+    resolution: {integrity: sha512-/Fj9TiPjQu/t844PKlYLvbEbYloW2IXREB7idUSVtmHDRPYQhPes5mpLfYa9pn4DG42cGl1xfvI/rLMsMy/Bfw==}
+    peerDependencies:
+      viem: 2.x
 
   semver@5.7.2:
     resolution: {integrity: sha512-cBznnQ9KjJqU67B52RMC65CMarK2600WFnbkcaiwWq3xy/5haFJlshgnpjovMVJ+Hff49d8GEn0b87C5pDQ10g==}
@@ -7808,6 +7816,13 @@ snapshots:
   safer-buffer@2.1.2: {}
 
   secure-json-parse@2.7.0: {}
+
+  seismic-encrypt@0.1.1(viem@2.27.0(typescript@5.3.3)(zod@3.22.4)):
+    dependencies:
+      '@noble/ciphers': 1.3.0
+      '@noble/curves': 1.9.1
+      '@noble/hashes': 1.8.0
+      viem: 2.27.0(typescript@5.3.3)(zod@3.22.4)
 
   semver@5.7.2: {}
 
