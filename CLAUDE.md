@@ -59,12 +59,13 @@ pnpm run build:contracts-v08
 1. **Multi-version Support**: Each ERC-4337 version has dedicated handlers in separate directories (v06, v07, v08)
 2. **Chain Abstraction**: Chain-specific logic is isolated in handlers, allowing easy addition of new chains
 3. **Storage Flexibility**: Store interface allows switching between Redis and in-memory storage
-4. **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots)
+4. **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots). Stuck bundles are resubmitted with bumped gas (floored above the bor +10% replacement requirement), then rotated to a fresh executor wallet after `max-stuck-attempts-before-rotation` total attempts (cancelling the old transaction)
 5. **Comprehensive Validation**: Multiple validation layers including simulation, reputation, and paymaster checks
 
 ### Important Files
 - `src/cli/config/bundle.ts`: CLI configuration and option definitions
-- `src/executor/executor.ts`: Main bundle execution logic
+- `src/executor/executor.ts`: Main bundle execution logic (gas pricing, replacement gas floor)
+- `src/executor/executorManager.ts`: Block watching, stuck-bundle resubmission/rotation, recovery
 - `src/mempool/mempool.ts`: User operation mempool implementation
 - `src/rpc/server.ts`: RPC server setup
 - `src/validator/validator.ts`: User operation validation logic

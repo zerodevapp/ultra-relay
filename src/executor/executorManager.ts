@@ -494,6 +494,20 @@ export class ExecutorManager {
             })
         } else if (isStuck) {
             this.bundleManager.stopTrackingBundle(submittedBundle)
+
+            // A stuck (not gas-too-low) bundle means the RPC accepted our tx
+            // but the network isn't including it. Bumping gas via
+            // replaceTransaction can't fix that and risks "replacement
+            // transaction underpriced" churn on bor. After a few attempts,
+            // rotate the userOps onto a fresh wallet + nonce instead.
+            if (
+                submittedBundle.bundle.submissionAttempts >=
+                this.config.maxStuckAttemptsBeforeRotation
+            ) {
+                this.rotateStuckBundle(submittedBundle)
+                return
+            }
+
             this.replaceTransaction({
                 blockReceivedTimestamp,
                 submittedBundle,
@@ -502,6 +516,69 @@ export class ExecutorManager {
                 reason: "stuck"
             })
         }
+    }
+
+    // Recover a bundle whose executor transaction is stuck (accepted by the RPC
+    // but not being mined). Re-queue the userOps so they are rebundled on a
+    // fresh wallet + nonce, and cancel the stuck transaction in the background
+    // so it can't later mine as a wasteful duplicate.
+    async rotateStuckBundle(
+        submittedBundle: SubmittedBundleInfo
+    ): Promise<void> {
+        const { bundle, executor, transactionRequest, transactionHash } =
+            submittedBundle
+        const { entryPoint, userOps } = bundle
+
+        this.logger.warn(
+            {
+                event: "rotatingStuckBundle",
+                userOperations: getUserOpHashes(userOps),
+                oldTxHash: transactionHash,
+                nonce: transactionRequest.nonce,
+                oldExecutor: executor.address,
+                submissionAttempts: bundle.submissionAttempts
+            },
+            "rotating stuck bundle to a fresh executor wallet"
+        )
+
+        this.metrics.replacedTransactions
+            .labels({ reason: "stuck", status: "rotated" })
+            .inc()
+
+        // Detach the userOps from the stuck (old) submitted bundle so the
+        // rebundle below doesn't double-track them in the submitted store.
+        await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
+
+        // Cancel the stuck transaction, then free its wallet once the nonce has
+        // advanced. Run in the background so recovery isn't blocked on cancel.
+        this.cancelBundle(submittedBundle)
+            .catch((err) =>
+                this.logger.error({ err }, "error cancelling stuck bundle")
+            )
+            .finally(() => this.senderManager.markWalletProcessed(executor))
+
+        // Re-bundle on a fresh wallet. The stuck wallet is still locked (freed
+        // only after the cancel above), so getWallet() picks a different one and
+        // the new tx uses a fresh nonce — there is no same-nonce bor replacement
+        // constraint, so no gas floor is carried. Passing the existing bundle
+        // preserves submissionAttempts, so the new tx starts at the already
+        // escalated gas level (bounded by resubmitMultiplierCeiling) rather than
+        // resetting to base — this avoids a livelock under sustained network
+        // load where each rotation would otherwise restart from network gas.
+        const newTxHash = await this.sendBundleToExecutor(bundle)
+
+        this.logger.warn(
+            {
+                event: "rotatedStuckBundle",
+                userOperations: getUserOpHashes(userOps),
+                oldTxHash: transactionHash,
+                oldExecutor: executor.address,
+                newTxHash
+            },
+            newTxHash
+                ? "stuck bundle rotated to a fresh executor wallet"
+                : "stuck bundle rotation failed to submit on a fresh wallet"
+        )
     }
 
     async cancelBundle(submittedBundle: SubmittedBundleInfo): Promise<void> {
@@ -616,7 +693,11 @@ export class ExecutorManager {
             networkGasPrice,
             networkBaseFee,
             userOpBundle: bundle,
-            nonce: transactionRequest.nonce
+            nonce: transactionRequest.nonce,
+            // Floor the new bid to the previous tx's fee caps + bump so bor
+            // accepts the replacement (avoids "replacement transaction
+            // underpriced" when the network price has dipped).
+            previousTransactionRequest: transactionRequest
         })
 
         // Handle case where no bundle was sent.
