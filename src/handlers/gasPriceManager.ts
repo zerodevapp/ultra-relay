@@ -131,29 +131,41 @@ export class GasPriceManager {
             maxPriorityFeePerGas: (maxPriorityFeePerGas * bumpAmount) / 100n
         }
 
-        if (
-            this.config.floorMaxFeePerGas ||
-            this.config.floorMaxPriorityFeePerGas
-        ) {
-            const maxFeePerGas = this.config.floorMaxFeePerGas
-                ? maxBigInt(this.config.floorMaxFeePerGas, result.maxFeePerGas)
-                : result.maxFeePerGas
+        let finalMaxFeePerGas = this.config.floorMaxFeePerGas
+            ? maxBigInt(this.config.floorMaxFeePerGas, result.maxFeePerGas)
+            : result.maxFeePerGas
 
-            const maxPriorityFeePerGas = this.config.floorMaxPriorityFeePerGas
-                ? maxBigInt(
-                      this.config.floorMaxPriorityFeePerGas,
-                      result.maxPriorityFeePerGas
-                  )
-                : result.maxPriorityFeePerGas
+        let finalMaxPriorityFeePerGas = this.config.floorMaxPriorityFeePerGas
+            ? maxBigInt(
+                  this.config.floorMaxPriorityFeePerGas,
+                  result.maxPriorityFeePerGas
+              )
+            : result.maxPriorityFeePerGas
 
-            return {
-                // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
-                maxFeePerGas: maxBigInt(maxFeePerGas, maxPriorityFeePerGas),
-                maxPriorityFeePerGas
-            }
+        // Ceiling on the priority fee taken from the network gas oracle. On
+        // low-traffic chains the eth_maxPriorityFeePerGas oracle can feedback-loop
+        // on the bundler's own past tips and report an absurd value (e.g. 500 gwei
+        // on a 20 gwei base-fee, empty-block chain), which we'd otherwise bid
+        // verbatim and overpay ~25x. Cap the tip and reduce maxFeePerGas by the
+        // same delta so we don't pay an inflated tip. Applied after the floors so
+        // the cap always wins if both are configured. The base-fee component of
+        // maxFeePerGas is preserved, so this never pushes maxFeePerGas below the
+        // base fee.
+        if (this.config.maxPriorityFeePerGasCap !== undefined) {
+            const cappedPriorityFee = minBigInt(
+                finalMaxPriorityFeePerGas,
+                this.config.maxPriorityFeePerGasCap
+            )
+            const priorityFeeDelta = finalMaxPriorityFeePerGas - cappedPriorityFee
+            finalMaxFeePerGas -= priorityFeeDelta
+            finalMaxPriorityFeePerGas = cappedPriorityFee
         }
 
-        return result
+        return {
+            // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
+            maxFeePerGas: maxBigInt(finalMaxFeePerGas, finalMaxPriorityFeePerGas),
+            maxPriorityFeePerGas: finalMaxPriorityFeePerGas
+        }
     }
 
     private async getFallBackMaxPriorityFeePerGas(

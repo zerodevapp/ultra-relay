@@ -188,6 +188,10 @@ export const compatibilityArgsSchema = z.object({
         .string()
         .transform((val) => parseGwei(val))
         .optional(),
+    "max-priority-fee-per-gas-cap": z
+        .string()
+        .transform((val) => parseGwei(val))
+        .optional(),
     "supports-eip7623": z.boolean().default(false)
 })
 
