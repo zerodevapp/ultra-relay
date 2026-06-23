@@ -203,6 +203,13 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const executorWalletsQuarantined = new Gauge({
+        name: "ultra_relay_executor_wallets_quarantined",
+        help: "Number of executor wallets held out of the pool pending stuck-nonce confirmation",
+        labelNames: [] as const,
+        registers
+    })
+
     const emittedOpEvents = new Counter({
         name: "ultra_relay_emitted_user_operation_events",
         help: "Total number of emitted UserOperation status events",
@@ -247,6 +254,7 @@ export function createMetrics(registry: Registry, register = true) {
         utilityWalletInsufficientBalance,
         executorWalletsBalances,
         executorWalletsMinBalance,
+        executorWalletsQuarantined,
         emittedOpEvents,
         walletsProcessingTime,
         userOperationsSubmissionAttempts,

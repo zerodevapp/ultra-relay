@@ -9,6 +9,8 @@ import type {
 import type { GasPriceParameters } from "@alto/types"
 import { type Logger, type Metrics, scaleBigIntByPercent } from "@alto/utils"
 import {
+    type Account,
+    type Address,
     type Block,
     type Hex,
     type WatchBlocksReturnType,
@@ -22,6 +24,11 @@ import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
+
+// While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
+// emit an error log every this-many reconcile ticks so a permanently wedged
+// wallet surfaces for alerting (~ this * blockTime between alerts).
+const QUARANTINE_ALERT_INTERVAL_TICKS = 30
 
 export class ExecutorManager {
     private senderManager: SenderManager
@@ -37,6 +44,21 @@ export class ExecutorManager {
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
+
+    // Executor wallets rotated away from a stuck bundle whose cancel did not
+    // confirm. Held out of the sender pool (markWalletProcessed deferred) until
+    // their on-chain nonce advances past the stuck nonce, so no other instance
+    // can pop an unconfirmed nonce and collide.
+    private quarantinedWallets: Map<
+        Address,
+        {
+            wallet: Account
+            stuckNonce: number
+            quarantinedAt: number
+            ticks: number
+        }
+    > = new Map()
+    private quarantineTimer: NodeJS.Timeout | undefined
 
     constructor({
         config,
@@ -504,7 +526,12 @@ export class ExecutorManager {
                 submittedBundle.bundle.submissionAttempts >=
                 this.config.maxStuckAttemptsBeforeRotation
             ) {
-                this.rotateStuckBundle(submittedBundle)
+                this.rotateStuckBundle(submittedBundle).catch((err) =>
+                    this.logger.error(
+                        { err },
+                        "unhandled error rotating stuck bundle"
+                    )
+                )
                 return
             }
 
@@ -545,43 +572,187 @@ export class ExecutorManager {
             .labels({ reason: "stuck", status: "rotated" })
             .inc()
 
-        // Detach the userOps from the stuck (old) submitted bundle so the
-        // rebundle below doesn't double-track them in the submitted store.
-        await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
-
-        // Cancel the stuck transaction, then free its wallet once the nonce has
-        // advanced. Run in the background so recovery isn't blocked on cancel.
+        // Cancel the stuck transaction. Free the wallet ONLY if the cancel
+        // confirms (nonce advanced past the stuck nonce); otherwise quarantine
+        // it so no other instance can pop an unconfirmed nonce and collide.
+        // Runs in the background so recovery isn't blocked on cancel.
         this.cancelBundle(submittedBundle)
-            .catch((err) =>
-                this.logger.error({ err }, "error cancelling stuck bundle")
-            )
-            .finally(() => this.senderManager.markWalletProcessed(executor))
+            .then((confirmed) => {
+                if (confirmed) {
+                    return this.senderManager
+                        .markWalletProcessed(executor)
+                        .catch((err) =>
+                            this.logger.error(
+                                { err, executor: executor.address },
+                                "failed to free wallet after confirmed cancel"
+                            )
+                        )
+                }
+                this.quarantineWallet(executor, transactionRequest.nonce)
+                return undefined
+            })
+            .catch((err) => {
+                this.logger.error(
+                    { err, executor: executor.address },
+                    "error cancelling stuck bundle, quarantining wallet"
+                )
+                this.quarantineWallet(executor, transactionRequest.nonce)
+            })
 
-        // Re-bundle on a fresh wallet. The stuck wallet is still locked (freed
-        // only after the cancel above), so getWallet() picks a different one and
-        // the new tx uses a fresh nonce — there is no same-nonce bor replacement
-        // constraint, so no gas floor is carried. Passing the existing bundle
-        // preserves submissionAttempts, so the new tx starts at the already
-        // escalated gas level (bounded by resubmitMultiplierCeiling) rather than
-        // resetting to base — this avoids a livelock under sustained network
-        // load where each rotation would otherwise restart from network gas.
-        const newTxHash = await this.sendBundleToExecutor(bundle)
+        try {
+            // Detach the userOps from the stuck (old) submitted bundle so the
+            // rebundle below doesn't double-track them in the submitted store.
+            await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
+
+            // Re-bundle on a fresh wallet. The stuck wallet is still locked
+            // (freed only after the cancel above), so getWallet() picks a
+            // different one and the new tx uses a fresh nonce — there is no
+            // same-nonce bor replacement constraint, so no gas floor is carried.
+            // Passing the existing bundle preserves submissionAttempts, so the
+            // new tx starts at the already escalated gas level (bounded by
+            // resubmitMultiplierCeiling) rather than resetting to base — this
+            // avoids a livelock under sustained network load where each rotation
+            // would otherwise restart from network gas.
+            const newTxHash = await this.sendBundleToExecutor(bundle)
+
+            this.logger.warn(
+                {
+                    event: "rotatedStuckBundle",
+                    userOperations: getUserOpHashes(userOps),
+                    oldTxHash: transactionHash,
+                    oldExecutor: executor.address,
+                    newTxHash
+                },
+                newTxHash
+                    ? "stuck bundle rotated to a fresh executor wallet"
+                    : "stuck bundle rotation failed to submit on a fresh wallet"
+            )
+        } catch (err) {
+            // removeSubmittedUserOps / sendBundleToExecutor can throw on RPC
+            // failure. By this point the userOps may already be detached from
+            // the submitted store, so re-queue them to outstanding to avoid
+            // silently dropping them (this method is invoked fire-and-forget).
+            this.logger.error(
+                {
+                    err,
+                    userOperations: getUserOpHashes(userOps),
+                    oldTxHash: transactionHash
+                },
+                "stuck bundle rotation failed, resubmitting userOps"
+            )
+            await this.mempool
+                .resubmitUserOps({
+                    userOps,
+                    entryPoint,
+                    reason: "stuck_bundle_rotation_failed"
+                })
+                .catch((resubmitErr) =>
+                    this.logger.error(
+                        { err: resubmitErr },
+                        "failed to resubmit userOps after rotation failure"
+                    )
+                )
+        }
+    }
+
+    // Hold a rotated-away wallet out of the sender pool (markWalletProcessed
+    // deferred) until its stuck nonce confirms on-chain, so no other instance
+    // can pop an unconfirmed nonce and collide.
+    private quarantineWallet(wallet: Account, stuckNonce: number): void {
+        this.quarantinedWallets.set(wallet.address, {
+            wallet,
+            stuckNonce,
+            quarantinedAt: Date.now(),
+            ticks: 0
+        })
+        this.metrics.executorWalletsQuarantined.set(
+            this.quarantinedWallets.size
+        )
 
         this.logger.warn(
             {
-                event: "rotatedStuckBundle",
-                userOperations: getUserOpHashes(userOps),
-                oldTxHash: transactionHash,
-                oldExecutor: executor.address,
-                newTxHash
+                event: "walletQuarantined",
+                executor: wallet.address,
+                stuckNonce
             },
-            newTxHash
-                ? "stuck bundle rotated to a fresh executor wallet"
-                : "stuck bundle rotation failed to submit on a fresh wallet"
+            "executor wallet quarantined after failed cancel"
         )
+
+        if (!this.quarantineTimer) {
+            this.quarantineTimer = setInterval(
+                () => this.reconcileQuarantinedWallets(),
+                this.config.blockTime
+            )
+        }
     }
 
-    async cancelBundle(submittedBundle: SubmittedBundleInfo): Promise<void> {
+    // Poll quarantined wallets; release one back to the pool once its on-chain
+    // nonce has advanced past the stuck nonce (cancel or original tx mined).
+    // Watch-only: never force-frees a wallet whose nonce hasn't advanced.
+    private async reconcileQuarantinedWallets(): Promise<void> {
+        for (const [address, entry] of [...this.quarantinedWallets]) {
+            const { wallet, stuckNonce, quarantinedAt } = entry
+
+            const latestNonce = await this.config.publicClient
+                .getTransactionCount({ address, blockTag: "latest" })
+                .catch(() => undefined)
+
+            // RPC error — leave quarantined, retry next tick.
+            if (latestNonce === undefined) {
+                continue
+            }
+
+            // Stuck slot resolved -> safe to return the wallet to the pool.
+            if (latestNonce > stuckNonce) {
+                this.quarantinedWallets.delete(address)
+                this.metrics.executorWalletsQuarantined.set(
+                    this.quarantinedWallets.size
+                )
+                await this.senderManager
+                    .markWalletProcessed(wallet)
+                    .catch((err) =>
+                        this.logger.error(
+                            { err, executor: address },
+                            "failed to release quarantined wallet"
+                        )
+                    )
+                this.logger.info(
+                    {
+                        event: "walletReleasedFromQuarantine",
+                        executor: address,
+                        stuckNonce,
+                        latestNonce,
+                        quarantinedTicks: entry.ticks
+                    },
+                    "executor wallet released from quarantine"
+                )
+                continue
+            }
+
+            // Still wedged: escalate periodically so a permanently stuck wallet
+            // surfaces for alerting (query: event:"walletQuarantineStuck").
+            entry.ticks += 1
+            if (entry.ticks % QUARANTINE_ALERT_INTERVAL_TICKS === 0) {
+                this.logger.error(
+                    {
+                        event: "walletQuarantineStuck",
+                        executor: address,
+                        stuckNonce,
+                        quarantinedTicks: entry.ticks,
+                        quarantinedMs: Date.now() - quarantinedAt
+                    },
+                    "executor wallet stuck in quarantine — manual intervention may be required"
+                )
+            }
+        }
+
+        if (this.quarantinedWallets.size === 0 && this.quarantineTimer) {
+            clearInterval(this.quarantineTimer)
+            this.quarantineTimer = undefined
+        }
+    }
+
+    async cancelBundle(submittedBundle: SubmittedBundleInfo): Promise<boolean> {
         const {
             bundle: { userOps },
             executor,
@@ -607,7 +778,7 @@ export class ExecutorManager {
 
                 if (currentNonce > transactionRequest.nonce) {
                     logger.info("Transaction already mined or cancelled")
-                    return
+                    return true
                 }
 
                 logger.info(`Trying to cancel bundle, attempt ${attempt + 1}`)
@@ -652,6 +823,7 @@ export class ExecutorManager {
             { transactionHash },
             "failed to cancel bundle after max retries"
         )
+        return false
     }
 
     async replaceTransaction({
