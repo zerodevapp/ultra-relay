@@ -156,14 +156,18 @@ export class GasPriceManager {
                 finalMaxPriorityFeePerGas,
                 this.config.maxPriorityFeePerGasCap
             )
-            const priorityFeeDelta = finalMaxPriorityFeePerGas - cappedPriorityFee
+            const priorityFeeDelta =
+                finalMaxPriorityFeePerGas - cappedPriorityFee
             finalMaxFeePerGas -= priorityFeeDelta
             finalMaxPriorityFeePerGas = cappedPriorityFee
         }
 
         return {
             // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
-            maxFeePerGas: maxBigInt(finalMaxFeePerGas, finalMaxPriorityFeePerGas),
+            maxFeePerGas: maxBigInt(
+                finalMaxFeePerGas,
+                finalMaxPriorityFeePerGas
+            ),
             maxPriorityFeePerGas: finalMaxPriorityFeePerGas
         }
     }
