@@ -59,6 +59,7 @@ export class ExecutorManager {
         }
     > = new Map()
     private quarantineTimer: NodeJS.Timeout | undefined
+    private reconciling = false
 
     constructor({
         config,
@@ -200,151 +201,196 @@ export class ExecutorManager {
 
         const wallet = await this.senderManager.getWallet()
 
-        const [gasPriceParams, baseFee, nonce] = await Promise.all([
-            this.gasPriceManager.tryGetNetworkGasPrice(),
-            this.getBaseFee(),
-            this.config.publicClient.getTransactionCount({
-                address: wallet.address,
-                blockTag: "latest"
-            })
-        ]).catch((_) => {
-            return []
-        })
-
-        if (!gasPriceParams || nonce === undefined) {
-            // Free executor if failed to get initial params.
-            await this.senderManager.markWalletProcessed(wallet)
-            await this.mempool.resubmitUserOps({
-                userOps,
-                entryPoint,
-                reason: "Failed to get nonce and gas parameters for bundling"
-            })
-            return undefined
-        }
-
-        const bundleResult = await this.executor.bundle({
-            executor: wallet,
-            userOpBundle,
-            networkGasPrice: gasPriceParams,
-            networkBaseFee: baseFee,
-            nonce
-        })
-
-        if (!bundleResult.success) {
-            const { rejectedUserOps, recoverableOps, reason } = bundleResult
-
-            // Recover any userOps that can be resubmitted.
-            await this.mempool.resubmitUserOps({
-                userOps: recoverableOps,
-                entryPoint,
-                reason
-            })
-
-            // For rejected userOps, we need to check for frontruns
-            const shouldCheckFrontrun = rejectedUserOps.some(
-                ({ reason }) =>
-                    reason.includes("AA25 invalid account nonce") ||
-                    reason.includes("AA10 sender already constructed")
-            )
-
-            if (shouldCheckFrontrun) {
-                // Check each rejected userOp for frontrun or included
-                const results = await Promise.all(
-                    rejectedUserOps.map(async (userOpInfo) => ({
-                        userOpInfo,
-                        status: await this.bundleManager.getUserOpStatus({
-                            userOpInfo,
-                            entryPoint,
-                            bundlerTxs: [],
-                            blockReceivedTimestamp: Date.now()
-                        })
-                    }))
-                )
-
-                // Drop userOps that were rejected but not frontrun or included
-                const notFoundUserOps = results
-                    .filter(({ status }) => status === "not_found")
-                    .map(({ userOpInfo }) => userOpInfo)
-
-                await this.mempool.dropUserOps(entryPoint, notFoundUserOps)
-
-                // Stop tracking userOps that were included onchain either due to frontrun or included
-                const confirmedUserOps = results
-                    .filter(({ status }) =>
-                        ["frontran", "included"].includes(status)
-                    )
-                    .map(({ userOpInfo }) => userOpInfo)
-
-                await this.mempool.removeProcessingUserOps({
-                    entryPoint,
-                    userOps: confirmedUserOps
+        // Own userOp recovery on ANY unexpected throw so a single RPC failure
+        // can't orphan them (this is invoked fire-and-forget by callers). The
+        // known failure paths below still return cleanly; this only catches the
+        // unexpected. bundleSubmitted prevents double-submitting a bundle that
+        // was already tracked (handleBlock then owns its recovery).
+        let bundleSubmitted = false
+        try {
+            const [gasPriceParams, baseFee, nonce] = await Promise.all([
+                this.gasPriceManager.tryGetNetworkGasPrice(),
+                this.getBaseFee(),
+                this.config.publicClient.getTransactionCount({
+                    address: wallet.address,
+                    blockTag: "latest"
                 })
-            } else {
-                this.logger.warn(
-                    { reason },
-                    "failed to send bundle transaction"
+            ]).catch((_) => {
+                return []
+            })
+
+            if (!gasPriceParams || nonce === undefined) {
+                // Free executor if failed to get initial params.
+                await this.senderManager.markWalletProcessed(wallet)
+                await this.mempool.resubmitUserOps({
+                    userOps,
+                    entryPoint,
+                    reason: "Failed to get nonce and gas parameters for bundling"
+                })
+                return undefined
+            }
+
+            const bundleResult = await this.executor.bundle({
+                executor: wallet,
+                userOpBundle,
+                networkGasPrice: gasPriceParams,
+                networkBaseFee: baseFee,
+                nonce
+            })
+
+            if (!bundleResult.success) {
+                const { rejectedUserOps, recoverableOps, reason } = bundleResult
+
+                // Recover any userOps that can be resubmitted.
+                await this.mempool.resubmitUserOps({
+                    userOps: recoverableOps,
+                    entryPoint,
+                    reason
+                })
+
+                // For rejected userOps, we need to check for frontruns
+                const shouldCheckFrontrun = rejectedUserOps.some(
+                    ({ reason }) =>
+                        reason.includes("AA25 invalid account nonce") ||
+                        reason.includes("AA10 sender already constructed")
                 )
 
-                await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
+                if (shouldCheckFrontrun) {
+                    // Check each rejected userOp for frontrun or included
+                    const results = await Promise.all(
+                        rejectedUserOps.map(async (userOpInfo) => ({
+                            userOpInfo,
+                            status: await this.bundleManager.getUserOpStatus({
+                                userOpInfo,
+                                entryPoint,
+                                bundlerTxs: [],
+                                blockReceivedTimestamp: Date.now()
+                            })
+                        }))
+                    )
+
+                    // Drop userOps that were rejected but not frontrun or included
+                    const notFoundUserOps = results
+                        .filter(({ status }) => status === "not_found")
+                        .map(({ userOpInfo }) => userOpInfo)
+
+                    await this.mempool.dropUserOps(entryPoint, notFoundUserOps)
+
+                    // Stop tracking userOps that were included onchain either due to frontrun or included
+                    const confirmedUserOps = results
+                        .filter(({ status }) =>
+                            ["frontran", "included"].includes(status)
+                        )
+                        .map(({ userOpInfo }) => userOpInfo)
+
+                    await this.mempool.removeProcessingUserOps({
+                        entryPoint,
+                        userOps: confirmedUserOps
+                    })
+                } else {
+                    this.logger.warn(
+                        { reason },
+                        "failed to send bundle transaction"
+                    )
+
+                    await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
+                }
+
+                // Free wallet as no bundle was sent.
+                await this.senderManager.markWalletProcessed(wallet)
+
+                this.metrics.userOperationsSubmitted
+                    .labels({ status: "failed" })
+                    .inc(rejectedUserOps.length)
+
+                if (
+                    reason === "filterops_failed" ||
+                    reason === "generic_error"
+                ) {
+                    this.metrics.bundlesSubmitted
+                        .labels({ status: "failed" })
+                        .inc()
+                }
+
+                return undefined
             }
 
-            // Free wallet as no bundle was sent.
-            await this.senderManager.markWalletProcessed(wallet)
+            // Success case
+            let {
+                userOpsBundled,
+                rejectedUserOps,
+                transactionRequest,
+                transactionHash
+            } = bundleResult
 
-            this.metrics.userOperationsSubmitted
-                .labels({ status: "failed" })
-                .inc(rejectedUserOps.length)
+            // Increment submission attempts for all userOps submitted.
+            userOpsBundled = userOpsBundled.map((userOpInfo) => ({
+                ...userOpInfo,
+                submissionAttempts: userOpInfo.submissionAttempts + 1
+            }))
 
-            if (reason === "filterops_failed" || reason === "generic_error") {
-                this.metrics.bundlesSubmitted.labels({ status: "failed" }).inc()
+            const submittedBundle: SubmittedBundleInfo = {
+                uid: transactionHash,
+                executor: wallet,
+                transactionHash,
+                transactionRequest,
+                bundle: {
+                    entryPoint,
+                    version,
+                    userOps: userOpsBundled,
+                    submissionAttempts: 1
+                },
+                previousTransactionHashes: [],
+                lastReplaced: Date.now()
             }
 
+            // Track bundle and start loop to watch blocks
+            this.bundleManager.trackBundle(submittedBundle)
+            bundleSubmitted = true
+            this.startWatchingBlocks()
+
+            await this.mempool.markUserOpsAsSubmitted({
+                userOps: submittedBundle.bundle.userOps,
+                entryPoint: submittedBundle.bundle.entryPoint,
+                transactionHash: submittedBundle.transactionHash
+            })
+
+            await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
+            this.metrics.bundlesSubmitted.labels({ status: "success" }).inc()
+
+            return transactionHash
+        } catch (err) {
+            this.logger.error(
+                { err, executor: wallet.address },
+                "unexpected error sending bundle to executor"
+            )
+            // Tx not submitted/tracked -> userOps are detached and unowned, so
+            // free the wallet and requeue them rather than dropping them. If it
+            // was already tracked, handleBlock owns recovery -> don't resubmit.
+            if (!bundleSubmitted) {
+                await this.senderManager
+                    .markWalletProcessed(wallet)
+                    .catch((e) =>
+                        this.logger.error(
+                            { err: e },
+                            "failed to free wallet after send error"
+                        )
+                    )
+                await this.mempool
+                    .resubmitUserOps({
+                        userOps,
+                        entryPoint,
+                        reason: "send_bundle_unexpected_error"
+                    })
+                    .catch((e) =>
+                        this.logger.error(
+                            { err: e },
+                            "failed to resubmit userOps after send error"
+                        )
+                    )
+            }
             return undefined
         }
-
-        // Success case
-        let {
-            userOpsBundled,
-            rejectedUserOps,
-            transactionRequest,
-            transactionHash
-        } = bundleResult
-
-        // Increment submission attempts for all userOps submitted.
-        userOpsBundled = userOpsBundled.map((userOpInfo) => ({
-            ...userOpInfo,
-            submissionAttempts: userOpInfo.submissionAttempts + 1
-        }))
-
-        const submittedBundle: SubmittedBundleInfo = {
-            uid: transactionHash,
-            executor: wallet,
-            transactionHash,
-            transactionRequest,
-            bundle: {
-                entryPoint,
-                version,
-                userOps: userOpsBundled,
-                submissionAttempts: 1
-            },
-            previousTransactionHashes: [],
-            lastReplaced: Date.now()
-        }
-
-        // Track bundle and start loop to watch blocks
-        this.bundleManager.trackBundle(submittedBundle)
-        this.startWatchingBlocks()
-
-        await this.mempool.markUserOpsAsSubmitted({
-            userOps: submittedBundle.bundle.userOps,
-            entryPoint: submittedBundle.bundle.entryPoint,
-            transactionHash: submittedBundle.transactionHash
-        })
-
-        await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
-        this.metrics.bundlesSubmitted.labels({ status: "success" }).inc()
-
-        return transactionHash
     }
 
     stopWatchingBlocks(): void {
@@ -526,13 +572,32 @@ export class ExecutorManager {
                 submittedBundle.bundle.submissionAttempts >=
                 this.config.maxStuckAttemptsBeforeRotation
             ) {
-                this.rotateStuckBundle(submittedBundle).catch((err) =>
-                    this.logger.error(
-                        { err },
-                        "unhandled error rotating stuck bundle"
-                    )
+                // Cap concurrent quarantines at half the pool so a network-wide
+                // stall (cancels also don't confirm) can't drain it. At the cap,
+                // fall back to in-place replacement, which reuses the held
+                // wallet and frees nothing new.
+                // ponytail: half the pool; make configurable if too coarse.
+                const maxConcurrentQuarantine = Math.floor(
+                    this.senderManager.getAllWallets().length / 2
                 )
-                return
+                if (this.quarantinedWallets.size < maxConcurrentQuarantine) {
+                    this.rotateStuckBundle(submittedBundle).catch((err) =>
+                        this.logger.error(
+                            { err },
+                            "unhandled error rotating stuck bundle"
+                        )
+                    )
+                    return
+                }
+
+                this.logger.warn(
+                    {
+                        event: "rotationDeferredQuarantineCap",
+                        quarantined: this.quarantinedWallets.size,
+                        maxConcurrentQuarantine
+                    },
+                    "rotation deferred: quarantine cap reached, replacing in place"
+                )
             }
 
             this.replaceTransaction({
@@ -599,60 +664,59 @@ export class ExecutorManager {
                 this.quarantineWallet(executor, transactionRequest.nonce)
             })
 
+        // Detach the userOps from the stuck (old) submitted bundle. If this
+        // throws the ops were never handed off to the rebundle, so requeue them
+        // here. Once sendBundleToExecutor is entered it owns userOp recovery on
+        // every path (including unexpected throws), so no resubmit guard is
+        // needed around it — guarding it too would double-handle ops it already
+        // resubmitted/dropped/submitted.
         try {
-            // Detach the userOps from the stuck (old) submitted bundle so the
-            // rebundle below doesn't double-track them in the submitted store.
             await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
-
-            // Re-bundle on a fresh wallet. The stuck wallet is still locked
-            // (freed only after the cancel above), so getWallet() picks a
-            // different one and the new tx uses a fresh nonce — there is no
-            // same-nonce bor replacement constraint, so no gas floor is carried.
-            // Passing the existing bundle preserves submissionAttempts, so the
-            // new tx starts at the already escalated gas level (bounded by
-            // resubmitMultiplierCeiling) rather than resetting to base — this
-            // avoids a livelock under sustained network load where each rotation
-            // would otherwise restart from network gas.
-            const newTxHash = await this.sendBundleToExecutor(bundle)
-
-            this.logger.warn(
-                {
-                    event: "rotatedStuckBundle",
-                    userOperations: getUserOpHashes(userOps),
-                    oldTxHash: transactionHash,
-                    oldExecutor: executor.address,
-                    newTxHash
-                },
-                newTxHash
-                    ? "stuck bundle rotated to a fresh executor wallet"
-                    : "stuck bundle rotation failed to submit on a fresh wallet"
-            )
         } catch (err) {
-            // removeSubmittedUserOps / sendBundleToExecutor can throw on RPC
-            // failure. By this point the userOps may already be detached from
-            // the submitted store, so re-queue them to outstanding to avoid
-            // silently dropping them (this method is invoked fire-and-forget).
             this.logger.error(
                 {
                     err,
                     userOperations: getUserOpHashes(userOps),
                     oldTxHash: transactionHash
                 },
-                "stuck bundle rotation failed, resubmitting userOps"
+                "failed to detach stuck bundle, resubmitting userOps"
             )
             await this.mempool
                 .resubmitUserOps({
                     userOps,
                     entryPoint,
-                    reason: "stuck_bundle_rotation_failed"
+                    reason: "stuck_bundle_detach_failed"
                 })
                 .catch((resubmitErr) =>
                     this.logger.error(
                         { err: resubmitErr },
-                        "failed to resubmit userOps after rotation failure"
+                        "failed to resubmit userOps after detach failure"
                     )
                 )
+            return
         }
+
+        // Re-bundle on a fresh wallet. The stuck wallet is still locked (freed
+        // only after the cancel above), so getWallet() picks a different one and
+        // the new tx uses a fresh nonce — no same-nonce bor replacement
+        // constraint, so no gas floor is carried. Passing the existing bundle
+        // preserves submissionAttempts, so the new tx starts at the already
+        // escalated gas level (bounded by resubmitMultiplierCeiling) rather than
+        // resetting to base — avoids a livelock under sustained network load.
+        const newTxHash = await this.sendBundleToExecutor(bundle)
+
+        this.logger.warn(
+            {
+                event: "rotatedStuckBundle",
+                userOperations: getUserOpHashes(userOps),
+                oldTxHash: transactionHash,
+                oldExecutor: executor.address,
+                newTxHash
+            },
+            newTxHash
+                ? "stuck bundle rotated to a fresh executor wallet"
+                : "stuck bundle rotation failed to submit on a fresh wallet"
+        )
     }
 
     // Hold a rotated-away wallet out of the sender pool (markWalletProcessed
@@ -690,6 +754,19 @@ export class ExecutorManager {
     // nonce has advanced past the stuck nonce (cancel or original tx mined).
     // Watch-only: never force-frees a wallet whose nonce hasn't advanced.
     private async reconcileQuarantinedWallets(): Promise<void> {
+        // Guard against overlapping runs if a tick takes longer than blockTime.
+        if (this.reconciling) {
+            return
+        }
+        this.reconciling = true
+        try {
+            await this.reconcileQuarantinedWalletsInner()
+        } finally {
+            this.reconciling = false
+        }
+    }
+
+    private async reconcileQuarantinedWalletsInner(): Promise<void> {
         for (const [address, entry] of [...this.quarantinedWallets]) {
             const { wallet, stuckNonce, quarantinedAt } = entry
 
