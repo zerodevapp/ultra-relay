@@ -39,6 +39,13 @@ import {
     isTransactionUnderpricedError
 } from "./utils"
 
+// bor/geth mempool only accepts a replacement transaction (same sender+nonce)
+// if it exceeds the pending transaction's gasFeeCap AND gasTipCap by at least
+// PriceBump (10% in geth's legacypool, inherited by Polygon bor). We bump by
+// 13% to keep rounding headroom so resubmissions are never rejected with
+// "replacement transaction underpriced".
+const REPLACEMENT_MIN_BUMP_PERCENT = 113n
+
 type HandleOpsTxParams = {
     gas: bigint
     account: Account
@@ -375,20 +382,26 @@ export class Executor {
         userOpBundle,
         networkGasPrice,
         networkBaseFee,
-        nonce
+        nonce,
+        previousTransactionRequest
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
         networkGasPrice: GasPriceParameters
         networkBaseFee: bigint
         nonce: number
+        previousTransactionRequest?: {
+            maxFeePerGas: bigint
+            maxPriorityFeePerGas: bigint
+        }
     }): Promise<BundleResult> {
         const { entryPoint, userOps } = userOpBundle
 
         let childLogger = this.logger.child({
             submissionAttempts: userOpBundle.submissionAttempts,
             userOperations: getUserOpHashes(userOps),
-            entryPoint
+            entryPoint,
+            executor: executor.address
         })
 
         const filterOpsResult = await filterOpsAndEstimateGas({
@@ -432,16 +445,40 @@ export class Executor {
         childLogger = this.logger.child({
             submissionAttempts: userOpBundle.submissionAttempts,
             userOperations: getUserOpHashes(userOpsToBundle),
-            entryPoint
+            entryPoint,
+            executor: executor.address
         })
 
-        const { maxFeePerGas, maxPriorityFeePerGas } = this.getBundleGasPrice({
+        let { maxFeePerGas, maxPriorityFeePerGas } = this.getBundleGasPrice({
             bundle: userOpBundle,
             networkGasPrice,
             networkBaseFee,
             totalBeneficiaryFees,
             bundleGasUsed
         })
+
+        // When replacing a stuck transaction, the new bid must beat the previous
+        // transaction's fee caps by >= bor's PriceBump (10%) on BOTH maxFeePerGas
+        // and maxPriorityFeePerGas, or the node rejects it with "replacement
+        // transaction underpriced". The price above is derived from the
+        // fluctuating network price and can dip below the previous bid, so floor
+        // it to guarantee a valid replacement.
+        if (previousTransactionRequest) {
+            maxFeePerGas = maxBigInt(
+                maxFeePerGas,
+                scaleBigIntByPercent(
+                    previousTransactionRequest.maxFeePerGas,
+                    REPLACEMENT_MIN_BUMP_PERCENT
+                )
+            )
+            maxPriorityFeePerGas = maxBigInt(
+                maxPriorityFeePerGas,
+                scaleBigIntByPercent(
+                    previousTransactionRequest.maxPriorityFeePerGas,
+                    REPLACEMENT_MIN_BUMP_PERCENT
+                )
+            )
+        }
 
         let transactionHash: HexData32
         try {

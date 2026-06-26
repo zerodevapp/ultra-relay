@@ -463,6 +463,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         type: "number",
         require: false,
         default: 3
+    },
+    "max-stuck-attempts-before-rotation": {
+        description:
+            "Total submission attempts on a stuck bundle's wallet (including the initial send) before rotating the userOps to a fresh executor wallet",
+        type: "number",
+        require: false,
+        default: 5
     }
 }
 
