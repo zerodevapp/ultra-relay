@@ -33,6 +33,25 @@ export const isTransactionUnderpricedError = (e: BaseError) => {
     return transactionUnderPriceError !== null
 }
 
+// The two production oversize rejections: geth ErrOversizedData
+// ("oversized data: transaction size N, limit 131072") and EIP-7825's per-tx
+// gas cap ("gas limit too high", code -32003). Match defensively across the
+// viem error chain's message fields.
+export const isOversizedBundleError = (e: BaseError): boolean => {
+    const oversizeStrings = [
+        "oversized data",
+        "gas limit too high",
+        "exceeds block gas limit",
+        "intrinsic gas too high"
+    ]
+    const match = e.walk((node: any) => {
+        const text =
+            `${node?.message ?? ""} ${node?.details ?? ""}`.toLowerCase()
+        return oversizeStrings.some((s) => text.includes(s))
+    })
+    return match !== null
+}
+
 // V7 source: https://github.com/eth-infinitism/account-abstraction/blob/releases/v0.7/contracts/core/EntryPoint.sol
 // V6 source: https://github.com/eth-infinitism/account-abstraction/blob/fa61290d37d079e928d92d53a122efcc63822214/contracts/core/EntryPoint.sol#L236
 export function calculateAA95GasFloor({

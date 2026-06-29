@@ -12,9 +12,13 @@ import {
     calcExecutionPvgComponent,
     calcL2PvgComponent,
     getAAError,
+    getSerializedHandleOpsTx,
+    scaleBigIntByPercent,
     timed
 } from "@alto/utils"
-import type { Hex } from "viem"
+import { size, type Hex } from "viem"
+import { getBundleCaps, bundleByteThreshold } from "../../executor/bundleCaps"
+import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
@@ -100,25 +104,65 @@ export async function addToMempoolIfValid({
 
     const logCtx = { sender: userOp.sender, apiVersion, boost }
 
-    // Execute multiple async operations in parallel. Each step is timed
-    // individually so the slowest can be identified from logs (wall-clock
-    // latency = slowest step, not the sum).
-    const [
-        userOpHash,
-        { queuedUserOps, validationResult },
-        currentNonceSeq,
-        [pvgSuccess, pvgErrorReason],
-        [preMempoolSuccess, preMempoolError],
-        [validEip7702Auth, validEip7702AuthError]
-    ] = await Promise.all([
-        timed(rpcHandler.logger, "getUserOpHash", logCtx, () =>
+    // Compute the hash first so cap-check rejections can be properly attributed.
+    // getUserOpHash is sync for v06/v07 and a cheap contract-read for v08, so
+    // this adds negligible latency before the expensive parallel block below.
+    const userOpHash = await timed(
+        rpcHandler.logger,
+        "getUserOpHash",
+        logCtx,
+        () =>
             getUserOpHash({
                 userOp,
                 entryPointAddress: entryPoint,
                 chainId: rpcHandler.config.chainId,
                 publicClient: rpcHandler.config.publicClient
             })
-        ),
+    )
+
+    // Per-transaction bundle-cap validation: an op that alone exceeds this
+    // chain's per-tx gas or calldata-size cap can never be included in any
+    // bundle, so reject it here instead of letting it black-hole in the mempool.
+    // Must run before the parallel validation block (which runs on-chain
+    // simulation) so that oversized ops are rejected before simulation fires.
+    const { gasCap, byteCap } = getBundleCaps(rpcHandler.config)
+    const singleOpGas = scaleBigIntByPercent(
+        calculateAA95GasFloor({
+            userOps: [userOp],
+            beneficiary: rpcHandler.config.utilityWalletAddress
+        }) + (userOp.eip7702Auth ? 40_000n : 0n),
+        105n
+    )
+    if (singleOpGas > gasCap) {
+        const reason = `userOperation exceeds the per-transaction gas cap for this chain (cap: ${gasCap}, required: ~${singleOpGas})`
+        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+        throw new RpcError(reason, ValidationErrors.InvalidFields)
+    }
+    const singleOpBytes = size(
+        getSerializedHandleOpsTx({
+            userOps: [userOp],
+            entryPoint,
+            chainId: rpcHandler.config.chainId,
+            removeZeros: false
+        })
+    )
+    const byteThreshold = bundleByteThreshold(byteCap)
+    if (singleOpBytes > byteThreshold) {
+        const reason = `userOperation exceeds the per-transaction calldata size cap for this chain (cap: ${byteThreshold} bytes, size: ${singleOpBytes} bytes)`
+        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+        throw new RpcError(reason, ValidationErrors.InvalidFields)
+    }
+
+    // Execute remaining async operations in parallel. Each step is timed
+    // individually so the slowest can be identified from logs (wall-clock
+    // latency = slowest step, not the sum).
+    const [
+        { queuedUserOps, validationResult },
+        currentNonceSeq,
+        [pvgSuccess, pvgErrorReason],
+        [preMempoolSuccess, preMempoolError],
+        [validEip7702Auth, validEip7702AuthError]
+    ] = await Promise.all([
         timed(rpcHandler.logger, "getUserOpValidationResult", logCtx, () =>
             getUserOpValidationResult(rpcHandler, userOp, entryPoint)
         ),
