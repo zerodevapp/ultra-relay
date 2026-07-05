@@ -33,17 +33,15 @@ export const isTransactionUnderpricedError = (e: BaseError) => {
     return transactionUnderPriceError !== null
 }
 
-// The two production oversize rejections: geth ErrOversizedData
-// ("oversized data: transaction size N, limit 131072") and EIP-7825's per-tx
-// gas cap ("gas limit too high", code -32003). Match defensively across the
-// viem error chain's message fields.
+// The two production oversize rejections, and ONLY those: geth
+// ErrOversizedData ("oversized data: transaction size N, limit 131072") and
+// EIP-7825's per-tx gas cap ("gas limit too high", code -32003). Both are
+// deterministic for a given tx, so acting on them (drop a lone op) is safe.
+// Deliberately NOT matching broader strings like "exceeds block gas limit" or
+// "intrinsic gas too high" -- those can be transient and matching them would
+// permanently drop a valid userOp via the lone-op path.
 export const isOversizedBundleError = (e: BaseError): boolean => {
-    const oversizeStrings = [
-        "oversized data",
-        "gas limit too high",
-        "exceeds block gas limit",
-        "intrinsic gas too high"
-    ]
+    const oversizeStrings = ["oversized data", "gas limit too high"]
     const match = e.walk((node: any) => {
         const text =
             `${node?.message ?? ""} ${node?.details ?? ""}`.toLowerCase()

@@ -146,7 +146,7 @@ describe("bundle cap guardrails", () => {
         expect(distinctBundleTxs(receipts)).toBeGreaterThanOrEqual(2)
     })
 
-    test("rejects a single userOp that alone exceeds the byte cap", async () => {
+    test("accepts a single over-guess userOp on an unlisted chain (node is the judge)", async () => {
         const client = await getSmartAccountClient({
             entryPointVersion,
             anvilRpc,
@@ -158,14 +158,20 @@ describe("bundle cap guardrails", () => {
         })
         await client.waitForUserOperationReceipt({ hash: deployHash })
 
-        // ~140 KB of calldata in one op: alone it exceeds the margined 128 KiB
-        // byte cap, so it can never be bundled -> ingress must reject it.
+        await setBundlingMode({ mode: "manual", altoRpc })
+
+        // ~140 KB of calldata: over the conservative default byte cap. Anvil's
+        // chainId (31337) is UNLISTED, so the caps are a guess (proven: false)
+        // and ingress must NOT reject -- the op is accepted, bundled alone, and
+        // the node decides. Anvil has no geth txMaxSize, so it lands onchain.
+        // Rejecting this valid op is exactly the false-positive the proven-cap
+        // gate exists to prevent.
         //
         // Adaptation: the smart-account client's prepareUserOperation runs
         // local simulation which fails on 140 KB calldata before reaching the
         // bundler. We bypass that by preparing a normal op, replacing callData
         // with the encoded huge-data call, re-signing, then sending via raw
-        // eth_sendUserOperation so the ingress cap check is what rejects it.
+        // eth_sendUserOperation so the bundler's ingress path is exercised.
         const hugeData = `0x${"00".repeat(140_000)}` as `0x${string}`
 
         const op = await client.prepareUserOperation({
@@ -174,7 +180,12 @@ describe("bundle cap guardrails", () => {
         op.callData = await client.account.encodeCalls([
             { to: TO_ADDRESS, value: 0n, data: hugeData }
         ])
+        // The prepared gas fields were estimated for the small op; the 140 KB
+        // callData inflates validation memory + calldata costs, so bump them
+        // (they're signed over -- we re-sign below).
         op.callGasLimit = 2_000_000n
+        op.verificationGasLimit = 1_000_000n
+        op.preVerificationGas = 2_000_000n
         // @ts-expect-error — op is pre-prepared but factory/factoryData need undefined for deployed account
         op.signature = await client.account.signUserOperation({
             ...op,
@@ -182,19 +193,20 @@ describe("bundle cap guardrails", () => {
             factoryData: undefined
         })
 
-        await expect(async () => {
-            await client.request({
-                // @ts-ignore
-                method: "eth_sendUserOperation",
-                // @ts-ignore
-                params: [deepHexlify(op), entryPoint07Address]
-            })
-        }).rejects.toThrowError(
-            expect.objectContaining({
-                details: expect.stringMatching(
-                    /exceeds the per-transaction calldata size cap/i
-                )
-            })
-        )
+        const opHash = (await client.request({
+            // @ts-ignore
+            method: "eth_sendUserOperation",
+            // @ts-ignore
+            params: [deepHexlify(op), entryPoint07Address]
+        })) as `0x${string}`
+
+        expect(opHash).toMatch(/^0x[0-9a-f]{64}$/i)
+
+        await drainBundles({ altoRpc, times: 2 })
+
+        const receipt = await client.waitForUserOperationReceipt({
+            hash: opHash
+        })
+        expect(receipt.success).toEqual(true)
     })
 })

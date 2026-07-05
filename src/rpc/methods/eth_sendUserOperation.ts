@@ -17,7 +17,7 @@ import {
     timed
 } from "@alto/utils"
 import { size, type Hex } from "viem"
-import { getBundleCaps, bundleByteThreshold } from "../../executor/bundleCaps"
+import { getBundleCaps } from "../../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
@@ -125,32 +125,42 @@ export async function addToMempoolIfValid({
     // bundle, so reject it here instead of letting it black-hole in the mempool.
     // Must run before the parallel validation block (which runs on-chain
     // simulation) so that oversized ops are rejected before simulation fires.
-    const { gasCap, byteCap } = getBundleCaps(rpcHandler.config)
-    const singleOpGas = scaleBigIntByPercent(
-        calculateAA95GasFloor({
-            userOps: [userOp],
-            beneficiary: rpcHandler.config.utilityWalletAddress
-        }) + (userOp.eip7702Auth ? 40_000n : 0n),
-        105n
-    )
-    if (singleOpGas > gasCap) {
-        const reason = `userOperation exceeds the per-transaction gas cap for this chain (cap: ${gasCap}, required: ~${singleOpGas})`
-        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
-        throw new RpcError(reason, ValidationErrors.InvalidFields)
-    }
-    const singleOpBytes = size(
-        getSerializedHandleOpsTx({
-            userOps: [userOp],
-            entryPoint,
-            chainId: rpcHandler.config.chainId,
-            removeZeros: false
-        })
-    )
-    const byteThreshold = bundleByteThreshold(byteCap)
-    if (singleOpBytes > byteThreshold) {
-        const reason = `userOperation exceeds the per-transaction calldata size cap for this chain (cap: ${byteThreshold} bytes, size: ${singleOpBytes} bytes)`
-        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
-        throw new RpcError(reason, ValidationErrors.InvalidFields)
+    //
+    // Only enforced when the caps are PROVEN hard limits for this chain
+    // (doc-verified map entry). On an unlisted chain the caps are a
+    // conservative guess and rejecting against a guess can reject a valid
+    // userOp -- there the node is the judge: the op is accepted, sent alone if
+    // needed, and only dropped on a ground-truth node rejection (executor).
+    // Bytes are checked against the RAW hard cap (no safety margin): the
+    // margin exists for multi-op packing estimates, and applying it here
+    // would reject ops in the [90%, 100%) band that the node accepts.
+    const { gasCap, byteCap, proven } = getBundleCaps(rpcHandler.config)
+    if (proven) {
+        const singleOpGas = scaleBigIntByPercent(
+            calculateAA95GasFloor({
+                userOps: [userOp],
+                beneficiary: rpcHandler.config.utilityWalletAddress
+            }) + (userOp.eip7702Auth ? 40_000n : 0n),
+            105n
+        )
+        if (singleOpGas > gasCap) {
+            const reason = `userOperation exceeds the per-transaction gas cap for this chain (cap: ${gasCap}, required: ~${singleOpGas})`
+            rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+            throw new RpcError(reason, ValidationErrors.InvalidFields)
+        }
+        const singleOpBytes = size(
+            getSerializedHandleOpsTx({
+                userOps: [userOp],
+                entryPoint,
+                chainId: rpcHandler.config.chainId,
+                removeZeros: false
+            })
+        )
+        if (singleOpBytes > byteCap) {
+            const reason = `userOperation exceeds the per-transaction calldata size cap for this chain (cap: ${byteCap} bytes, size: ${singleOpBytes} bytes)`
+            rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+            throw new RpcError(reason, ValidationErrors.InvalidFields)
+        }
     }
 
     // Execute remaining async operations in parallel. Each step is timed

@@ -17,11 +17,18 @@ export const DEFAULT_BUNDLE_BYTE_CAP = 131_072
 // rejection limit, never at it.
 export const BUNDLE_BYTE_SAFETY_PERCENT = 90
 
-type BundleCaps = { gasCap: bigint; byteCap: number }
+// `proven` marks chains whose resolved caps are doc-verified HARD limits, not
+// the conservative guess. Only proven caps may reject a userOp at ingress; on
+// an unlisted chain the caps only shape packing and the node is the judge
+// (a genuinely oversized op surfaces as a ground-truth rejection at send).
+type BundleCaps = { gasCap: bigint; byteCap: number; proven: boolean }
 
 // Resolution precedence: chainId override > chainType family > default.
 // Only list chains that PROVABLY differ from the conservative default.
-const CHAIN_TYPE_CAP_OVERRIDES: Record<string, Partial<BundleCaps>> = {
+const CHAIN_TYPE_CAP_OVERRIDES: Record<
+    string,
+    Partial<Omit<BundleCaps, "proven">>
+> = {
     // Arbitrum/Orbit: execution gas cap is 32M. Its HARD byte limit is 117,964
     // (DataTooLarge rejects above this; Arbitrum itself set that to 90% of
     // geth's 128 KiB) -- lower than the geth default, so the default byteCap
@@ -30,15 +37,32 @@ const CHAIN_TYPE_CAP_OVERRIDES: Record<string, Partial<BundleCaps>> = {
     arbitrum: { gasCap: 32_000_000n, byteCap: 117_964 }
 }
 
-const CHAIN_ID_CAP_OVERRIDES: Record<number, Partial<BundleCaps>> = {
+const CHAIN_ID_CAP_OVERRIDES: Record<
+    number,
+    Partial<Omit<BundleCaps, "proven">>
+> = {
     // Polygon PoS (bor): no per-tx gas cap (block limit 140M+). Raise above the
-    // default 16.77M for bundle throughput. Bytes inherit the geth default.
+    // default 16.77M for bundle throughput. Bytes inherit the geth default
+    // (bor is a geth fork -> txMaxSize 131072).
     137: { gasCap: 30_000_000n }
 }
+
+// Chains verified to enforce exactly the DEFAULT caps as hard limits:
+// EIP-7825 gas cap live (mainnet/Base since Fusaka; BNB since the Apr 2026
+// Osaka/Mendel fork) and geth's 131,072-byte txMaxSize.
+const PROVEN_DEFAULT_CAP_CHAIN_IDS = new Set<number>([
+    1, // mainnet
+    8453, // base
+    56 // bnb
+])
 
 export const getBundleCaps = (config: AltoConfig): BundleCaps => ({
     gasCap: DEFAULT_BUNDLE_GAS_CAP,
     byteCap: DEFAULT_BUNDLE_BYTE_CAP,
+    proven:
+        config.chainId in CHAIN_ID_CAP_OVERRIDES ||
+        config.chainType in CHAIN_TYPE_CAP_OVERRIDES ||
+        PROVEN_DEFAULT_CAP_CHAIN_IDS.has(config.chainId),
     ...CHAIN_TYPE_CAP_OVERRIDES[config.chainType],
     ...CHAIN_ID_CAP_OVERRIDES[config.chainId]
 })

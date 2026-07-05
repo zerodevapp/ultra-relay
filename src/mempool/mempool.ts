@@ -887,8 +887,9 @@ export class Mempool {
                 const exceedsBytes = projectedBytes > byteThreshold
 
                 // Only break once we have at least minOpsPerBundle ops; a lone
-                // over-cap op is handled at ingress (rejected) and the executor
-                // (dropped) rather than black-holed here.
+                // over-cap op is handled at ingress (rejected on proven-cap
+                // chains) or by the executor (dropped on a ground-truth node
+                // rejection) rather than black-holed here.
                 if (
                     (exceedsGas || exceedsBytes) &&
                     currentBundle.userOps.length >= minOpsPerBundle
