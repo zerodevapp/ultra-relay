@@ -16,7 +16,7 @@ import {
     scaleBigIntByPercent,
     timed
 } from "@alto/utils"
-import { size, type Hex } from "viem"
+import { type Hex, size } from "viem"
 import { getBundleCaps } from "../../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"

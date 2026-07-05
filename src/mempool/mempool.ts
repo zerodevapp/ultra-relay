@@ -32,7 +32,7 @@ import {
 import { type Hex, getAddress, getContract, size } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import type { AltoConfig } from "../createConfig"
-import { getBundleCaps, bundleByteThreshold } from "../executor/bundleCaps"
+import { bundleByteThreshold, getBundleCaps } from "../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../executor/utils"
 import type { Monitor } from "./monitoring"
 import {
