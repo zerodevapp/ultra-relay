@@ -126,16 +126,18 @@ export async function addToMempoolIfValid({
     // Must run before the parallel validation block (which runs on-chain
     // simulation) so that oversized ops are rejected before simulation fires.
     //
-    // Only enforced when the caps are PROVEN hard limits for this chain
-    // (doc-verified map entry). On an unlisted chain the caps are a
-    // conservative guess and rejecting against a guess can reject a valid
+    // Each cap is only enforced when it is a PROVEN hard limit for this chain
+    // (per-dimension: e.g. Polygon's byte cap is real, its gas cap is our
+    // throughput choice). Rejecting against an unproven cap can reject a valid
     // userOp -- there the node is the judge: the op is accepted, sent alone if
     // needed, and only dropped on a ground-truth node rejection (executor).
     // Bytes are checked against the RAW hard cap (no safety margin): the
     // margin exists for multi-op packing estimates, and applying it here
     // would reject ops in the [90%, 100%) band that the node accepts.
-    const { gasCap, byteCap, proven } = getBundleCaps(rpcHandler.config)
-    if (proven) {
+    const { gasCap, byteCap, gasCapProven, byteCapProven } = getBundleCaps(
+        rpcHandler.config
+    )
+    if (gasCapProven) {
         const singleOpGas = scaleBigIntByPercent(
             calculateAA95GasFloor({
                 userOps: [userOp],
@@ -148,6 +150,8 @@ export async function addToMempoolIfValid({
             rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
             throw new RpcError(reason, ValidationErrors.InvalidFields)
         }
+    }
+    if (byteCapProven) {
         const singleOpBytes = size(
             getSerializedHandleOpsTx({
                 userOps: [userOp],

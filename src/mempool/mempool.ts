@@ -870,6 +870,10 @@ export class Mempool {
                 )
 
                 // Project the serialized tx byte size if this op is added.
+                // O(n^2): re-serializes the growing candidate bundle per op.
+                // Bounded by bundle size (gas cap keeps n small) and runs once
+                // per bundling tick; switch to a running per-op size delta if
+                // packing latency ever shows up in profiles.
                 const candidateUserOps = [
                     ...currentBundle.userOps.map((info) => info.userOp),
                     userOp

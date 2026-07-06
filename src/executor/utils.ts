@@ -42,9 +42,11 @@ export const isTransactionUnderpricedError = (e: BaseError) => {
 // permanently drop a valid userOp via the lone-op path.
 export const isOversizedBundleError = (e: BaseError): boolean => {
     const oversizeStrings = ["oversized data", "gas limit too high"]
-    const match = e.walk((node: any) => {
-        const text =
-            `${node?.message ?? ""} ${node?.details ?? ""}`.toLowerCase()
+    const match = e.walk((node) => {
+        const { message, details } = node as Partial<
+            Pick<BaseError, "message" | "details">
+        >
+        const text = `${message ?? ""} ${details ?? ""}`.toLowerCase()
         return oversizeStrings.some((s) => text.includes(s))
     })
     return match !== null

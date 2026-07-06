@@ -17,13 +17,23 @@ per-tx gas cap so it gets a higher throughput ceiling). Resolved chainId >
 chainType-family > default. No CLI override knob — a new chain with a tighter
 limit needs a map entry, by design (safe default covers it meanwhile).
 
-Caps carry a **`proven` flag**: true when the resolved caps are doc-verified
-hard limits (map entries, plus mainnet/Base/BNB which enforce exactly the
-default caps — EIP-7825 live, geth `txMaxSize`). On an unlisted chain the caps
-are a conservative *guess*, and per review (PR #35) a guess may only shape
-packing — never reject or drop a userOp. Guardrails must never reject or drop
-a valid userOp: rejection requires either a proven hard limit or a
-ground-truth node rejection.
+Caps carry **per-dimension proven flags** (`gasCapProven`, `byteCapProven`):
+true only when that specific cap is a verified hard limit for the chain. The
+split matters because a chain's caps can mix kinds — Polygon's byte cap is
+bor/geth's real `txMaxSize`, but its 30M gas cap is our throughput choice
+(no per-tx gas limit exists there), so byte-rejecting at ingress is safe on
+Polygon while gas-rejecting would false-reject valid ops in `(30M, block
+limit]`. Evidence behind the proven set: Base's gas cap and BNB's byte cap
+are empirically proven by the two production incidents this work fixes; BNB's
+gas cap by BEP-652/Osaka-Mendel, activated on mainnet 2026-04-28 (verified
+activated, not just scheduled); mainnet via Fusaka; Arbitrum via ArbOS's
+enforced 32M exec limit and `DataTooLarge` at 117,964. On an unlisted chain
+the caps are a conservative *guess*, and per review (PR #35) a guess may only
+shape packing — never reject or drop a userOp. Guardrails must never reject
+or drop a valid userOp: rejection requires either a proven hard limit or a
+ground-truth node rejection. No runtime cap-probing: nodes expose no reliable
+RPC surface for their per-tx caps, so proven-ness is evidence in code review,
+not a network call.
 
 `byteCap` is uniformly the chain's **hard rejection limit** (the size the node
 rejects at), never a pre-margined value. `bundleByteThreshold` applies the 90%
@@ -72,6 +82,11 @@ more code and a wasted send per oversize.
   effect: the packing ceiling is `min(maxGasPerBundle, gasCap)`, so any chain
   left at the 20M default now caps at the 16.77M gas cap (~16% lower). Both are
   intended; an operator seeing smaller bundles should look here, not for a bug.
+- The raised per-chain gas caps (Polygon 30M, Arbitrum 32M) only increase
+  packing throughput if `--max-gas-per-bundle` is raised alongside — the
+  ceiling is the `min` of the two. Until then an op in
+  `(maxGasPerBundle, gasCap]` passes ingress and packs alone, which is correct
+  (it is sent and included) but not batched.
 - **Upgrade trigger:** if any chain sets `rpc-gas-estimate=true`, packing's
   floor projection can under-estimate the RPC-estimated submitted gas and layer 3
   can loop on the same bundle. At that point switch layer 3 to the explicit
