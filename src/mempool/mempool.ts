@@ -20,16 +20,19 @@ import type { Logger, Metrics } from "@alto/utils"
 import {
     getAAError,
     getAddressFromInitCodeOrPaymasterAndData,
+    getSerializedHandleOpsTx,
     getUserOpHash,
     isVersion06,
     isVersion07,
     isVersion08,
     jsonStringifyWithBigint,
+    minBigInt,
     scaleBigIntByPercent
 } from "@alto/utils"
-import { type Hex, getAddress, getContract } from "viem"
+import { type Hex, getAddress, getContract, size } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import type { AltoConfig } from "../createConfig"
+import { bundleByteThreshold, getBundleCaps } from "../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../executor/utils"
 import type { Monitor } from "./monitoring"
 import {
@@ -790,6 +793,10 @@ export class Mempool {
                 submissionAttempts: 0
             }
             let gasUsed = 0n
+            let eip7702Overhead = 0n
+            const caps = getBundleCaps(this.config)
+            const gasCeiling = minBigInt(maxGasLimit, caps.gasCap)
+            const byteThreshold = bundleByteThreshold(caps.byteCap)
             let paymasterDeposit: { [paymaster: string]: bigint } = {}
             let stakedEntityCount: { [addr: string]: number } = {}
             let senders = new Set<string>()
@@ -850,29 +857,60 @@ export class Mempool {
                     userOps: [userOp],
                     beneficiary
                 })
+                if (userOp.eip7702Auth) {
+                    eip7702Overhead += 40_000n
+                }
 
-                // Only break on gas limit if we've hit minOpsPerBundle
+                // Project the ACTUAL submitted tx gas (executor scales the floor
+                // by 105%), not the raw floor, so the budget matches what the
+                // node sees against the per-tx gas cap.
+                const projectedGas = scaleBigIntByPercent(
+                    gasUsed + eip7702Overhead,
+                    105n
+                )
+
+                // Project the serialized tx byte size if this op is added.
+                // O(n^2): re-serializes the growing candidate bundle per op.
+                // Bounded by bundle size (gas cap keeps n small) and runs once
+                // per bundling tick; switch to a running per-op size delta if
+                // packing latency ever shows up in profiles.
+                const candidateUserOps = [
+                    ...currentBundle.userOps.map((info) => info.userOp),
+                    userOp
+                ]
+                const projectedBytes = size(
+                    getSerializedHandleOpsTx({
+                        userOps: candidateUserOps,
+                        entryPoint,
+                        chainId: this.config.chainId,
+                        removeZeros: false
+                    })
+                )
+
+                const exceedsGas = projectedGas > gasCeiling
+                const exceedsBytes = projectedBytes > byteThreshold
+
+                // Only break once we have at least minOpsPerBundle ops; a lone
+                // over-cap op is handled at ingress (rejected on proven-cap
+                // chains) or by the executor (dropped on a ground-truth node
+                // rejection) rather than black-holed here.
                 if (
-                    gasUsed > maxGasLimit &&
+                    (exceedsGas || exceedsBytes) &&
                     currentBundle.userOps.length >= minOpsPerBundle
                 ) {
                     this.logger.debug(
                         {
                             event: "userOpSkipped",
-                            reason: "Bundle gas limit exceeded",
+                            reason: exceedsBytes
+                                ? "Bundle byte size limit exceeded"
+                                : "Bundle gas limit exceeded",
                             userOpHash: userOpInfo.userOpHash,
-                            userOpGas: (
-                                userOp.callGasLimit +
-                                userOp.verificationGasLimit
-                            ).toString(),
-                            currentBundleGas: (
-                                gasUsed -
-                                userOp.callGasLimit -
-                                userOp.verificationGasLimit
-                            ).toString(),
-                            maxBundleGas: maxGasLimit.toString()
+                            projectedGas: projectedGas.toString(),
+                            gasCeiling: gasCeiling.toString(),
+                            projectedBytes,
+                            byteThreshold
                         },
-                        `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle gas limit.`
+                        `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
                     )
 
                     // Put the operation back in the store

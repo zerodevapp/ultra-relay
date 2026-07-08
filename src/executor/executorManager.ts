@@ -305,7 +305,8 @@ export class ExecutorManager {
 
                 if (
                     reason === "filterops_failed" ||
-                    reason === "generic_error"
+                    reason === "generic_error" ||
+                    reason === "oversized_bundle"
                 ) {
                     this.metrics.bundlesSubmitted
                         .labels({ status: "failed" })

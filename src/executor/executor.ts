@@ -36,6 +36,7 @@ import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
     getUserOpHashes,
+    isOversizedBundleError,
     isTransactionUnderpricedError
 } from "./utils"
 
@@ -547,6 +548,49 @@ export class Executor {
                 return {
                     success: false,
                     reason: "generic_error",
+                    rejectedUserOps,
+                    recoverableOps: userOpsToBundle
+                }
+            }
+
+            // Oversize rejection: the bundle tx exceeds a per-tx node cap. A
+            // multi-op bundle is resubmitted so packing reforms it smaller
+            // (layer-1 caps now bound it). A lone op can't be split further, so
+            // drop it rather than loop forever (the original production bug).
+            if (isOversizedBundleError(err)) {
+                if (userOpsToBundle.length <= 1) {
+                    childLogger.error(
+                        {
+                            err: jsonStringifyWithBigint(err),
+                            bundleSize: userOpsToBundle.length
+                        },
+                        "dropping userOp that alone exceeds a per-transaction bundle cap"
+                    )
+                    sentry.captureException(err)
+                    return {
+                        success: false,
+                        reason: "oversized_bundle",
+                        rejectedUserOps: [
+                            ...rejectedUserOps,
+                            ...userOpsToBundle.map((op) => ({
+                                ...op,
+                                reason: "userOp alone exceeds a per-transaction bundle cap"
+                            }))
+                        ],
+                        recoverableOps: []
+                    }
+                }
+
+                childLogger.warn(
+                    {
+                        err: jsonStringifyWithBigint(err),
+                        bundleSize: userOpsToBundle.length
+                    },
+                    "bundle exceeded a per-transaction cap; resubmitting to re-pack smaller"
+                )
+                return {
+                    success: false,
+                    reason: "oversized_bundle",
                     rejectedUserOps,
                     recoverableOps: userOpsToBundle
                 }
