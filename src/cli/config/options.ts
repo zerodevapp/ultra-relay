@@ -347,6 +347,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: true,
         default: 10_000
     },
+    "cancel-transaction-timeout": {
+        description:
+            "Total time to wait for a stuck-bundle cancel to confirm on-chain before quarantining the wallet (in ms). Must exceed the chain's real inclusion latency, otherwise wallets are quarantined for cancels that simply hadn't mined yet",
+        type: "number",
+        require: false,
+        default: 30_000
+    },
     "resubmit-multiplier-ceiling": {
         description:
             "Maximum multiplier for gasPrice when resubmitting transactions",

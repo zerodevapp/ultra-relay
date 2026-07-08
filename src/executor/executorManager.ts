@@ -68,6 +68,13 @@ export class ExecutorManager {
             clearObservations: number
         }
     > = new Map()
+    // Wallets rotated away and currently held in a background cancel that
+    // hasn't settled yet. They are neither in the sender pool nor (yet) in
+    // quarantinedWallets, so they must be counted alongside quarantines when
+    // deciding whether another rotation is allowed — otherwise a broad stall
+    // could rotate the whole pool into cancel before any failed cancel lands
+    // in quarantinedWallets, bypassing the half-pool drain cap.
+    private cancelsInFlight = new Set<Address>()
     private quarantineTimer: NodeJS.Timeout | undefined
     private reconciling = false
 
@@ -572,7 +579,12 @@ export class ExecutorManager {
         const maxConcurrentQuarantine = Math.floor(
             this.senderManager.getAllWallets().length / 2
         )
-        const canRotate = this.quarantinedWallets.size < maxConcurrentQuarantine
+        // Count wallets already quarantined AND those held in an unsettled
+        // background cancel (each will either free or become quarantined) so a
+        // burst of rotations can't drain past the cap before their cancels land.
+        const canRotate =
+            this.quarantinedWallets.size + this.cancelsInFlight.size <
+            maxConcurrentQuarantine
 
         const rotate = () => {
             this.bundleManager.stopTrackingBundle(submittedBundle)
@@ -677,7 +689,11 @@ export class ExecutorManager {
         // Cancel the stuck transaction. Free the wallet ONLY if the cancel
         // confirms (nonce advanced past the stuck nonce); otherwise quarantine
         // it so no other instance can pop an unconfirmed nonce and collide.
-        // Runs in the background so recovery isn't blocked on cancel.
+        // Runs in the background so recovery isn't blocked on cancel. Track the
+        // wallet as cancel-in-flight (added synchronously here, before the next
+        // bundle in this tick is evaluated) so the rotation cap counts it, and
+        // clear it once the cancel settles into a free/quarantine decision.
+        this.cancelsInFlight.add(executor.address)
         this.cancelBundle(submittedBundle)
             .then((confirmed) => {
                 if (confirmed) {
@@ -699,6 +715,9 @@ export class ExecutorManager {
                     "error cancelling stuck bundle, quarantining wallet"
                 )
                 this.quarantineWallet(executor, transactionRequest.nonce)
+            })
+            .finally(() => {
+                this.cancelsInFlight.delete(executor.address)
             })
 
         // Detach the userOps from the stuck (old) submitted bundle. If this
@@ -903,30 +922,56 @@ export class ExecutorManager {
             transactionHash
         } = submittedBundle
 
-        const { walletClients, publicClient, blockTime } = this.config
+        const { walletClients, publicClient, cancelTransactionTimeout } =
+            this.config
         const walletClient = walletClients.public
         const logger = this.logger.child({
             userOps: getUserOpHashes(userOps)
         })
 
-        let gasMultiplier = 150n // Start with 50% increase
+        // Poll for the stuck nonce to clear (the cancel tx OR the original tx
+        // mining both advance it) across the whole cancelTransactionTimeout,
+        // re-broadcasting the cancel at an escalating gas price a bounded number
+        // of times. The window MUST exceed the chain's real inclusion latency:
+        // waiting only a couple of blocks (the previous behaviour) is far too
+        // short on slow-inclusion chains and quarantines wallets whose cancel
+        // simply hadn't mined yet. Sends are capped so gas can't run away.
+        const MAX_CANCEL_ATTEMPTS = 5
+        const pollInterval = Math.floor(
+            cancelTransactionTimeout / MAX_CANCEL_ATTEMPTS
+        )
 
-        for (let attempt = 0; attempt < 5; attempt++) {
+        // Treat an RPC failure as "not yet cleared" rather than letting it
+        // reject cancelBundle: both the in-loop and post-loop checks route
+        // through here, so a transient read error just triggers another poll
+        // (or a clean false at the deadline) instead of a spurious quarantine.
+        const nonceCleared = async () => {
             try {
-                // Check if transaction is still pending
                 const currentNonce = await publicClient.getTransactionCount({
                     address: executor.address,
                     blockTag: "latest"
                 })
+                return currentNonce > transactionRequest.nonce
+            } catch (err) {
+                logger.warn(
+                    { error: err },
+                    "failed to read nonce while cancelling bundle"
+                )
+                return false
+            }
+        }
 
-                if (currentNonce > transactionRequest.nonce) {
+        let gasMultiplier = 150n // Start with 50% increase
+
+        for (let attempt = 0; attempt < MAX_CANCEL_ATTEMPTS; attempt++) {
+            try {
+                if (await nonceCleared()) {
                     logger.info("Transaction already mined or cancelled")
                     return true
                 }
 
                 logger.info(`Trying to cancel bundle, attempt ${attempt + 1}`)
 
-                // Send cancel transaction with increasing gas price
                 const cancelTxHash = await walletClient.sendTransaction({
                     account: executor,
                     to: executor.address,
@@ -950,21 +995,26 @@ export class ExecutorManager {
                     },
                     "cancel transaction sent"
                 )
-
-                // Wait for transaction to potentially be mined
-                await new Promise((resolve) =>
-                    setTimeout(resolve, blockTime / 2)
-                )
             } catch (err) {
                 logger.warn({ error: err }, "failed to cancel bundle")
-                gasMultiplier += 20n // Increase gas by additional 20% each retry
             }
+
+            // Escalate every re-broadcast (not just on error) so each resend
+            // strictly outbids the last and satisfies bor's +10% replacement
+            // rule instead of failing "replacement transaction underpriced".
+            gasMultiplier += 20n
+            await new Promise((resolve) => setTimeout(resolve, pollInterval))
         }
 
-        // All retries exhausted
+        // The final cancel may have mined during the closing wait.
+        if (await nonceCleared()) {
+            logger.info("Transaction already mined or cancelled")
+            return true
+        }
+
         logger.error(
             { transactionHash },
-            "failed to cancel bundle after max retries"
+            "failed to cancel bundle after timeout"
         )
         return false
     }

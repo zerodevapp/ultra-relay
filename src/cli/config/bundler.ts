@@ -93,6 +93,7 @@ export const bundlerArgsSchema = z.object({
 
 export const executorArgsSchema = z.object({
     "resubmit-stuck-timeout": z.number().int().min(0).default(15_000),
+    "cancel-transaction-timeout": z.number().int().min(1000).default(30_000),
     "refilling-wallets": z.boolean().default(true),
     "refill-helper-contract": addressSchema.optional(),
     "no-profit-bundling": z.boolean(),
