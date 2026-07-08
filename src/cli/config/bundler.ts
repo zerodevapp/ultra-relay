@@ -150,7 +150,17 @@ export const executorArgsSchema = z.object({
         .default("5"),
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3),
-    "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5)
+    "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5),
+    "max-bundling-gas-price": z.preprocess(
+        (v) => (v === "" ? undefined : v),
+        z
+            .string()
+            .transform((val) => parseGwei(val))
+            .refine((v) => v > 0n, {
+                message: "max-bundling-gas-price must be greater than 0 gwei"
+            })
+            .optional()
+    )
 })
 
 export const compatibilityArgsSchema = z.object({

@@ -30,6 +30,12 @@ const RPM_WINDOW = 60000 // 1 minute window in ms
 // wallet surfaces for alerting (~ this * blockTime between alerts).
 const QUARANTINE_ALERT_INTERVAL_TICKS = 30
 
+// A dropped-tx release (pending === latest) must be observed on this many
+// consecutive reconcile ticks before returning the wallet, so a single stale or
+// out-of-sync RPC node read can't release a wallet whose stuck tx is still in
+// flight on another node.
+const QUARANTINE_CLEAR_OBSERVATIONS_TO_RELEASE = 2
+
 export class ExecutorManager {
     private senderManager: SenderManager
     private config: AltoConfig
@@ -56,6 +62,10 @@ export class ExecutorManager {
             stuckNonce: number
             quarantinedAt: number
             ticks: number
+            // Consecutive reconcile ticks observing no in-flight tx
+            // (pending === latest). Debounced so a single stale/out-of-sync
+            // RPC node read can't trigger a premature release.
+            clearObservations: number
         }
     > = new Map()
     private quarantineTimer: NodeJS.Timeout | undefined
@@ -552,6 +562,28 @@ export class ExecutorManager {
         const isStuck =
             Date.now() - lastReplaced > this.config.resubmitStuckTimeout
 
+        if (!(isGasPriceTooLow || isStuck)) {
+            return
+        }
+
+        // Cap concurrent quarantines at half the pool so a network-wide stall
+        // (cancels also don't confirm) can't drain it.
+        // ponytail: half the pool; make configurable if too coarse.
+        const maxConcurrentQuarantine = Math.floor(
+            this.senderManager.getAllWallets().length / 2
+        )
+        const canRotate = this.quarantinedWallets.size < maxConcurrentQuarantine
+
+        const rotate = () => {
+            this.bundleManager.stopTrackingBundle(submittedBundle)
+            this.rotateStuckBundle(submittedBundle).catch((err) =>
+                this.logger.error(
+                    { err },
+                    "unhandled error rotating stuck bundle"
+                )
+            )
+        }
+
         if (isGasPriceTooLow) {
             this.bundleManager.stopTrackingBundle(submittedBundle)
             this.replaceTransaction({
@@ -561,54 +593,58 @@ export class ExecutorManager {
                 networkBaseFee,
                 reason: "gas_price"
             })
-        } else if (isStuck) {
-            this.bundleManager.stopTrackingBundle(submittedBundle)
+            return
+        }
 
-            // A stuck (not gas-too-low) bundle means the RPC accepted our tx
-            // but the network isn't including it. Bumping gas via
-            // replaceTransaction can't fix that and risks "replacement
-            // transaction underpriced" churn on bor. After a few attempts,
-            // rotate the userOps onto a fresh wallet + nonce instead.
-            if (
-                submittedBundle.bundle.submissionAttempts >=
-                this.config.maxStuckAttemptsBeforeRotation
-            ) {
-                // Cap concurrent quarantines at half the pool so a network-wide
-                // stall (cancels also don't confirm) can't drain it. At the cap,
-                // fall back to in-place replacement, which reuses the held
-                // wallet and frees nothing new.
-                // ponytail: half the pool; make configurable if too coarse.
-                const maxConcurrentQuarantine = Math.floor(
-                    this.senderManager.getAllWallets().length / 2
-                )
-                if (this.quarantinedWallets.size < maxConcurrentQuarantine) {
-                    this.rotateStuckBundle(submittedBundle).catch((err) =>
-                        this.logger.error(
-                            { err },
-                            "unhandled error rotating stuck bundle"
-                        )
-                    )
-                    return
-                }
+        // isStuck: the RPC accepted our tx but the network isn't including it.
+        // Bumping gas can't fix that and risks "replacement transaction
+        // underpriced" churn on bor. After a few attempts, rotate onto a fresh
+        // wallet + nonce instead.
+        //
+        // A bundle already pinned at the absolute cap can't be gas-escalated:
+        // replaceTransaction would clamp back to the cap, fail bor's +10%
+        // replacement rule, and free the wallet while the old tx is still
+        // pending (nonce collision on reuse). Rotate immediately instead — a
+        // fresh wallet gets a new nonce and a fresh sub-cap gas runway. If we
+        // can't rotate (quarantine cap reached) we fall through to replace in
+        // place: futile but transient and self-healing, unlike holding which
+        // would strand the userOps forever.
+        const { maxBundlingGasPrice } = this.config
+        const atGasCap =
+            maxBundlingGasPrice !== undefined &&
+            maxFeePerGas >= maxBundlingGasPrice
 
-                this.logger.warn(
-                    {
-                        event: "rotationDeferredQuarantineCap",
-                        quarantined: this.quarantinedWallets.size,
-                        maxConcurrentQuarantine
-                    },
-                    "rotation deferred: quarantine cap reached, replacing in place"
-                )
+        const shouldRotate =
+            submittedBundle.bundle.submissionAttempts >=
+                this.config.maxStuckAttemptsBeforeRotation || atGasCap
+
+        if (shouldRotate) {
+            if (canRotate) {
+                rotate()
+                return
             }
 
-            this.replaceTransaction({
-                blockReceivedTimestamp,
-                submittedBundle,
-                networkGasPrice,
-                networkBaseFee,
-                reason: "stuck"
-            })
+            this.logger.warn(
+                {
+                    event: "rotationDeferredQuarantineCap",
+                    executor: submittedBundle.executor.address,
+                    nonce: transactionRequest.nonce,
+                    atGasCap,
+                    quarantined: this.quarantinedWallets.size,
+                    maxConcurrentQuarantine
+                },
+                "rotation deferred: quarantine cap reached, replacing in place"
+            )
         }
+
+        this.bundleManager.stopTrackingBundle(submittedBundle)
+        this.replaceTransaction({
+            blockReceivedTimestamp,
+            submittedBundle,
+            networkGasPrice,
+            networkBaseFee,
+            reason: "stuck"
+        })
     }
 
     // Recover a bundle whose executor transaction is stuck (accepted by the RPC
@@ -728,7 +764,8 @@ export class ExecutorManager {
             wallet,
             stuckNonce,
             quarantinedAt: Date.now(),
-            ticks: 0
+            ticks: 0,
+            clearObservations: 0
         })
         this.metrics.executorWalletsQuarantined.set(
             this.quarantinedWallets.size
@@ -771,44 +808,70 @@ export class ExecutorManager {
         for (const [address, entry] of [...this.quarantinedWallets]) {
             const { wallet, stuckNonce, quarantinedAt } = entry
 
-            const latestNonce = await this.config.publicClient
-                .getTransactionCount({ address, blockTag: "latest" })
-                .catch(() => undefined)
+            const [latestNonce, pendingNonce] = await Promise.all([
+                this.config.publicClient
+                    .getTransactionCount({ address, blockTag: "latest" })
+                    .catch(() => undefined),
+                this.config.publicClient
+                    .getTransactionCount({ address, blockTag: "pending" })
+                    .catch(() => undefined)
+            ])
 
             // RPC error — leave quarantined, retry next tick.
-            if (latestNonce === undefined) {
+            if (latestNonce === undefined || pendingNonce === undefined) {
                 continue
             }
 
-            // Stuck slot resolved -> safe to return the wallet to the pool.
-            if (latestNonce > stuckNonce) {
-                this.quarantinedWallets.delete(address)
-                this.metrics.executorWalletsQuarantined.set(
-                    this.quarantinedWallets.size
-                )
-                await this.senderManager
-                    .markWalletProcessed(wallet)
-                    .catch((err) =>
-                        this.logger.error(
-                            { err, executor: address },
-                            "failed to release quarantined wallet"
-                        )
+            // Two ways it's safe to return the wallet:
+            //  - buried on-chain: a tx at stuckNonce mined, so latest moved past
+            //    it. On-chain proof, release immediately.
+            //  - no tx in flight (pending === latest): the stuck tx was dropped
+            //    from the mempool (it never advances the nonce, and the benched
+            //    wallet sends nothing, so waiting on `latest > stuckNonce` would
+            //    deadlock). Release, but only after observing "no in-flight" on
+            //    several consecutive ticks, so one stale/out-of-sync RPC node
+            //    read can't release while the tx is still pending elsewhere.
+            const buriedOnChain = latestNonce > stuckNonce
+            const noTxInFlight = pendingNonce === latestNonce
+
+            if (buriedOnChain || noTxInFlight) {
+                entry.clearObservations += 1
+                if (
+                    buriedOnChain ||
+                    entry.clearObservations >=
+                        QUARANTINE_CLEAR_OBSERVATIONS_TO_RELEASE
+                ) {
+                    this.quarantinedWallets.delete(address)
+                    this.metrics.executorWalletsQuarantined.set(
+                        this.quarantinedWallets.size
                     )
-                this.logger.info(
-                    {
-                        event: "walletReleasedFromQuarantine",
-                        executor: address,
-                        stuckNonce,
-                        latestNonce,
-                        quarantinedTicks: entry.ticks
-                    },
-                    "executor wallet released from quarantine"
-                )
+                    await this.senderManager
+                        .markWalletProcessed(wallet)
+                        .catch((err) =>
+                            this.logger.error(
+                                { err, executor: address },
+                                "failed to release quarantined wallet"
+                            )
+                        )
+                    this.logger.info(
+                        {
+                            event: "walletReleasedFromQuarantine",
+                            executor: address,
+                            stuckNonce,
+                            latestNonce,
+                            pendingNonce,
+                            quarantinedTicks: entry.ticks
+                        },
+                        "executor wallet released from quarantine"
+                    )
+                }
                 continue
             }
 
-            // Still wedged: escalate periodically so a permanently stuck wallet
+            // A tx is still in flight (pending > latest): reset the release
+            // debounce and escalate periodically so a genuinely wedged wallet
             // surfaces for alerting (query: event:"walletQuarantineStuck").
+            entry.clearObservations = 0
             entry.ticks += 1
             if (entry.ticks % QUARANTINE_ALERT_INTERVAL_TICKS === 0) {
                 this.logger.error(
@@ -816,6 +879,8 @@ export class ExecutorManager {
                         event: "walletQuarantineStuck",
                         executor: address,
                         stuckNonce,
+                        latestNonce,
+                        pendingNonce,
                         quarantinedTicks: entry.ticks,
                         quarantinedMs: Date.now() - quarantinedAt
                     },

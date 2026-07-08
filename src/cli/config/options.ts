@@ -470,6 +470,12 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         type: "number",
         require: false,
         default: 5
+    },
+    "max-bundling-gas-price": {
+        description:
+            "Absolute ceiling (in gwei) for the gas price the bundler will bid on a handleOps transaction, regardless of escalation. Unset = no cap",
+        type: "string",
+        require: false
     }
 }
 
