@@ -93,6 +93,7 @@ export const bundlerArgsSchema = z.object({
 
 export const executorArgsSchema = z.object({
     "resubmit-stuck-timeout": z.number().int().min(0).default(15_000),
+    "cancel-transaction-timeout": z.number().int().min(1000).default(30_000),
     "refilling-wallets": z.boolean().default(true),
     "refill-helper-contract": addressSchema.optional(),
     "no-profit-bundling": z.boolean(),
@@ -150,7 +151,17 @@ export const executorArgsSchema = z.object({
         .default("5"),
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3),
-    "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5)
+    "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5),
+    "max-bundling-gas-price": z.preprocess(
+        (v) => (v === "" ? undefined : v),
+        z
+            .string()
+            .transform((val) => parseGwei(val))
+            .refine((v) => v > 0n, {
+                message: "max-bundling-gas-price must be greater than 0 gwei"
+            })
+            .optional()
+    )
 })
 
 export const compatibilityArgsSchema = z.object({

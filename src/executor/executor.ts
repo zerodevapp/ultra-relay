@@ -216,7 +216,8 @@ export class Executor {
             transactionUnderpricedMultiplier,
             walletClients,
             publicClient,
-            privateEndpointSubmissionAttempts
+            privateEndpointSubmissionAttempts,
+            maxBundlingGasPrice
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -259,6 +260,30 @@ export class Executor {
                     value: request.gas,
                     multiple: this.config.gasLimitRoundingMultiple
                 })
+
+                // Enforce the absolute gas ceiling on EVERY send, including
+                // after the underpriced / fee-cap retry bumps below (which
+                // mutate request.* and would otherwise escalate past the cap).
+                if (maxBundlingGasPrice !== undefined) {
+                    if (request.maxFeePerGas !== undefined) {
+                        request.maxFeePerGas = minBigInt(
+                            request.maxFeePerGas,
+                            maxBundlingGasPrice
+                        )
+                    }
+                    if (request.maxPriorityFeePerGas !== undefined) {
+                        request.maxPriorityFeePerGas = minBigInt(
+                            request.maxPriorityFeePerGas,
+                            maxBundlingGasPrice
+                        )
+                    }
+                    if (request.gasPrice !== undefined) {
+                        request.gasPrice = minBigInt(
+                            request.gasPrice,
+                            maxBundlingGasPrice
+                        )
+                    }
+                }
 
                 transactionHash = await walletClient.sendTransaction(request)
 
@@ -479,6 +504,38 @@ export class Executor {
                     REPLACEMENT_MIN_BUMP_PERCENT
                 )
             )
+        }
+
+        // Absolute backstop: never bid above the configured ceiling, however
+        // many times a bundle has escalated. The replacement floor above
+        // compounds unbounded across resubmits, so without this a bundle that
+        // never mines (and can't rotate) can escalate to absurd gas prices.
+        // Optional; unset = no cap.
+        const { maxBundlingGasPrice } = this.config
+        if (maxBundlingGasPrice !== undefined) {
+            const cappedMaxFeePerGas = minBigInt(
+                maxFeePerGas,
+                maxBundlingGasPrice
+            )
+            const cappedMaxPriorityFeePerGas = minBigInt(
+                maxPriorityFeePerGas,
+                maxBundlingGasPrice
+            )
+            if (
+                cappedMaxFeePerGas !== maxFeePerGas ||
+                cappedMaxPriorityFeePerGas !== maxPriorityFeePerGas
+            ) {
+                childLogger.warn(
+                    {
+                        maxBundlingGasPrice,
+                        requestedMaxFeePerGas: maxFeePerGas,
+                        requestedMaxPriorityFeePerGas: maxPriorityFeePerGas
+                    },
+                    "clamped bundle gas price to max-bundling-gas-price"
+                )
+            }
+            maxFeePerGas = cappedMaxFeePerGas
+            maxPriorityFeePerGas = cappedMaxPriorityFeePerGas
         }
 
         let transactionHash: HexData32
