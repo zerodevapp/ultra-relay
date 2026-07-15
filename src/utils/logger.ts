@@ -67,9 +67,11 @@ export const customSerializer: SerializerFn = (input: AnyObject): AnyObject => {
     return output
 }
 
-// Fields injected into every log line via pino mixin. env and networkName are
-// known at process start; chainId is resolved after RPC handshake and set via
-// setChainId. Defaults to "unknown" until then.
+// Fields injected into every log line via pino mixin. env is read from the
+// environment at process start; networkName comes from the --network-name CLI
+// arg (set via setNetworkName), falling back to the NETWORK_NAME env var;
+// chainId is resolved after the RPC handshake (set via setChainId). Each
+// defaults to "unknown" until set.
 const ctx = {
     env: process.env.NODE_ENV ?? "unknown",
     networkName: process.env.NETWORK_NAME ?? "unknown",
@@ -78,6 +80,12 @@ const ctx = {
 
 export const setChainId = (id: number): void => {
     ctx.chainId = String(id)
+}
+
+export const setNetworkName = (name: string | undefined): void => {
+    if (name) {
+        ctx.networkName = name
+    }
 }
 
 // Return a fresh object each call: pino's default mixin merge does
@@ -168,11 +176,14 @@ export const initProductionLogger = (level: string): Logger => {
         l.level = level
         return l
     }
+    // No `level` formatter here: @logtail/pino's getLogLevel does numeric
+    // comparisons on obj.level, so emitting a string label ("info") makes every
+    // record fall through to "fatal". Keep level numeric for the transport;
+    // only transform the log body so bigints are hex-encoded.
     const l = pino(
         {
             mixin: loggerMixin,
             formatters: {
-                level: logLevel,
                 log: customSerializer
             }
         },

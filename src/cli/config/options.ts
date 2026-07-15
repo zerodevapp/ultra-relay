@@ -662,6 +662,11 @@ export const logOptions: CliCommandOptions<ILogArgsInput> = {
         require: true,
         default: false
     },
+    "network-name": {
+        description: "Human-readable network name stamped on every log line",
+        type: "string",
+        require: false
+    },
     "log-level": {
         description: "Default log level",
         type: "string",
