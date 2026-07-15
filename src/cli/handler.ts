@@ -2,7 +2,8 @@ import { GasPriceManager } from "@alto/handlers"
 import {
     createMetrics,
     initDebugLogger,
-    initProductionLogger
+    initProductionLogger,
+    setChainId
 } from "@alto/utils"
 import { Registry } from "prom-client"
 import {
@@ -143,6 +144,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     }
 
     const chainId = await getChainId()
+    setChainId(chainId)
 
     // let us assume that the block time is at least 2x the polling interval
     const viemChain = getViemChain({ chainId, args })

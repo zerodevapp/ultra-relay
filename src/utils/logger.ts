@@ -67,6 +67,24 @@ export const customSerializer: SerializerFn = (input: AnyObject): AnyObject => {
     return output
 }
 
+// Fields injected into every log line via pino mixin. env and networkName are
+// known at process start; chainId is resolved after RPC handshake and set via
+// setChainId. Defaults to "unknown" until then.
+const ctx = {
+    env: process.env.NODE_ENV ?? "unknown",
+    networkName: process.env.NETWORK_NAME ?? "unknown",
+    chainId: "unknown"
+}
+
+export const setChainId = (id: number): void => {
+    ctx.chainId = String(id)
+}
+
+// Return a fresh object each call: pino's default mixin merge does
+// Object.assign(mixinResult, logObject), which would otherwise mutate the
+// shared ctx and bleed per-call fields onto every later log line.
+const loggerMixin = () => ({ ...ctx })
+
 export const initDebugLogger = (level = "debug"): Logger => {
     const l = logger({
         transport: {
@@ -75,6 +93,7 @@ export const initDebugLogger = (level = "debug"): Logger => {
                 colorize: true
             }
         },
+        mixin: loggerMixin,
         formatters: {
             level: logLevel,
             log: customSerializer
@@ -140,6 +159,7 @@ export const initProductionLogger = (level: string): Logger => {
         // record. pino-pretty here splits structured objects across lines and
         // makes them unsearchable downstream.
         const l = pino({
+            mixin: loggerMixin,
             formatters: {
                 level: logLevel,
                 log: customSerializer
@@ -148,7 +168,16 @@ export const initProductionLogger = (level: string): Logger => {
         l.level = level
         return l
     }
-    const l = pino(transport)
+    const l = pino(
+        {
+            mixin: loggerMixin,
+            formatters: {
+                level: logLevel,
+                log: customSerializer
+            }
+        },
+        transport
+    )
     l.level = level
     return l
 }
