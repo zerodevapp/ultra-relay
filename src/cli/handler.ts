@@ -3,7 +3,8 @@ import {
     createMetrics,
     initDebugLogger,
     initProductionLogger,
-    setChainId
+    setChainId,
+    setNetworkName
 } from "@alto/utils"
 import { Registry } from "prom-client"
 import {
@@ -121,6 +122,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     const logger = args.json
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)
+    setNetworkName(args.networkName)
 
     const fetchOptions = getRpcFetchOptions({
         rpcUrl: args.rpcUrl,

@@ -229,6 +229,7 @@ export const rpcArgsSchema = z.object({
 
 export const logArgsSchema = z.object({
     json: z.boolean(),
+    "network-name": z.string().optional(),
     "log-level": logLevel,
     "public-client-log-level": logLevel.optional(),
     "wallet-client-log-level": logLevel.optional(),
