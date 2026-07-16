@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import * as sentry from "@sentry/node"
 import dotenv from "dotenv"
-import { Agent, setGlobalDispatcher } from "undici"
+import { Agent, fetch as undiciFetch, setGlobalDispatcher } from "undici"
 import { HttpRequestError, InternalRpcError, TimeoutError } from "viem"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
@@ -43,6 +43,15 @@ setGlobalDispatcher(
         keepAliveTimeout: 60_000 // keep sockets warm between bursts
     })
 )
+// Pin global fetch to THIS undici package so fetch and dispatcher are always
+// the same version. Node's BUILT-IN fetch only honors setGlobalDispatcher when
+// its bundled undici major matches the npm package's global-dispatcher slot:
+// verified empirically that on Node >= 26 (bundled undici v7) the npm v6
+// setGlobalDispatcher is a silent no-op for built-in fetch. Our fleet runs
+// mixed Node versions (Docker images pin 20.x; native Render services float
+// to the latest at build time), so same-package pairing is the only
+// combination that provably works everywhere (verified on Node 18/20/22/24/26).
+globalThis.fetch = undiciFetch as unknown as typeof globalThis.fetch
 
 if (process.env.SENTRY_DSN) {
     const SENTRY_IGNORE_ERRORS = [

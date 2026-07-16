@@ -156,7 +156,7 @@ importers:
         specifier: ^4.35.0
         version: 4.39.1
       undici:
-        specifier: ^6.21.3
+        specifier: ^6.27.0
         version: 6.27.0
       viem:
         specifier: ^2.24.3
