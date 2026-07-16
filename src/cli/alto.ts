@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import * as sentry from "@sentry/node"
 import dotenv from "dotenv"
-import { Agent, fetch as undiciFetch, setGlobalDispatcher } from "undici"
+import { Agent, setGlobalDispatcher, fetch as undiciFetch } from "undici"
 import { HttpRequestError, InternalRpcError, TimeoutError } from "viem"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
