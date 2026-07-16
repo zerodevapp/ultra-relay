@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as sentry from "@sentry/node"
 import dotenv from "dotenv"
+import { Agent, setGlobalDispatcher } from "undici"
 import { HttpRequestError, InternalRpcError, TimeoutError } from "viem"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
@@ -25,6 +26,23 @@ if (process.env.DOTENV_CONFIG_PATH) {
 } else {
     dotenv.config()
 }
+
+// Every RPC call goes through Node's global fetch (viem's HTTP transport),
+// whose default dispatcher is unconfigured: unbounded per-origin connection
+// creation and a 4s keep-alive. Under RPC bursts that means connection
+// churn/storms (a DNS lookup + TLS handshake per new socket, connects queueing
+// behind the 4-thread libuv pool) and tripping provider-edge connection
+// limits — requests then burn their whole viem timeout budget client-side
+// while the RPC endpoint itself stays healthy (Jul 15-16 Base incident:
+// TimeoutErrors on eth_blockNumber while the same endpoint answered other
+// clients in ~40ms). Pin an explicit bounded pool with a long keep-alive so
+// warm sockets are reused and connection creation is bounded.
+setGlobalDispatcher(
+    new Agent({
+        connections: 256, // per-origin socket cap
+        keepAliveTimeout: 60_000 // keep sockets warm between bursts
+    })
+)
 
 if (process.env.SENTRY_DSN) {
     const SENTRY_IGNORE_ERRORS = [
