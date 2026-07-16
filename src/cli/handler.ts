@@ -4,7 +4,8 @@ import {
     initDebugLogger,
     initProductionLogger,
     setChainId,
-    setNetworkName
+    setNetworkName,
+    startFetchDispatcherHeartbeat
 } from "@alto/utils"
 import { Registry } from "prom-client"
 import {
@@ -123,6 +124,9 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)
     setNetworkName(args.networkName)
+
+    // 5-min heartbeat: current + peak "requests awaiting a socket" per origin
+    startFetchDispatcherHeartbeat(logger.child({ module: "fetch_dispatcher" }))
 
     const fetchOptions = getRpcFetchOptions({
         rpcUrl: args.rpcUrl,

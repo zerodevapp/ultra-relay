@@ -5,6 +5,7 @@ import { Agent, setGlobalDispatcher, fetch as undiciFetch } from "undici"
 import { HttpRequestError, InternalRpcError, TimeoutError } from "viem"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
+import { awaitingSocketInterceptor } from "../utils/fetchDispatcherStats"
 import {
     bundlerCommand,
     bundlerOptions,
@@ -37,11 +38,15 @@ if (process.env.DOTENV_CONFIG_PATH) {
 // TimeoutErrors on eth_blockNumber while the same endpoint answered other
 // clients in ~40ms). Pin an explicit bounded pool with a long keep-alive so
 // warm sockets are reused and connection creation is bounded.
+// The interceptor counts requests sitting between dispatch and socket write
+// (queued for a free connection or waiting on DNS/TLS setup) — the
+// client-side queueing signal the Jul 15-16 incident lacked. Composed onto
+// the Agent so only its traffic is counted.
 setGlobalDispatcher(
     new Agent({
         connections: 256, // per-origin socket cap
         keepAliveTimeout: 60_000 // keep sockets warm between bursts
-    })
+    }).compose(awaitingSocketInterceptor)
 )
 // Pin global fetch to THIS undici package so fetch and dispatcher are always
 // the same version. Node's BUILT-IN fetch only honors setGlobalDispatcher when
