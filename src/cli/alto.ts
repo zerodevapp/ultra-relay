@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import * as sentry from "@sentry/node"
 import dotenv from "dotenv"
+import { Agent, setGlobalDispatcher, fetch as undiciFetch } from "undici"
 import { HttpRequestError, InternalRpcError, TimeoutError } from "viem"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
+import { awaitingSocketInterceptor } from "../utils/fetchDispatcherStats"
 import {
     bundlerCommand,
     bundlerOptions,
@@ -25,6 +27,36 @@ if (process.env.DOTENV_CONFIG_PATH) {
 } else {
     dotenv.config()
 }
+
+// Every RPC call goes through Node's global fetch (viem's HTTP transport),
+// whose default dispatcher is unconfigured: unbounded per-origin connection
+// creation and a 4s keep-alive. Under RPC bursts that means connection
+// churn/storms (a DNS lookup + TLS handshake per new socket, connects queueing
+// behind the 4-thread libuv pool) and tripping provider-edge connection
+// limits — requests then burn their whole viem timeout budget client-side
+// while the RPC endpoint itself stays healthy (Jul 15-16 Base incident:
+// TimeoutErrors on eth_blockNumber while the same endpoint answered other
+// clients in ~40ms). Pin an explicit bounded pool with a long keep-alive so
+// warm sockets are reused and connection creation is bounded.
+// The interceptor counts requests sitting between dispatch and socket write
+// (queued for a free connection or waiting on DNS/TLS setup) — the
+// client-side queueing signal the Jul 15-16 incident lacked. Composed onto
+// the Agent so only its traffic is counted.
+setGlobalDispatcher(
+    new Agent({
+        connections: 256, // per-origin socket cap
+        keepAliveTimeout: 60_000 // keep sockets warm between bursts
+    }).compose(awaitingSocketInterceptor)
+)
+// Pin global fetch to THIS undici package so fetch and dispatcher are always
+// the same version. Node's BUILT-IN fetch only honors setGlobalDispatcher when
+// its bundled undici major matches the npm package's global-dispatcher slot:
+// verified empirically that on Node >= 26 (bundled undici v7) the npm v6
+// setGlobalDispatcher is a silent no-op for built-in fetch. Our fleet runs
+// mixed Node versions (Docker images pin 20.x; native Render services float
+// to the latest at build time), so same-package pairing is the only
+// combination that provably works everywhere (verified on Node 18/20/22/24/26).
+globalThis.fetch = undiciFetch as unknown as typeof globalThis.fetch
 
 if (process.env.SENTRY_DSN) {
     const SENTRY_IGNORE_ERRORS = [

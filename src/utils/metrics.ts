@@ -5,6 +5,7 @@ import {
     type Registry,
     collectDefaultMetrics
 } from "prom-client"
+import { getAwaitingSocketCounts } from "./fetchDispatcherStats"
 
 export type Metrics = ReturnType<typeof createMetrics>
 
@@ -231,6 +232,21 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const fetchRequestsAwaitingSocket = new Gauge({
+        name: "ultra_relay_fetch_requests_awaiting_socket",
+        help: "Requests dispatched to the fetch connection pool but not yet written to a socket (queued for a free connection or waiting on DNS/TLS connection setup)",
+        labelNames: ["origin"] as const,
+        registers,
+        collect() {
+            // drop label sets for origins evicted from the stats map —
+            // without this, their last-set value is exported forever
+            this.reset()
+            for (const [origin, count] of getAwaitingSocketCounts()) {
+                this.set({ origin }, count)
+            }
+        }
+    })
+
     return {
         httpRequests,
         httpRequestsDuration,
@@ -257,6 +273,7 @@ export function createMetrics(registry: Registry, register = true) {
         executorWalletsQuarantined,
         emittedOpEvents,
         walletsProcessingTime,
+        fetchRequestsAwaitingSocket,
         userOperationsSubmissionAttempts,
         secondValidationFailed
     }
