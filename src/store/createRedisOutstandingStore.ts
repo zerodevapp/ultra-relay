@@ -443,6 +443,14 @@ class RedisOutstandingQueue implements OutstandingStore {
         // Create a transaction
         const multi = this.redis.multi()
 
+        // Clean up factory deployment tracking if needed
+        if (isDeployment(currentUserOp.userOp)) {
+            await this.factoryLookup.delete({
+                key: currentUserOp.userOp.sender,
+                multi
+            })
+        }
+
         // Remove the current operation
         await pendingOpsSet.remove({ member: currentUserOpStr, multi })
         await this.userOpHashLookup.delete({

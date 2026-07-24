@@ -85,6 +85,13 @@ async function queueOperationsOnShutdownToRedis({
         const restorationQueue = new Queue(queueName, {
             createClient: () => {
                 return redis
+            },
+            defaultJobOptions: {
+                // Completed restoration jobs were retained forever and leaked
+                // memory; failed ones hold the only copy of a mempool dump,
+                // so keep a bounded number for manual replay.
+                removeOnComplete: true,
+                removeOnFail: 50
             }
         })
 
@@ -341,7 +348,10 @@ export async function restoreShutdownState({
                 }
                 return done()
             } catch (err) {
-                done()
+                // Fail the job so removeOnFail retains the dump for manual
+                // replay; done() with no error would mark it completed and
+                // removeOnComplete would delete it.
+                done(err as Error)
                 logger.error(
                     { err },
                     "[MEMPOOL-RESTORATION] Error processing restoration message, continuing"
