@@ -17,6 +17,9 @@ export const getRedisKeys = (config: AltoConfig) => {
         gasPriceQueue: `${prefix}:gas-price`,
 
         // Sender manager queue
-        senderManagerQueue: `${prefix}:sender-manager`
+        senderManagerQueue: `${prefix}:sender-manager`,
+
+        // Wallets currently checked out of the sender manager queue
+        senderManagerCheckedOut: `${prefix}:sender-manager:checked-out`
     }
 }
