@@ -64,19 +64,10 @@ export const validateAndRefillWallets = async ({
             { balancesMissing, totalBalanceMissing },
             "balances missing"
         )
+        // Executor wallets are funded externally now, so an underfunded
+        // utility wallet is expected — skip refilling without logging an
+        // error every cycle.
         metrics.utilityWalletInsufficientBalance.set(1)
-        logger.error(
-            {
-                minBalance: formatEther(minBalance),
-                utilityWalletBalance: formatEther(utilityWalletBalance),
-                totalBalanceMissing: formatEther(totalBalanceMissing),
-                minRefillAmount: formatEther(
-                    totalBalanceMissing - utilityWalletBalance
-                ),
-                utilityAccount: utilityAccount.address
-            },
-            "utility wallet has insufficient balance to refill wallets"
-        )
         return
     }
 
