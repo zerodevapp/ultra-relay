@@ -9,6 +9,7 @@ import {
 } from "@alto/types"
 import type * as validation from "@alto/types"
 import {
+    addLogContext,
     calcExecutionPvgComponent,
     calcL2PvgComponent,
     getAAError,
@@ -92,13 +93,15 @@ export async function addToMempoolIfValid({
     userOp,
     entryPoint,
     apiVersion,
-    boost = false
+    boost = false,
+    receivedAt
 }: {
     rpcHandler: RpcHandler
     userOp: UserOperation
     entryPoint: Address
     apiVersion: ApiVersion
     boost?: boolean
+    receivedAt?: number
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
@@ -119,6 +122,10 @@ export async function addToMempoolIfValid({
                 publicClient: rpcHandler.config.publicClient
             })
     )
+
+    // From here on every log in this flow (incl. RPC transport lines fired by
+    // validation) carries the hash.
+    addLogContext({ userOpHash })
 
     // Per-transaction bundle-cap validation: an op that alone exceeds this
     // chain's per-tx gas or calldata-size cap can never be included in any
@@ -278,7 +285,8 @@ export async function addToMempoolIfValid({
     const [isMempoolAddSuccess, mempoolAddError] = await rpcHandler.mempool.add(
         userOp,
         entryPoint,
-        validationResult.referencedContracts
+        validationResult.referencedContracts,
+        receivedAt
     )
 
     if (!isMempoolAddSuccess) {
@@ -298,6 +306,7 @@ export const ethSendUserOperationHandler = createMethodHandler({
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
         const handlerStart = performance.now()
+        const receivedAt = Date.now()
         const [userOp, entryPoint] = params
 
         const boost =
@@ -316,7 +325,8 @@ export const ethSendUserOperationHandler = createMethodHandler({
                 userOp,
                 entryPoint,
                 apiVersion,
-                boost
+                boost,
+                receivedAt
             })
 
             status = result
@@ -342,7 +352,12 @@ export const ethSendUserOperationHandler = createMethodHandler({
                     apiVersion,
                     boost,
                     status,
-                    userOpHash: resolvedUserOpHash,
+                    // Only set when defined: an explicit `undefined` would
+                    // clobber the hash the log-context mixin already merged in,
+                    // making rejected ops unfindable by hash.
+                    ...(resolvedUserOpHash
+                        ? { userOpHash: resolvedUserOpHash }
+                        : {}),
                     ms: Math.round(performance.now() - handlerStart)
                 },
                 "[timing] eth_sendUserOperation total"

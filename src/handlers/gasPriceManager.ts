@@ -3,7 +3,7 @@ import {
     RpcError,
     gasStationResult
 } from "@alto/types"
-import { type Logger, maxBigInt, minBigInt } from "@alto/utils"
+import { type Logger, maxBigInt, minBigInt, timed } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import { type PublicClient, parseGwei } from "viem"
 import { polygon } from "viem/chains"
@@ -52,15 +52,21 @@ export class GasPriceManager {
         if (this.config.gasPriceRefreshInterval > 0) {
             setInterval(async () => {
                 try {
-                    if (this.config.legacyTransactions === false) {
-                        await this.tryUpdateBaseFee()
-                    }
-
-                    await this.tryUpdateGasPrice()
+                    await timed(
+                        this.logger,
+                        "gasPriceRefresh",
+                        {},
+                        async () => {
+                            if (this.config.legacyTransactions === false) {
+                                await this.tryUpdateBaseFee()
+                            }
+                            await this.tryUpdateGasPrice()
+                        }
+                    )
                 } catch (error) {
                     this.logger.error(
                         { error },
-                        "Error updating gas prices in interval"
+                        "failed to refresh gas prices; executor will reuse last known values"
                     )
                     sentry.captureException(error)
                 }

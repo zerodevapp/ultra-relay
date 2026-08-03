@@ -1,4 +1,4 @@
-import type { HexData32, UserOperation } from "@alto/types"
+import type { HexData32, UserOpInfo, UserOperation } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Logger } from "@alto/utils"
 import * as sentry from "@sentry/node"
@@ -106,10 +106,45 @@ export const createMempoolStore = ({
         })
     }
 
-    const logAddOperation = (userOpHash: HexData32, storeType: StoreType) => {
-        logger.debug(
-            { userOpHash, store: storeType },
-            `added user op to ${storeType} mempool`
+    const logAddOperation = (userOpInfo: UserOpInfo, storeType: StoreType) => {
+        const { userOpHash, receivedAt, addedToMempool, processingAt } =
+            userOpInfo
+        const now = Date.now()
+        let stageMs: Record<string, number> = {}
+        let detail = ""
+        if (storeType === "outstanding") {
+            // Derived from the record's own timestamps (not `now`) so the value
+            // matches the inclusion breakdown's validationMs and stays correct
+            // when an op is re-added to outstanding after a bundling pass.
+            const validationMs = receivedAt
+                ? addedToMempool - receivedAt
+                : undefined
+            stageMs = validationMs !== undefined ? { validationMs } : {}
+            detail =
+                validationMs !== undefined
+                    ? ` after ${validationMs}ms validation`
+                    : ""
+        } else if (storeType === "processing") {
+            const outstandingMs = now - addedToMempool
+            stageMs = { outstandingMs }
+            detail = ` after ${outstandingMs}ms outstanding`
+        } else if (storeType === "submitted") {
+            const processingMs = processingAt ? now - processingAt : undefined
+            stageMs = processingMs !== undefined ? { processingMs } : {}
+            detail =
+                processingMs !== undefined
+                    ? ` after ${processingMs}ms processing`
+                    : ""
+        }
+        // A userOp that re-entered the mempool after a failed cycle repeats all
+        // of its transitions, so keep info reserved for the first attempt.
+        // Failure and warning lines are unaffected and still fire every retry.
+        const log = userOpInfo.reentered
+            ? logger.debug.bind(logger)
+            : logger.info.bind(logger)
+        log(
+            { userOpHash, store: storeType, ...stageMs },
+            `userOp ${userOpHash} entered ${storeType} mempool${detail}`
         )
         metrics.userOperationsInMempool.labels({ status: storeType }).inc()
     }
@@ -122,14 +157,14 @@ export const createMempoolStore = ({
         if (!removed) {
             logger.warn(
                 { userOpHash, store: storeType },
-                "tried to remove non-existent user op from mempool"
+                `tried to remove userOp ${userOpHash} from ${storeType} mempool but it was not there`
             )
             return
         }
 
         logger.debug(
             { userOpHash, store: storeType },
-            "removed user op from mempool"
+            `userOp ${userOpHash} left ${storeType} mempool`
         )
 
         metrics.userOperationsInMempool.labels({ status: storeType }).dec()
@@ -147,6 +182,7 @@ export const createMempoolStore = ({
     return {
         // Methods used for bundling
         popOutstanding: async (entryPoint: Address) => {
+            const start = performance.now()
             try {
                 const { outstanding } = getStoreHandlers(entryPoint)
                 return await outstanding.pop()
@@ -157,6 +193,14 @@ export const createMempoolStore = ({
                 )
                 sentry.captureException(err)
                 return undefined
+            } finally {
+                const storeMs = Math.round(performance.now() - start)
+                if (storeMs > 100) {
+                    logger.warn(
+                        { store: "outstanding", op: "pop", storeMs },
+                        `slow mempool store read: outstanding pop took ${storeMs}ms`
+                    )
+                }
             }
         },
         peekOutstanding: async (entryPoint: Address) => {
@@ -179,12 +223,20 @@ export const createMempoolStore = ({
             userOpInfo
         }: EntryPointUserOpInfoParam) => {
             const { outstanding } = getStoreHandlers(entryPoint)
-            logAddOperation(userOpInfo.userOpHash, "outstanding")
+            const start = performance.now()
             try {
                 await outstanding.add(userOpInfo)
+                logAddOperation(userOpInfo, "outstanding")
             } catch (err) {
                 logger.error({ err }, "Failed to add to outstanding mempool")
                 sentry.captureException(err)
+            }
+            const storeMs = Math.round(performance.now() - start)
+            if (storeMs > 100) {
+                logger.warn(
+                    { store: "outstanding", op: "add", storeMs },
+                    `slow mempool store write: outstanding add took ${storeMs}ms`
+                )
             }
         },
         addProcessing: ({
@@ -193,7 +245,7 @@ export const createMempoolStore = ({
         }: EntryPointUserOpInfoParam) => {
             try {
                 const { processing } = getStoreHandlers(entryPoint)
-                logAddOperation(userOpInfo.userOpHash, "processing")
+                logAddOperation(userOpInfo, "processing")
                 processing.add(userOpInfo)
                 return Promise.resolve()
             } catch (err) {
@@ -208,7 +260,7 @@ export const createMempoolStore = ({
         }: EntryPointUserOpInfoParam) => {
             try {
                 const { submitted } = getStoreHandlers(entryPoint)
-                logAddOperation(userOpInfo.userOpHash, "submitted")
+                logAddOperation(userOpInfo, "submitted")
                 submitted.add(userOpInfo)
                 return Promise.resolve()
             } catch (err) {

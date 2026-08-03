@@ -2,6 +2,7 @@ import type { Logger } from "@alto/utils"
 import dotenv from "dotenv"
 import logger, { pino, type SerializerFn } from "pino"
 import { toHex } from "viem"
+import { getLogContext } from "./requestContext"
 
 // Load environment variables from .env file
 if (process.env.DOTENV_CONFIG_PATH) {
@@ -91,7 +92,9 @@ export const setNetworkName = (name: string | undefined): void => {
 // Return a fresh object each call: pino's default mixin merge does
 // Object.assign(mixinResult, logObject), which would otherwise mutate the
 // shared ctx and bleed per-call fields onto every later log line.
-const loggerMixin = () => ({ ...ctx })
+// Also spread the per-async-flow context (userOpHash / bundle hashes) so
+// every line emitted while handling a userop is attributable to it.
+const loggerMixin = () => ({ ...ctx, ...getLogContext() })
 
 export const initDebugLogger = (level = "debug"): Logger => {
     const l = logger({

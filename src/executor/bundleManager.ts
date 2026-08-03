@@ -224,7 +224,7 @@ export class BundleManager {
                             userOpHash,
                             transactionHash
                         },
-                        "user op failed onchain"
+                        `userOp ${userOpHash} failed onchain in tx ${transactionHash} (reverted during execution)`
                     )
 
                     this.metrics.userOperationsOnChain
@@ -278,11 +278,32 @@ export class BundleManager {
     ) {
         const { userOpHash, userOp, submissionAttempts, addedToMempool } =
             userOpInfo
+        const { receivedAt, processingAt, submittedAt } = userOpInfo
 
         const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
+        const totalMs = blockReceivedTimestamp - (receivedAt ?? addedToMempool)
         this.logger.info(
-            { userOpHash, transactionHash, inclusionTimeMs },
-            "user op included"
+            {
+                userOpHash,
+                transactionHash,
+                inclusionTimeMs,
+                totalMs,
+                validationMs: receivedAt
+                    ? addedToMempool - receivedAt
+                    : undefined,
+                outstandingMs: processingAt
+                    ? processingAt - addedToMempool
+                    : undefined,
+                processingMs:
+                    processingAt && submittedAt
+                        ? submittedAt - processingAt
+                        : undefined,
+                submittedMs: submittedAt
+                    ? blockReceivedTimestamp - submittedAt
+                    : undefined,
+                submissionAttempts
+            },
+            `userOp ${userOpHash} included in tx ${transactionHash} after ${totalMs}ms (${submissionAttempts} submission attempts)`
         )
 
         // Update status
@@ -392,9 +413,10 @@ export class BundleManager {
 
                 this.logger.info(
                     {
-                        userOpHash
+                        userOpHash,
+                        transactionHash
                     },
-                    "user op frontrun onchain"
+                    `userOp ${userOpHash} was frontrun: included by another bundler's transaction`
                 )
 
                 // Update metrics

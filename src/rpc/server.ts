@@ -7,7 +7,7 @@ import {
     bundlerRequestSchema,
     jsonRpcSchema
 } from "@alto/types"
-import type { Metrics } from "@alto/utils"
+import { type Metrics, runWithLogContext } from "@alto/utils"
 import websocket from "@fastify/websocket"
 import * as sentry from "@sentry/node"
 import Fastify, {
@@ -268,7 +268,7 @@ export class Server {
             }
             this.fastify.log.trace(
                 { body: JSON.stringify(request.body) },
-                "received request"
+                "received JSON-RPC request"
             )
 
             const jsonRpcParsing = jsonRpcSchema.safeParse(request.body)
@@ -326,11 +326,11 @@ export class Server {
                     data: JSON.stringify(bundlerRequest, null),
                     method: bundlerRequest.method
                 },
-                "incoming request"
+                `handling ${bundlerRequest.method} request`
             )
-            const result = await this.rpcEndpoint.handleMethod(
-                bundlerRequest,
-                apiVersion
+            const result = await runWithLogContext(
+                { flow: bundlerRequest.method },
+                () => this.rpcEndpoint.handleMethod(bundlerRequest, apiVersion)
             )
             const jsonRpcResponse: JSONRPCResponse = {
                 jsonrpc: "2.0",
@@ -356,7 +356,7 @@ export class Server {
                             : jsonRpcResponse, // do not log the full result for eth_getUserOperationReceipt to reduce log size
                     method: bundlerRequest.method
                 },
-                "sent reply"
+                `replied to ${bundlerRequest.method} request`
             )
         } catch (err) {
             if (err instanceof RpcError) {

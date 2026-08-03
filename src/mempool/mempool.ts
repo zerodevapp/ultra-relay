@@ -99,6 +99,7 @@ export class Mempool {
             userOps.map(async (userOpInfo) => {
                 const { userOpHash } = userOpInfo
                 await this.store.removeProcessing({ entryPoint, userOpHash })
+                userOpInfo.submittedAt ??= Date.now()
                 await this.store.addSubmitted({ entryPoint, userOpInfo })
                 await this.monitor.setUserOpStatus(userOpHash, {
                     status: "submitted",
@@ -129,19 +130,22 @@ export class Mempool {
                         userOpHash,
                         reason
                     },
-                    "resubmitting user operation"
+                    `resubmitting userOp ${userOpHash} back to outstanding mempool: ${reason}`
                 )
                 await this.store.removeProcessing({ entryPoint, userOpHash })
                 await this.store.removeSubmitted({ entryPoint, userOpHash })
                 const [success, failureReason] = await this.add(
                     userOp,
-                    entryPoint
+                    entryPoint,
+                    undefined,
+                    undefined,
+                    true
                 )
 
                 if (!success) {
                     this.logger.error(
                         { userOpHash, failureReason },
-                        "Failed to resubmit user operation"
+                        `failed to re-add userOp ${userOpHash} during resubmission, dropping it`
                     )
                     const rejectedUserOp = {
                         ...userOpInfo,
@@ -176,7 +180,7 @@ export class Mempool {
                         userOpHash,
                         reason
                     },
-                    "user operation rejected"
+                    `userOp ${userOpHash} dropped from mempool: ${reason}`
                 )
             })
         )
@@ -328,7 +332,9 @@ export class Mempool {
     async add(
         userOp: UserOperation,
         entryPoint: Address,
-        referencedContracts?: ReferencedCodeHashes
+        referencedContracts?: ReferencedCodeHashes,
+        receivedAt?: number,
+        reentry?: boolean
     ): Promise<[boolean, string]> {
         const userOpHash = await getUserOpHash({
             userOp,
@@ -382,6 +388,7 @@ export class Mempool {
                         : "AA25 invalid account nonce: User operation already present in mempool"
 
                 // Re-add to outstanding as it wasn't replaced
+                conflicting.userOpInfo.reentered = true
                 await this.store.addOutstanding({
                     entryPoint,
                     userOpInfo: conflicting.userOpInfo
@@ -408,7 +415,7 @@ export class Mempool {
                             userOp.maxPriorityFeePerGas.toString()
                     }
                 },
-                `Replacing user operation ${userOpInfo.userOpHash} due to higher gas fees.`
+                `userOp ${userOpInfo.userOpHash} replaced by ${userOpHash} (higher gas fees)`
             )
 
             await this.reputationManager.replaceUserOpSeenStatus(
@@ -428,8 +435,10 @@ export class Mempool {
                 userOp,
                 userOpHash,
                 referencedContracts,
+                receivedAt,
                 addedToMempool: Date.now(),
-                submissionAttempts: 0
+                submissionAttempts: 0,
+                ...(reentry ? { reentered: true } : {})
             }
         })
 
@@ -816,6 +825,7 @@ export class Mempool {
 
                 if (seenOps.has(userOpInfo.userOpHash)) {
                     breakLoop = true
+                    userOpInfo.reentered = true
                     await this.store.addOutstanding({
                         entryPoint,
                         userOpInfo
@@ -841,6 +851,7 @@ export class Mempool {
                 if (skipResult.skip) {
                     // Re-add to outstanding
                     if (!skipResult.removeOutstanding) {
+                        userOpInfo.reentered = true
                         await this.store.addOutstanding({
                             entryPoint,
                             userOpInfo
@@ -914,6 +925,7 @@ export class Mempool {
                     )
 
                     // Put the operation back in the store
+                    userOpInfo.reentered = true
                     await this.store.addOutstanding({ entryPoint, userOpInfo })
                     break
                 }
@@ -926,6 +938,7 @@ export class Mempool {
                 storageMap = skipResult.storageMap
 
                 this.reputationManager.decreaseUserOpCount(userOp)
+                userOpInfo.processingAt = Date.now()
                 this.store.addProcessing({ entryPoint, userOpInfo })
 
                 // Add op to current bundle

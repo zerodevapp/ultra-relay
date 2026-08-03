@@ -111,6 +111,7 @@ export function customTransport(
                 name,
                 async request({ method, params }) {
                     const body = { method, params }
+                    const start = performance.now()
                     const fn = async (body: RpcRequest) => {
                         return [
                             await rpc.http(url, {
@@ -122,6 +123,7 @@ export function customTransport(
                     }
 
                     const [{ error, result }] = await fn(body)
+                    const ms = Math.round(performance.now() - start)
                     if (error) {
                         let loggerFn = logger.error.bind(logger)
 
@@ -143,9 +145,12 @@ export function customTransport(
                         loggerFn(
                             {
                                 err: error,
-                                body
+                                body,
+                                method,
+                                ms,
+                                success: false
                             },
-                            "received error response"
+                            `upstream RPC ${method} failed after ${ms}ms`
                         )
 
                         throw new RpcRequestError({
@@ -162,7 +167,10 @@ export function customTransport(
                             url: url
                         })
                     }
-                    logger.info({ body, result }, "received response")
+                    logger.info(
+                        { body, result, method, ms, success: true },
+                        `upstream RPC ${method} succeeded in ${ms}ms`
+                    )
                     return result
                 },
                 retryCount,
