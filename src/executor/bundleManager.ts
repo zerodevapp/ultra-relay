@@ -278,9 +278,12 @@ export class BundleManager {
     ) {
         const { userOpHash, userOp, submissionAttempts, addedToMempool } =
             userOpInfo
-        const { receivedAt, processingAt, submittedAt } = userOpInfo
+        const { receivedAt, processingAt, submittedAt, reentered } = userOpInfo
 
         const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
+        // totalMs spans the op's whole life (receivedAt survives resubmission);
+        // validationMs is suppressed for reentered records, whose restamped
+        // addedToMempool would make the delta span the entire prior cycle.
         const totalMs = blockReceivedTimestamp - (receivedAt ?? addedToMempool)
         this.logger.info(
             {
@@ -288,9 +291,10 @@ export class BundleManager {
                 transactionHash,
                 inclusionTimeMs,
                 totalMs,
-                validationMs: receivedAt
-                    ? addedToMempool - receivedAt
-                    : undefined,
+                validationMs:
+                    receivedAt && !reentered
+                        ? addedToMempool - receivedAt
+                        : undefined,
                 outstandingMs: processingAt
                     ? processingAt - addedToMempool
                     : undefined,

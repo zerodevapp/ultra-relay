@@ -285,8 +285,10 @@ export async function addToMempoolIfValid({
     const [isMempoolAddSuccess, mempoolAddError] = await rpcHandler.mempool.add(
         userOp,
         entryPoint,
-        validationResult.referencedContracts,
-        receivedAt
+        {
+            referencedContracts: validationResult.referencedContracts,
+            receivedAt
+        }
     )
 
     if (!isMempoolAddSuccess) {

@@ -114,11 +114,14 @@ export const createMempoolStore = ({
         let detail = ""
         if (storeType === "outstanding") {
             // Derived from the record's own timestamps (not `now`) so the value
-            // matches the inclusion breakdown's validationMs and stays correct
-            // when an op is re-added to outstanding after a bundling pass.
-            const validationMs = receivedAt
-                ? addedToMempool - receivedAt
-                : undefined
+            // matches the inclusion breakdown's validationMs. Suppressed for
+            // reentered records: their receivedAt is the ORIGINAL request time
+            // (kept so totalMs spans retries) while addedToMempool is restamped
+            // on re-add, so the delta would span the whole prior cycle.
+            const validationMs =
+                receivedAt && !userOpInfo.reentered
+                    ? addedToMempool - receivedAt
+                    : undefined
             stageMs = validationMs !== undefined ? { validationMs } : {}
             detail =
                 validationMs !== undefined

@@ -134,12 +134,17 @@ export class Mempool {
                 )
                 await this.store.removeProcessing({ entryPoint, userOpHash })
                 await this.store.removeSubmitted({ entryPoint, userOpHash })
+                // Keep the original receivedAt so the inclusion log's totalMs
+                // spans the op's whole life across retries; validationMs is
+                // suppressed for reentered records (the record's addedToMempool
+                // is restamped, so that delta would span the prior cycle).
                 const [success, failureReason] = await this.add(
                     userOp,
                     entryPoint,
-                    undefined,
-                    undefined,
-                    true
+                    {
+                        receivedAt: userOpInfo.receivedAt,
+                        reentry: true
+                    }
                 )
 
                 if (!success) {
@@ -332,9 +337,15 @@ export class Mempool {
     async add(
         userOp: UserOperation,
         entryPoint: Address,
-        referencedContracts?: ReferencedCodeHashes,
-        receivedAt?: number,
-        reentry?: boolean
+        {
+            referencedContracts,
+            receivedAt,
+            reentry
+        }: {
+            referencedContracts?: ReferencedCodeHashes
+            receivedAt?: number
+            reentry?: boolean
+        } = {}
     ): Promise<[boolean, string]> {
         const userOpHash = await getUserOpHash({
             userOp,
