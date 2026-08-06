@@ -105,6 +105,18 @@ export function customTransport(
             throw new UrlRequiredError()
         }
 
+        // Log the endpoint origin only (scheme + host): provider API keys
+        // live in the path (Alchemy) or the query string, so neither is safe
+        // to log.
+        let sanitizedUrl: string
+        try {
+            sanitizedUrl = new URL(url).origin
+        } catch {
+            sanitizedUrl = "unparseable-url"
+        }
+        const chainId = chain ? String(chain.id) : undefined
+        const chainTag = chainId ? ` [chain ${chainId}]` : ""
+
         return createTransport(
             {
                 key,
@@ -112,18 +124,24 @@ export function customTransport(
                 async request({ method, params }) {
                     const body = { method, params }
                     const start = performance.now()
+                    let responseHeaders: Record<string, string> | undefined
                     const fn = async (body: RpcRequest) => {
                         return [
                             await rpc.http(url, {
                                 body,
                                 fetchOptions,
+                                onResponse: (response) => {
+                                    responseHeaders = Object.fromEntries(
+                                        response.headers.entries()
+                                    )
+                                },
                                 timeout
                             })
                         ]
                     }
 
                     const [{ error, result }] = await fn(body)
-                    const ms = Math.round(performance.now() - start)
+                    const ms = Number((performance.now() - start).toFixed(2))
                     if (error) {
                         let loggerFn = logger.error.bind(logger)
 
@@ -148,9 +166,12 @@ export function customTransport(
                                 body,
                                 method,
                                 ms,
-                                success: false
+                                success: false,
+                                chainId,
+                                url: sanitizedUrl,
+                                responseHeaders
                             },
-                            `upstream RPC ${method} failed after ${ms}ms`
+                            `upstream RPC ${method} to ${sanitizedUrl}${chainTag} failed after ${ms}ms`
                         )
 
                         throw new RpcRequestError({
@@ -168,8 +189,17 @@ export function customTransport(
                         })
                     }
                     logger.info(
-                        { body, result, method, ms, success: true },
-                        `upstream RPC ${method} succeeded in ${ms}ms`
+                        {
+                            body,
+                            result,
+                            method,
+                            ms,
+                            success: true,
+                            chainId,
+                            url: sanitizedUrl,
+                            responseHeaders
+                        },
+                        `upstream RPC ${method} to ${sanitizedUrl}${chainTag} succeeded in ${ms}ms`
                     )
                     return result
                 },
