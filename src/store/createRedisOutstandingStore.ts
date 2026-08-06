@@ -360,11 +360,15 @@ class RedisOutstandingQueue implements OutstandingStore {
         }
 
         const userOps = ops.map(deserializeUserOpInfo)
-        const userOpInfo = userOps.find((op) => op.userOpHash === userOpHash)
+        const userOpIndex = userOps.findIndex(
+            (op) => op.userOpHash === userOpHash
+        )
 
-        if (!userOpInfo) {
+        if (userOpIndex === -1) {
             return false
         }
+
+        const userOpInfo = userOps[userOpIndex]
 
         // Check if we're removing the lowest nonce operation
         const isLowestNonce = userOps[0].userOpHash === userOpHash
@@ -388,9 +392,12 @@ class RedisOutstandingQueue implements OutstandingStore {
             })
         }
 
-        // Remove from the sorted set
+        // Remove the exact stored member. Re-serializing the parsed record can
+        // produce different bytes than what was written (optional fields differ
+        // across versions), which would make the zrem a silent no-op and leave
+        // a ghost entry in the sorted set.
         await pendingOpsSet.remove({
-            member: serializeUserOpInfo(userOpInfo),
+            member: ops[userOpIndex],
             multi
         })
 
