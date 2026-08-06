@@ -39,6 +39,12 @@ that has not yet been submitted on-chain. **Submitted**: included in a
 transaction that is awaiting inclusion. Leaving a stage must erase every
 record of the operation held for that stage.
 
+### User operation lifecycle
+The observable journey of a user operation through the bundler: received →
+validated → mempool stages (outstanding → processing → submitted) → a terminal
+outcome (included, frontran, reverted, or dropped). Each arrow is a lifecycle
+transition.
+
 ### Mempool restoration
 Carrying the mempool's contents across a graceful termination so a restarted
 instance resumes with the same pending user operations instead of dropping

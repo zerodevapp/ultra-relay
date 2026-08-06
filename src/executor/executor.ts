@@ -13,7 +13,8 @@ import {
     maxBigInt,
     minBigInt,
     roundUpBigInt,
-    scaleBigIntByPercent
+    scaleBigIntByPercent,
+    timed
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
@@ -285,7 +286,17 @@ export class Executor {
                     }
                 }
 
-                transactionHash = await walletClient.sendTransaction(request)
+                transactionHash = await timed(
+                    childLogger,
+                    "walletClient.sendTransaction",
+                    {
+                        attempt: attempts,
+                        isPrivate: usePrivateEndpoint,
+                        executor: account.address,
+                        entryPoint
+                    },
+                    () => walletClient.sendTransaction(request)
+                )
 
                 childLogger.info(
                     {
@@ -564,18 +575,28 @@ export class Executor {
                 }
             }
 
-            transactionHash = await this.sendHandleOpsTransaction({
-                txParam: {
-                    account: executor,
-                    nonce,
-                    gas: bundleGasLimit,
-                    userOps: userOpsToBundle,
-                    entryPoint
-                },
+            transactionHash = await timed(
                 childLogger,
-                gasOpts,
-                submissionAttempts: userOpBundle.submissionAttempts
-            })
+                "sendHandleOpsTransaction",
+                {
+                    entryPoint,
+                    bundleSize: userOpsToBundle.length,
+                    submissionAttempts: userOpBundle.submissionAttempts
+                },
+                () =>
+                    this.sendHandleOpsTransaction({
+                        txParam: {
+                            account: executor,
+                            nonce,
+                            gas: bundleGasLimit,
+                            userOps: userOpsToBundle,
+                            entryPoint
+                        },
+                        childLogger,
+                        gasOpts,
+                        submissionAttempts: userOpBundle.submissionAttempts
+                    })
+            )
 
             this.eventManager.emitSubmitted({
                 userOpHashes: getUserOpHashes(userOpsToBundle),

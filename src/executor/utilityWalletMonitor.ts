@@ -1,4 +1,4 @@
-import type { Logger, Metrics } from "@alto/utils"
+import { type Logger, type Metrics, timed } from "@alto/utils"
 import type { Address } from "abitype"
 import { type Hex, formatEther } from "viem"
 import type { AltoConfig } from "../createConfig"
@@ -32,17 +32,24 @@ export class UtilityWalletMonitor {
 
     private async updateMetrics() {
         try {
-            const balance = await this.config.publicClient.getBalance({
-                address: this.utilityWalletAddress
-            })
+            await timed(
+                this.logger,
+                "utilityWalletBalanceCheck",
+                {},
+                async () => {
+                    const balance = await this.config.publicClient.getBalance({
+                        address: this.utilityWalletAddress
+                    })
 
-            this.metrics.utilityWalletBalance.set(
-                Number.parseFloat(formatEther(balance))
+                    this.metrics.utilityWalletBalance.set(
+                        Number.parseFloat(formatEther(balance))
+                    )
+                }
             )
         } catch (error) {
             this.logger.error(
                 error,
-                "Failed to update utility wallet balance metrics"
+                "failed to fetch utility wallet balance for metrics"
             )
         }
     }

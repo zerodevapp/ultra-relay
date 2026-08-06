@@ -797,7 +797,17 @@ export const userOpInfoSchema = z.object({
     userOp: userOperationSchema,
     // === userOp Details ===
     userOpHash: hexData32Schema,
-    addedToMempool: z.number(), // timestamp when the bundling process begins (when it leaves outstanding mempool)
+    // Lifecycle timestamps (Date.now() epoch ms). receivedAt is stamped at
+    // RPC handler entry; addedToMempool at outstanding entry; processingAt
+    // when picked for a bundle; submittedAt when the bundle tx is broadcast.
+    // Optional so records serialized before this change keep deserializing.
+    receivedAt: z.number().optional(),
+    addedToMempool: z.number(),
+    processingAt: z.number().optional(),
+    submittedAt: z.number().optional(),
+    // Set when a userOp re-enters the mempool after a failed cycle; demotes its
+    // transition logs to debug so retries don't repeat the info lines.
+    reentered: z.boolean().optional(),
     referencedContracts: referencedCodeHashesSchema.optional(),
     submissionAttempts: z.number()
 })
