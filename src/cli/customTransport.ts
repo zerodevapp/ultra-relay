@@ -84,6 +84,55 @@ const CALLPHASE_REVERTED_SELECTOR = toFunctionSelector(
     )
 )
 
+// Log the endpoint origin only (scheme + host): provider API keys live in
+// the path (Alchemy) or the query string, so neither is safe to log.
+export function sanitizeRpcUrl(url: string): string {
+    try {
+        return new URL(url).origin
+    } catch {
+        return "unparseable-url"
+    }
+}
+
+// Header names from fetch's Headers.entries() are always lowercase.
+const SUCCESS_HEADER_ALLOWLIST = new Set([
+    "content-type",
+    "retry-after",
+    "cf-ray",
+    "x-request-id"
+])
+
+// Success lines are the hottest log path in the fleet: keep only the headers
+// with diagnostic value (rate-limit headroom, provider request ids) instead
+// of the full map.
+export function pickSuccessHeaders(
+    headers: Record<string, string> | undefined
+): Record<string, string> | undefined {
+    if (!headers) {
+        return undefined
+    }
+    return Object.fromEntries(
+        Object.entries(headers).filter(
+            ([headerName]) =>
+                SUCCESS_HEADER_ALLOWLIST.has(headerName) ||
+                headerName.startsWith("x-ratelimit-")
+        )
+    )
+}
+
+// Error lines get the full map for diagnosis, minus cookies: Cloudflare
+// edges can set session cookies (__cf_bm) on RPC responses, which must not
+// end up in logs.
+export function stripSensitiveHeaders(
+    headers: Record<string, string> | undefined
+): Record<string, string> | undefined {
+    if (!headers) {
+        return undefined
+    }
+    const { "set-cookie": _setCookie, ...rest } = headers
+    return rest
+}
+
 export function customTransport(
     /** URL of the JSON-RPC API. Defaults to the chain's public RPC URL. */
     url_: string,
@@ -105,15 +154,7 @@ export function customTransport(
             throw new UrlRequiredError()
         }
 
-        // Log the endpoint origin only (scheme + host): provider API keys
-        // live in the path (Alchemy) or the query string, so neither is safe
-        // to log.
-        let sanitizedUrl: string
-        try {
-            sanitizedUrl = new URL(url).origin
-        } catch {
-            sanitizedUrl = "unparseable-url"
-        }
+        const sanitizedUrl = sanitizeRpcUrl(url)
         const chainId = chain ? String(chain.id) : undefined
         const chainTag = chainId ? ` [chain ${chainId}]` : ""
 
@@ -169,7 +210,8 @@ export function customTransport(
                                 success: false,
                                 chainId,
                                 url: sanitizedUrl,
-                                responseHeaders
+                                responseHeaders:
+                                    stripSensitiveHeaders(responseHeaders)
                             },
                             `upstream RPC ${method} to ${sanitizedUrl}${chainTag} failed after ${ms}ms`
                         )
@@ -197,7 +239,7 @@ export function customTransport(
                             success: true,
                             chainId,
                             url: sanitizedUrl,
-                            responseHeaders
+                            responseHeaders: pickSuccessHeaders(responseHeaders)
                         },
                         `upstream RPC ${method} to ${sanitizedUrl}${chainTag} succeeded in ${ms}ms`
                     )
