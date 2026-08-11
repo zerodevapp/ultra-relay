@@ -120,11 +120,31 @@ export const initDebugLogger = (level = "debug"): Logger => {
 let transport: any
 
 if (process.env.BETTER_STACK_TOKEN) {
-    const logtailOptions: { sourceToken: string; endpoint?: string } = {
-        sourceToken: process.env.BETTER_STACK_TOKEN
+    // Client options must be nested under `options`: @logtail/pino constructs
+    // `new Logtail(options.sourceToken, options.options)`, so top-level keys
+    // other than sourceToken are silently ignored.
+    const logtailClientOptions: {
+        endpoint?: string
+        retryCount: number
+        retryBackoff: number
+        batchInterval: number
+    } = {
+        // Defaults (3 retries, constant 100ms backoff) drop the whole batch
+        // (up to 1000 lines) on any network blip longer than ~0.5s. TLS
+        // resets to the ingest edge are chronic, so retry for ~8s instead.
+        retryCount: 8,
+        retryBackoff: 1_000,
+        // Each batch POST opens a fresh TLS connection; shipping every 3s
+        // instead of 1s means ~3x fewer handshakes exposed to resets, at the
+        // cost of logs reaching Better Stack a couple of seconds later.
+        batchInterval: 3_000
     }
     if (process.env.BETTER_STACK_ENDPOINT) {
-        logtailOptions.endpoint = process.env.BETTER_STACK_ENDPOINT
+        logtailClientOptions.endpoint = process.env.BETTER_STACK_ENDPOINT
+    }
+    const logtailOptions = {
+        sourceToken: process.env.BETTER_STACK_TOKEN,
+        options: logtailClientOptions
     }
 
     // @ts-ignore - pino.transport exists at runtime but types may be incomplete
