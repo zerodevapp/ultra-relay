@@ -1,0 +1,103 @@
+name: Verify staging image exists in ECR
+
+# Guardrail for "Release staging" PRs.
+#
+# The deploy tag in deploy/staging.values.yaml must point at an image that
+# actually exists in ECR. build-push-ecr.yml only builds an image when a
+# merged PR touches a build-relevant path (src/**, contracts/**, Dockerfile,
+# package.json, pnpm-lock.yaml, pnpm-workspace.yaml). A tag whose source PR
+# changed only other paths (test/**, docs/**, README) is never built, so
+# pointing staging at it makes the rollout fail with ImagePullBackOff (image
+# "not found"). This check fails such a PR before it can merge and reach the
+# cluster.
+#
+# Make this a *required* status check in branch protection so it actually
+# blocks merge. It runs on every PR but no-ops (success) unless staging
+# values changed, so it is safe to require -- a paths: filter would instead
+# leave unrelated PRs hanging on a required check that never reports.
+#
+# To extend the gate to other environments, add their values files to the
+# git diff in "Detect changed staging values" (e.g. deploy/prod.values.yaml).
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: offchain-labs/ultra-relay
+
+jobs:
+  verify-image-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect changed staging values
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            deploy/staging.values.yaml)
+          if [ -z "$files" ]; then
+            echo "changed=" >> "$GITHUB_OUTPUT"
+            echo "No staging values changed by this PR; image-tag check is a no-op."
+          else
+            echo "changed=$(echo "$files" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            echo "Changed staging values:"
+            echo "$files"
+          fi
+
+      - name: Configure AWS credentials
+        if: steps.changed.outputs.changed != ''
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-verify-image-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify referenced image tags exist in ECR
+        if: steps.changed.outputs.changed != ''
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.changed }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t tags < <(
+            for f in $CHANGED_FILES; do
+              yq '.. | select(tag == "!!map") | select(has("repository") and has("tag")) | select(.repository | test("'"$ECR_REPOSITORY"'$")) | .tag' "$f"
+            done | grep -Ev '^(null|)$' | sort -u
+          )
+
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "Changed staging values reference no ${ECR_REPOSITORY} image tag; nothing to verify."
+            exit 0
+          fi
+
+          status=0
+          for tag in "${tags[@]}"; do
+            if err=$(aws ecr describe-images \
+                       --repository-name "$ECR_REPOSITORY" \
+                       --image-ids imageTag="$tag" \
+                       --region "$AWS_REGION" 2>&1 >/dev/null); then
+              echo "ok: $ECR_REPOSITORY:$tag exists in ECR"
+            elif printf '%s' "$err" | grep -q 'ImageNotFoundException'; then
+              echo "::error::$ECR_REPOSITORY:$tag is NOT in ECR. build-push-ecr only builds images for PRs touching src/**, contracts/**, Dockerfile, package.json, pnpm-lock.yaml or pnpm-workspace.yaml -- a tag whose source PR changed only other paths (e.g. test/**, docs/**) is never built. Re-point the tag to a commit that has a confirmed image (an existing ECR tag or a published Release)."
+              status=1
+            else
+              echo "::error::Failed to query ECR for $ECR_REPOSITORY:$tag: $err"
+              status=1
+            fi
+          done
+          exit $status
