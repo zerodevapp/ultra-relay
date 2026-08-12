@@ -20,6 +20,7 @@ application:
 
   deployment:
     enabled: true
+    replicas: 2
     reloadOnChange: true
     configMapChecksum: true
     serviceAccountName: ultra-relay
@@ -29,7 +30,7 @@ application:
     containerSecurityContext:
       readOnlyRootFilesystem: false
       runAsNonRoot: false
-    # No env-var binding for executor/utility private keys upstream; shell wrapper expands envFrom into flags.
+    # No CLI flag reads these from a file path; the wrapper reads the mounted secret files into flag values itself.
     command:
       - /bin/sh
       - -c
@@ -37,12 +38,24 @@ application:
       - >-
         exec pnpm start run
         --config /configs/alto-config.json
-        --executor-private-keys "$EXECUTOR_PRIVATE_KEYS"
-        --utility-private-key "$UTILITY_PRIVATE_KEY"
-    envFrom:
-      ultra-relay-secrets:
-        type: secret
-        name: ultra-relay-secrets
+        --executor-private-keys "$(cat /secrets/executor-private-keys)"
+        --utility-private-key "$(cat /secrets/utility-private-key)"
+    env:
+      SENTRY_DSN:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: SENTRY_DSN
+      BETTER_STACK_TOKEN:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: BETTER_STACK_TOKEN
+      BETTER_STACK_ENDPOINT:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: BETTER_STACK_ENDPOINT
     ports:
       - containerPort: 3000
         name: http
@@ -67,10 +80,21 @@ application:
       config:
         mountPath: /configs/alto-config.json
         subPath: alto-config.json
+      secrets:
+        mountPath: /secrets
+        readOnly: true
     volumes:
       config:
         configMap:
           name: ultra-relay-config
+      secrets:
+        secret:
+          secretName: ultra-relay-secrets
+          items:
+            - key: EXECUTOR_PRIVATE_KEYS
+              path: executor-private-keys
+            - key: UTILITY_PRIVATE_KEY
+              path: utility-private-key
     resources:
       limits:
         memory: 512Mi
