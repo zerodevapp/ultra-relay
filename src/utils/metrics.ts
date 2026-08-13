@@ -5,6 +5,7 @@ import {
     type Registry,
     collectDefaultMetrics
 } from "prom-client"
+import { getAwaitingSocketCounts } from "./fetchDispatcherStats"
 
 export type Metrics = ReturnType<typeof createMetrics>
 
@@ -203,6 +204,13 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const executorWalletsQuarantined = new Gauge({
+        name: "ultra_relay_executor_wallets_quarantined",
+        help: "Number of executor wallets held out of the pool pending stuck-nonce confirmation",
+        labelNames: [] as const,
+        registers
+    })
+
     const emittedOpEvents = new Counter({
         name: "ultra_relay_emitted_user_operation_events",
         help: "Total number of emitted UserOperation status events",
@@ -222,6 +230,21 @@ export function createMetrics(registry: Registry, register = true) {
         help: "Number of times alto's second estimation failed during eth_estimateUserOperationGas and we returned 2x gas limits",
         labelNames: [] as const,
         registers
+    })
+
+    const fetchRequestsAwaitingSocket = new Gauge({
+        name: "ultra_relay_fetch_requests_awaiting_socket",
+        help: "Requests dispatched to the fetch connection pool but not yet written to a socket (queued for a free connection or waiting on DNS/TLS connection setup)",
+        labelNames: ["origin"] as const,
+        registers,
+        collect() {
+            // drop label sets for origins evicted from the stats map —
+            // without this, their last-set value is exported forever
+            this.reset()
+            for (const [origin, count] of getAwaitingSocketCounts()) {
+                this.set({ origin }, count)
+            }
+        }
     })
 
     return {
@@ -247,8 +270,10 @@ export function createMetrics(registry: Registry, register = true) {
         utilityWalletInsufficientBalance,
         executorWalletsBalances,
         executorWalletsMinBalance,
+        executorWalletsQuarantined,
         emittedOpEvents,
         walletsProcessingTime,
+        fetchRequestsAwaitingSocket,
         userOperationsSubmissionAttempts,
         secondValidationFailed
     }

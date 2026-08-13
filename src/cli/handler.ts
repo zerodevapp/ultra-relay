@@ -2,7 +2,10 @@ import { GasPriceManager } from "@alto/handlers"
 import {
     createMetrics,
     initDebugLogger,
-    initProductionLogger
+    initProductionLogger,
+    setChainId,
+    setNetworkName,
+    startFetchDispatcherHeartbeat
 } from "@alto/utils"
 import { Registry } from "prom-client"
 import {
@@ -120,6 +123,10 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     const logger = args.json
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)
+    setNetworkName(args.networkName)
+
+    // 5-min heartbeat: current + peak "requests awaiting a socket" per origin
+    startFetchDispatcherHeartbeat(logger.child({ module: "fetch_dispatcher" }))
 
     const fetchOptions = getRpcFetchOptions({
         rpcUrl: args.rpcUrl,
@@ -143,6 +150,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     }
 
     const chainId = await getChainId()
+    setChainId(chainId)
 
     // let us assume that the block time is at least 2x the polling interval
     const viemChain = getViemChain({ chainId, args })

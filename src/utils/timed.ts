@@ -14,7 +14,11 @@ export async function timed<T>(
     try {
         const result = await fn()
         logger.info(
-            { ...context, step, ms: Math.round(performance.now() - start) },
+            {
+                ...context,
+                step,
+                ms: Number((performance.now() - start).toFixed(2))
+            },
             `[timing] ${step}`
         )
         return result
@@ -23,7 +27,7 @@ export async function timed<T>(
             {
                 ...context,
                 step,
-                ms: Math.round(performance.now() - start),
+                ms: Number((performance.now() - start).toFixed(2)),
                 err: err instanceof Error ? err.message : String(err)
             },
             `[timing] ${step} failed`

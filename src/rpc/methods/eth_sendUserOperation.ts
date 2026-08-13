@@ -9,12 +9,17 @@ import {
 } from "@alto/types"
 import type * as validation from "@alto/types"
 import {
+    addLogContext,
     calcExecutionPvgComponent,
     calcL2PvgComponent,
     getAAError,
+    getSerializedHandleOpsTx,
+    scaleBigIntByPercent,
     timed
 } from "@alto/utils"
-import type { Hex } from "viem"
+import { type Hex, size } from "viem"
+import { getBundleCaps } from "../../executor/bundleCaps"
+import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
@@ -88,37 +93,97 @@ export async function addToMempoolIfValid({
     userOp,
     entryPoint,
     apiVersion,
-    boost = false
+    boost = false,
+    receivedAt
 }: {
     rpcHandler: RpcHandler
     userOp: UserOperation
     entryPoint: Address
     apiVersion: ApiVersion
     boost?: boolean
+    receivedAt?: number
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
     const logCtx = { sender: userOp.sender, apiVersion, boost }
 
-    // Execute multiple async operations in parallel. Each step is timed
-    // individually so the slowest can be identified from logs (wall-clock
-    // latency = slowest step, not the sum).
-    const [
-        userOpHash,
-        { queuedUserOps, validationResult },
-        currentNonceSeq,
-        [pvgSuccess, pvgErrorReason],
-        [preMempoolSuccess, preMempoolError],
-        [validEip7702Auth, validEip7702AuthError]
-    ] = await Promise.all([
-        timed(rpcHandler.logger, "getUserOpHash", logCtx, () =>
+    // Compute the hash first so cap-check rejections can be properly attributed.
+    // getUserOpHash is sync for v06/v07 and a cheap contract-read for v08, so
+    // this adds negligible latency before the expensive parallel block below.
+    const userOpHash = await timed(
+        rpcHandler.logger,
+        "getUserOpHash",
+        logCtx,
+        () =>
             getUserOpHash({
                 userOp,
                 entryPointAddress: entryPoint,
                 chainId: rpcHandler.config.chainId,
                 publicClient: rpcHandler.config.publicClient
             })
-        ),
+    )
+
+    // From here on every log in this flow (incl. RPC transport lines fired by
+    // validation) carries the hash.
+    addLogContext({ userOpHash })
+
+    // Per-transaction bundle-cap validation: an op that alone exceeds this
+    // chain's per-tx gas or calldata-size cap can never be included in any
+    // bundle, so reject it here instead of letting it black-hole in the mempool.
+    // Must run before the parallel validation block (which runs on-chain
+    // simulation) so that oversized ops are rejected before simulation fires.
+    //
+    // Each cap is only enforced when it is a PROVEN hard limit for this chain
+    // (per-dimension: e.g. Polygon's byte cap is real, its gas cap is our
+    // throughput choice). Rejecting against an unproven cap can reject a valid
+    // userOp -- there the node is the judge: the op is accepted, sent alone if
+    // needed, and only dropped on a ground-truth node rejection (executor).
+    // Bytes are checked against the RAW hard cap (no safety margin): the
+    // margin exists for multi-op packing estimates, and applying it here
+    // would reject ops in the [90%, 100%) band that the node accepts.
+    const { gasCap, byteCap, gasCapProven, byteCapProven } = getBundleCaps(
+        rpcHandler.config
+    )
+    if (gasCapProven) {
+        const singleOpGas = scaleBigIntByPercent(
+            calculateAA95GasFloor({
+                userOps: [userOp],
+                beneficiary: rpcHandler.config.utilityWalletAddress
+            }) + (userOp.eip7702Auth ? 40_000n : 0n),
+            105n
+        )
+        if (singleOpGas > gasCap) {
+            const reason = `userOperation exceeds the per-transaction gas cap for this chain (cap: ${gasCap}, required: ~${singleOpGas})`
+            rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+            throw new RpcError(reason, ValidationErrors.InvalidFields)
+        }
+    }
+    if (byteCapProven) {
+        const singleOpBytes = size(
+            getSerializedHandleOpsTx({
+                userOps: [userOp],
+                entryPoint,
+                chainId: rpcHandler.config.chainId,
+                removeZeros: false
+            })
+        )
+        if (singleOpBytes > byteCap) {
+            const reason = `userOperation exceeds the per-transaction calldata size cap for this chain (cap: ${byteCap} bytes, size: ${singleOpBytes} bytes)`
+            rpcHandler.eventManager.emitFailedValidation(userOpHash, reason)
+            throw new RpcError(reason, ValidationErrors.InvalidFields)
+        }
+    }
+
+    // Execute remaining async operations in parallel. Each step is timed
+    // individually so the slowest can be identified from logs (wall-clock
+    // latency = slowest step, not the sum).
+    const [
+        { queuedUserOps, validationResult },
+        currentNonceSeq,
+        [pvgSuccess, pvgErrorReason],
+        [preMempoolSuccess, preMempoolError],
+        [validEip7702Auth, validEip7702AuthError]
+    ] = await Promise.all([
         timed(rpcHandler.logger, "getUserOpValidationResult", logCtx, () =>
             getUserOpValidationResult(rpcHandler, userOp, entryPoint)
         ),
@@ -220,7 +285,10 @@ export async function addToMempoolIfValid({
     const [isMempoolAddSuccess, mempoolAddError] = await rpcHandler.mempool.add(
         userOp,
         entryPoint,
-        validationResult.referencedContracts
+        {
+            referencedContracts: validationResult.referencedContracts,
+            receivedAt
+        }
     )
 
     if (!isMempoolAddSuccess) {
@@ -240,6 +308,7 @@ export const ethSendUserOperationHandler = createMethodHandler({
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
         const handlerStart = performance.now()
+        const receivedAt = Date.now()
         const [userOp, entryPoint] = params
 
         const boost =
@@ -258,7 +327,8 @@ export const ethSendUserOperationHandler = createMethodHandler({
                 userOp,
                 entryPoint,
                 apiVersion,
-                boost
+                boost,
+                receivedAt
             })
 
             status = result
@@ -284,7 +354,12 @@ export const ethSendUserOperationHandler = createMethodHandler({
                     apiVersion,
                     boost,
                     status,
-                    userOpHash: resolvedUserOpHash,
+                    // Only set when defined: an explicit `undefined` would
+                    // clobber the hash the log-context mixin already merged in,
+                    // making rejected ops unfindable by hash.
+                    ...(resolvedUserOpHash
+                        ? { userOpHash: resolvedUserOpHash }
+                        : {}),
                     ms: Math.round(performance.now() - handlerStart)
                 },
                 "[timing] eth_sendUserOperation total"

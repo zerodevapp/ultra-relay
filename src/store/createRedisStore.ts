@@ -61,11 +61,9 @@ export const createRedisStore = ({
     const redis = new Redis(redisEndpoint, {})
 
     const factoryLookupKey = `${config.chainId}:${storeType}:factory-lookup:${entryPoint}`
-    const conflictingNonceKey = `${config.chainId}:${storeType}:conflicting-nonce:${entryPoint}`
     const userOpHashLookupKey = `${config.chainId}:${storeType}:user-op-hash-index:${entryPoint}`
     const senderNonceLookupKey = `${config.chainId}:${storeType}:sender-nonce-lookup:${entryPoint}`
 
-    const conflictingNonce = new RedisHash(redis, conflictingNonceKey) // userOpHash -> userOp
     const factoryLookup = new RedisHash(redis, factoryLookupKey) // sender -> userOpHash (if deployment is present)
     const senderNonceLookup = new RedisHash(redis, senderNonceLookupKey) // sender + nonce -> userOp
     const userOpHashLookup = new RedisHash(redis, userOpHashLookupKey) // userOpHash -> userOp
@@ -87,11 +85,6 @@ export const createRedisStore = ({
             const multi = redis.multi()
 
             await userOpHashLookup.set({
-                key: userOpHash,
-                value: serializeUserOp(userOp),
-                multi
-            })
-            await conflictingNonce.set({
                 key: userOpHash,
                 value: serializeUserOp(userOp),
                 multi
