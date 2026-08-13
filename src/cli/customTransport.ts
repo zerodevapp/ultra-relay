@@ -84,6 +84,55 @@ const CALLPHASE_REVERTED_SELECTOR = toFunctionSelector(
     )
 )
 
+// Log the endpoint origin only (scheme + host): provider API keys live in
+// the path (Alchemy) or the query string, so neither is safe to log.
+export function sanitizeRpcUrl(url: string): string {
+    try {
+        return new URL(url).origin
+    } catch {
+        return "unparseable-url"
+    }
+}
+
+// Header names from fetch's Headers.entries() are always lowercase.
+const SUCCESS_HEADER_ALLOWLIST = new Set([
+    "content-type",
+    "retry-after",
+    "cf-ray",
+    "x-request-id"
+])
+
+// Success lines are the hottest log path in the fleet: keep only the headers
+// with diagnostic value (rate-limit headroom, provider request ids) instead
+// of the full map.
+export function pickSuccessHeaders(
+    headers: Record<string, string> | undefined
+): Record<string, string> | undefined {
+    if (!headers) {
+        return undefined
+    }
+    return Object.fromEntries(
+        Object.entries(headers).filter(
+            ([headerName]) =>
+                SUCCESS_HEADER_ALLOWLIST.has(headerName) ||
+                headerName.startsWith("x-ratelimit-")
+        )
+    )
+}
+
+// Error lines get the full map for diagnosis, minus cookies: Cloudflare
+// edges can set session cookies (__cf_bm) on RPC responses, which must not
+// end up in logs.
+export function stripSensitiveHeaders(
+    headers: Record<string, string> | undefined
+): Record<string, string> | undefined {
+    if (!headers) {
+        return undefined
+    }
+    const { "set-cookie": _setCookie, ...rest } = headers
+    return rest
+}
+
 export function customTransport(
     /** URL of the JSON-RPC API. Defaults to the chain's public RPC URL. */
     url_: string,
@@ -105,23 +154,35 @@ export function customTransport(
             throw new UrlRequiredError()
         }
 
+        const sanitizedUrl = sanitizeRpcUrl(url)
+        const chainId = chain ? String(chain.id) : undefined
+        const chainTag = chainId ? ` [chain ${chainId}]` : ""
+
         return createTransport(
             {
                 key,
                 name,
                 async request({ method, params }) {
                     const body = { method, params }
+                    const start = performance.now()
+                    let responseHeaders: Record<string, string> | undefined
                     const fn = async (body: RpcRequest) => {
                         return [
                             await rpc.http(url, {
                                 body,
                                 fetchOptions,
+                                onResponse: (response) => {
+                                    responseHeaders = Object.fromEntries(
+                                        response.headers.entries()
+                                    )
+                                },
                                 timeout
                             })
                         ]
                     }
 
                     const [{ error, result }] = await fn(body)
+                    const ms = Number((performance.now() - start).toFixed(2))
                     if (error) {
                         let loggerFn = logger.error.bind(logger)
 
@@ -143,9 +204,16 @@ export function customTransport(
                         loggerFn(
                             {
                                 err: error,
-                                body
+                                body,
+                                method,
+                                ms,
+                                success: false,
+                                chainId,
+                                url: sanitizedUrl,
+                                responseHeaders:
+                                    stripSensitiveHeaders(responseHeaders)
                             },
-                            "received error response"
+                            `upstream RPC ${method} to ${sanitizedUrl}${chainTag} failed after ${ms}ms`
                         )
 
                         throw new RpcRequestError({
@@ -162,7 +230,19 @@ export function customTransport(
                             url: url
                         })
                     }
-                    logger.info({ body, result }, "received response")
+                    logger.info(
+                        {
+                            body,
+                            result,
+                            method,
+                            ms,
+                            success: true,
+                            chainId,
+                            url: sanitizedUrl,
+                            responseHeaders: pickSuccessHeaders(responseHeaders)
+                        },
+                        `upstream RPC ${method} to ${sanitizedUrl}${chainTag} succeeded in ${ms}ms`
+                    )
                     return result
                 },
                 retryCount,

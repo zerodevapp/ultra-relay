@@ -22,7 +22,7 @@ import {
     entryPointExecutionErrorSchema07
 } from "@alto/types"
 import type { Logger, Metrics } from "@alto/utils"
-import { isVersion06 } from "@alto/utils"
+import { isVersion06, timed } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import type { StateOverride } from "viem"
 import {
@@ -311,26 +311,41 @@ export class UnsafeValidator implements InterfaceValidator {
             eip7702Override = getEip7702DelegationOverrides([userOp])
         }
 
-        const simulateValidationPromise = entryPointContract.simulate
-            .simulateValidation(
-                [userOp],
-                eip7702Override ? { stateOverride: eip7702Override } : {}
-            )
-            .catch((e) => {
-                if (e instanceof Error) {
-                    return e
-                }
-                throw e
-            })
+        const v06LogCtx = { sender: userOp.sender, entryPoint, version: "0.6" }
 
-        const runtimeValidationPromise =
-            this.gasEstimationHandler.gasEstimator06.simulateHandleOp06({
-                entryPoint,
-                userOp,
-                useCodeOverride: false, // disable code override so that call phase reverts aren't caught
-                targetAddress: zeroAddress,
-                targetCallData: "0x"
-            })
+        const simulateValidationPromise = timed(
+            this.logger,
+            "v06.simulateValidation",
+            v06LogCtx,
+            () =>
+                entryPointContract.simulate
+                    .simulateValidation(
+                        [userOp],
+                        eip7702Override
+                            ? { stateOverride: eip7702Override }
+                            : {}
+                    )
+                    .catch((e) => {
+                        if (e instanceof Error) {
+                            return e
+                        }
+                        throw e
+                    })
+        )
+
+        const runtimeValidationPromise = timed(
+            this.logger,
+            "v06.simulateHandleOp",
+            v06LogCtx,
+            () =>
+                this.gasEstimationHandler.gasEstimator06.simulateHandleOp06({
+                    entryPoint,
+                    userOp,
+                    useCodeOverride: false, // disable code override so that call phase reverts aren't caught
+                    targetAddress: zeroAddress,
+                    targetCallData: "0x"
+                })
+        )
 
         const [simulateValidationResult, runtimeValidation] = await Promise.all(
             [simulateValidationPromise, runtimeValidationPromise]
@@ -475,12 +490,17 @@ export class UnsafeValidator implements InterfaceValidator {
     > {
         const { userOp, queuedUserOps, entryPoint } = args
 
-        const simulateValidationResult =
-            await this.gasEstimationHandler.gasEstimator07.simulateValidation({
-                entryPoint,
-                userOp,
-                queuedUserOps
-            })
+        const simulateValidationResult = await timed(
+            this.logger,
+            "v07.simulateValidation",
+            { sender: userOp.sender, entryPoint, version: "0.7" },
+            () =>
+                this.gasEstimationHandler.gasEstimator07.simulateValidation({
+                    entryPoint,
+                    userOp,
+                    queuedUserOps
+                })
+        )
 
         if (simulateValidationResult.result === "failed") {
             throw new RpcError(

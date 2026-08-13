@@ -33,6 +33,25 @@ export const isTransactionUnderpricedError = (e: BaseError) => {
     return transactionUnderPriceError !== null
 }
 
+// The two production oversize rejections, and ONLY those: geth
+// ErrOversizedData ("oversized data: transaction size N, limit 131072") and
+// EIP-7825's per-tx gas cap ("gas limit too high", code -32003). Both are
+// deterministic for a given tx, so acting on them (drop a lone op) is safe.
+// Deliberately NOT matching broader strings like "exceeds block gas limit" or
+// "intrinsic gas too high" -- those can be transient and matching them would
+// permanently drop a valid userOp via the lone-op path.
+export const isOversizedBundleError = (e: BaseError): boolean => {
+    const oversizeStrings = ["oversized data", "gas limit too high"]
+    const match = e.walk((node) => {
+        const { message, details } = node as Partial<
+            Pick<BaseError, "message" | "details">
+        >
+        const text = `${message ?? ""} ${details ?? ""}`.toLowerCase()
+        return oversizeStrings.some((s) => text.includes(s))
+    })
+    return match !== null
+}
+
 // V7 source: https://github.com/eth-infinitism/account-abstraction/blob/releases/v0.7/contracts/core/EntryPoint.sol
 // V6 source: https://github.com/eth-infinitism/account-abstraction/blob/fa61290d37d079e928d92d53a122efcc63822214/contracts/core/EntryPoint.sol#L236
 export function calculateAA95GasFloor({

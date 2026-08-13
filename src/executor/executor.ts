@@ -13,7 +13,8 @@ import {
     maxBigInt,
     minBigInt,
     roundUpBigInt,
-    scaleBigIntByPercent
+    scaleBigIntByPercent,
+    timed
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
@@ -36,8 +37,16 @@ import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
     getUserOpHashes,
+    isOversizedBundleError,
     isTransactionUnderpricedError
 } from "./utils"
+
+// bor/geth mempool only accepts a replacement transaction (same sender+nonce)
+// if it exceeds the pending transaction's gasFeeCap AND gasTipCap by at least
+// PriceBump (10% in geth's legacypool, inherited by Polygon bor). We bump by
+// 13% to keep rounding headroom so resubmissions are never rejected with
+// "replacement transaction underpriced".
+const REPLACEMENT_MIN_BUMP_PERCENT = 113n
 
 type HandleOpsTxParams = {
     gas: bigint
@@ -134,7 +143,12 @@ export class Executor {
         ]
 
         if (bundle.submissionAttempts > 0) {
-            const multiplier = 100n + BigInt(bundle.submissionAttempts) * 20n
+            // Geometric: keeps retry/prev ratio at 1.20; linear `100+20·N`
+            // drops below the 1.10 mempool replacement floor at N=7.
+            let multiplier = 100n
+            for (let i = 0; i < bundle.submissionAttempts; i++) {
+                multiplier = (multiplier * 120n) / 100n
+            }
 
             networkMaxFeePerGas = scaleBigIntByPercent(
                 networkMaxFeePerGas,
@@ -203,7 +217,8 @@ export class Executor {
             transactionUnderpricedMultiplier,
             walletClients,
             publicClient,
-            privateEndpointSubmissionAttempts
+            privateEndpointSubmissionAttempts,
+            maxBundlingGasPrice
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -247,7 +262,41 @@ export class Executor {
                     multiple: this.config.gasLimitRoundingMultiple
                 })
 
-                transactionHash = await walletClient.sendTransaction(request)
+                // Enforce the absolute gas ceiling on EVERY send, including
+                // after the underpriced / fee-cap retry bumps below (which
+                // mutate request.* and would otherwise escalate past the cap).
+                if (maxBundlingGasPrice !== undefined) {
+                    if (request.maxFeePerGas !== undefined) {
+                        request.maxFeePerGas = minBigInt(
+                            request.maxFeePerGas,
+                            maxBundlingGasPrice
+                        )
+                    }
+                    if (request.maxPriorityFeePerGas !== undefined) {
+                        request.maxPriorityFeePerGas = minBigInt(
+                            request.maxPriorityFeePerGas,
+                            maxBundlingGasPrice
+                        )
+                    }
+                    if (request.gasPrice !== undefined) {
+                        request.gasPrice = minBigInt(
+                            request.gasPrice,
+                            maxBundlingGasPrice
+                        )
+                    }
+                }
+
+                transactionHash = await timed(
+                    childLogger,
+                    "walletClient.sendTransaction",
+                    {
+                        attempt: attempts,
+                        isPrivate: usePrivateEndpoint,
+                        executor: account.address,
+                        entryPoint
+                    },
+                    () => walletClient.sendTransaction(request)
+                )
 
                 childLogger.info(
                     {
@@ -370,20 +419,26 @@ export class Executor {
         userOpBundle,
         networkGasPrice,
         networkBaseFee,
-        nonce
+        nonce,
+        previousTransactionRequest
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
         networkGasPrice: GasPriceParameters
         networkBaseFee: bigint
         nonce: number
+        previousTransactionRequest?: {
+            maxFeePerGas: bigint
+            maxPriorityFeePerGas: bigint
+        }
     }): Promise<BundleResult> {
         const { entryPoint, userOps } = userOpBundle
 
         let childLogger = this.logger.child({
             submissionAttempts: userOpBundle.submissionAttempts,
             userOperations: getUserOpHashes(userOps),
-            entryPoint
+            entryPoint,
+            executor: executor.address
         })
 
         const filterOpsResult = await filterOpsAndEstimateGas({
@@ -427,16 +482,72 @@ export class Executor {
         childLogger = this.logger.child({
             submissionAttempts: userOpBundle.submissionAttempts,
             userOperations: getUserOpHashes(userOpsToBundle),
-            entryPoint
+            entryPoint,
+            executor: executor.address
         })
 
-        const { maxFeePerGas, maxPriorityFeePerGas } = this.getBundleGasPrice({
+        let { maxFeePerGas, maxPriorityFeePerGas } = this.getBundleGasPrice({
             bundle: userOpBundle,
             networkGasPrice,
             networkBaseFee,
             totalBeneficiaryFees,
             bundleGasUsed
         })
+
+        // When replacing a stuck transaction, the new bid must beat the previous
+        // transaction's fee caps by >= bor's PriceBump (10%) on BOTH maxFeePerGas
+        // and maxPriorityFeePerGas, or the node rejects it with "replacement
+        // transaction underpriced". The price above is derived from the
+        // fluctuating network price and can dip below the previous bid, so floor
+        // it to guarantee a valid replacement.
+        if (previousTransactionRequest) {
+            maxFeePerGas = maxBigInt(
+                maxFeePerGas,
+                scaleBigIntByPercent(
+                    previousTransactionRequest.maxFeePerGas,
+                    REPLACEMENT_MIN_BUMP_PERCENT
+                )
+            )
+            maxPriorityFeePerGas = maxBigInt(
+                maxPriorityFeePerGas,
+                scaleBigIntByPercent(
+                    previousTransactionRequest.maxPriorityFeePerGas,
+                    REPLACEMENT_MIN_BUMP_PERCENT
+                )
+            )
+        }
+
+        // Absolute backstop: never bid above the configured ceiling, however
+        // many times a bundle has escalated. The replacement floor above
+        // compounds unbounded across resubmits, so without this a bundle that
+        // never mines (and can't rotate) can escalate to absurd gas prices.
+        // Optional; unset = no cap.
+        const { maxBundlingGasPrice } = this.config
+        if (maxBundlingGasPrice !== undefined) {
+            const cappedMaxFeePerGas = minBigInt(
+                maxFeePerGas,
+                maxBundlingGasPrice
+            )
+            const cappedMaxPriorityFeePerGas = minBigInt(
+                maxPriorityFeePerGas,
+                maxBundlingGasPrice
+            )
+            if (
+                cappedMaxFeePerGas !== maxFeePerGas ||
+                cappedMaxPriorityFeePerGas !== maxPriorityFeePerGas
+            ) {
+                childLogger.warn(
+                    {
+                        maxBundlingGasPrice,
+                        requestedMaxFeePerGas: maxFeePerGas,
+                        requestedMaxPriorityFeePerGas: maxPriorityFeePerGas
+                    },
+                    "clamped bundle gas price to max-bundling-gas-price"
+                )
+            }
+            maxFeePerGas = cappedMaxFeePerGas
+            maxPriorityFeePerGas = cappedMaxPriorityFeePerGas
+        }
 
         let transactionHash: HexData32
         try {
@@ -464,18 +575,28 @@ export class Executor {
                 }
             }
 
-            transactionHash = await this.sendHandleOpsTransaction({
-                txParam: {
-                    account: executor,
-                    nonce,
-                    gas: bundleGasLimit,
-                    userOps: userOpsToBundle,
-                    entryPoint
-                },
+            transactionHash = await timed(
                 childLogger,
-                gasOpts,
-                submissionAttempts: userOpBundle.submissionAttempts
-            })
+                "sendHandleOpsTransaction",
+                {
+                    entryPoint,
+                    bundleSize: userOpsToBundle.length,
+                    submissionAttempts: userOpBundle.submissionAttempts
+                },
+                () =>
+                    this.sendHandleOpsTransaction({
+                        txParam: {
+                            account: executor,
+                            nonce,
+                            gas: bundleGasLimit,
+                            userOps: userOpsToBundle,
+                            entryPoint
+                        },
+                        childLogger,
+                        gasOpts,
+                        submissionAttempts: userOpBundle.submissionAttempts
+                    })
+            )
 
             this.eventManager.emitSubmitted({
                 userOpHashes: getUserOpHashes(userOpsToBundle),
@@ -505,6 +626,49 @@ export class Executor {
                 return {
                     success: false,
                     reason: "generic_error",
+                    rejectedUserOps,
+                    recoverableOps: userOpsToBundle
+                }
+            }
+
+            // Oversize rejection: the bundle tx exceeds a per-tx node cap. A
+            // multi-op bundle is resubmitted so packing reforms it smaller
+            // (layer-1 caps now bound it). A lone op can't be split further, so
+            // drop it rather than loop forever (the original production bug).
+            if (isOversizedBundleError(err)) {
+                if (userOpsToBundle.length <= 1) {
+                    childLogger.error(
+                        {
+                            err: jsonStringifyWithBigint(err),
+                            bundleSize: userOpsToBundle.length
+                        },
+                        "dropping userOp that alone exceeds a per-transaction bundle cap"
+                    )
+                    sentry.captureException(err)
+                    return {
+                        success: false,
+                        reason: "oversized_bundle",
+                        rejectedUserOps: [
+                            ...rejectedUserOps,
+                            ...userOpsToBundle.map((op) => ({
+                                ...op,
+                                reason: "userOp alone exceeds a per-transaction bundle cap"
+                            }))
+                        ],
+                        recoverableOps: []
+                    }
+                }
+
+                childLogger.warn(
+                    {
+                        err: jsonStringifyWithBigint(err),
+                        bundleSize: userOpsToBundle.length
+                    },
+                    "bundle exceeded a per-transaction cap; resubmitting to re-pack smaller"
+                )
+                return {
+                    success: false,
+                    reason: "oversized_bundle",
                     rejectedUserOps,
                     recoverableOps: userOpsToBundle
                 }

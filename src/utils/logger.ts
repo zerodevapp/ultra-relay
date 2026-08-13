@@ -2,6 +2,7 @@ import type { Logger } from "@alto/utils"
 import dotenv from "dotenv"
 import logger, { pino, type SerializerFn } from "pino"
 import { toHex } from "viem"
+import { getLogContext } from "./requestContext"
 
 // Load environment variables from .env file
 if (process.env.DOTENV_CONFIG_PATH) {
@@ -67,6 +68,34 @@ export const customSerializer: SerializerFn = (input: AnyObject): AnyObject => {
     return output
 }
 
+// Fields injected into every log line via pino mixin. env is read from the
+// environment at process start; networkName comes from the --network-name CLI
+// arg (set via setNetworkName), falling back to the NETWORK_NAME env var;
+// chainId is resolved after the RPC handshake (set via setChainId). Each
+// defaults to "unknown" until set.
+const ctx = {
+    env: process.env.NODE_ENV ?? "unknown",
+    networkName: process.env.NETWORK_NAME ?? "unknown",
+    chainId: "unknown"
+}
+
+export const setChainId = (id: number): void => {
+    ctx.chainId = String(id)
+}
+
+export const setNetworkName = (name: string | undefined): void => {
+    if (name) {
+        ctx.networkName = name
+    }
+}
+
+// Return a fresh object each call: pino's default mixin merge does
+// Object.assign(mixinResult, logObject), which would otherwise mutate the
+// shared ctx and bleed per-call fields onto every later log line.
+// Also spread the per-async-flow context (userOpHash / bundle hashes) so
+// every line emitted while handling a userop is attributable to it.
+const loggerMixin = () => ({ ...ctx, ...getLogContext() })
+
 export const initDebugLogger = (level = "debug"): Logger => {
     const l = logger({
         transport: {
@@ -75,6 +104,7 @@ export const initDebugLogger = (level = "debug"): Logger => {
                 colorize: true
             }
         },
+        mixin: loggerMixin,
         formatters: {
             level: logLevel,
             log: customSerializer
@@ -90,10 +120,37 @@ export const initDebugLogger = (level = "debug"): Logger => {
 let transport: any
 
 if (process.env.BETTER_STACK_TOKEN) {
+    // Client options must be nested under `options`: @logtail/pino constructs
+    // `new Logtail(options.sourceToken, options.options)`, so top-level keys
+    // other than sourceToken are silently ignored.
+    const logtailClientOptions: {
+        endpoint?: string
+        retryCount: number
+        retryBackoff: number
+        batchInterval: number
+    } = {
+        // Defaults (3 retries, constant 100ms backoff) drop the whole batch
+        // (up to 1000 lines) on any network blip longer than ~0.5s. TLS
+        // resets to the ingest edge are chronic, so retry for ~8s instead.
+        retryCount: 8,
+        retryBackoff: 1_000,
+        // Each batch POST opens a fresh TLS connection; shipping every 3s
+        // instead of 1s means ~3x fewer handshakes exposed to resets, at the
+        // cost of logs reaching Better Stack a couple of seconds later.
+        batchInterval: 3_000
+    }
+    if (process.env.BETTER_STACK_ENDPOINT) {
+        logtailClientOptions.endpoint = process.env.BETTER_STACK_ENDPOINT
+    }
+    const logtailOptions = {
+        sourceToken: process.env.BETTER_STACK_TOKEN,
+        options: logtailClientOptions
+    }
+
     // @ts-ignore - pino.transport exists at runtime but types may be incomplete
     transport = pino.transport({
         target: "@logtail/pino",
-        options: { sourceToken: process.env.BETTER_STACK_TOKEN }
+        options: logtailOptions
     })
 
     let reviving = false
@@ -110,9 +167,7 @@ if (process.env.BETTER_STACK_TOKEN) {
                         // @ts-ignore
                         const revived = pino.transport({
                             target: "@logtail/pino",
-                            options: {
-                                sourceToken: process.env.BETTER_STACK_TOKEN
-                            }
+                            options: logtailOptions
                         })
                         revived.on("error", handleTransportError)
                         transport.write = revived.write.bind(revived)
@@ -130,9 +185,33 @@ if (process.env.BETTER_STACK_TOKEN) {
 
 export const initProductionLogger = (level: string): Logger => {
     if (!transport) {
-        return initDebugLogger(level)
+        // No Betterstack token: emit single-line JSON to STDOUT so external
+        // log shippers (syslog, Render's collector) treat each log as one
+        // record. pino-pretty here splits structured objects across lines and
+        // makes them unsearchable downstream.
+        const l = pino({
+            mixin: loggerMixin,
+            formatters: {
+                level: logLevel,
+                log: customSerializer
+            }
+        })
+        l.level = level
+        return l
     }
-    const l = pino(transport)
+    // No `level` formatter here: @logtail/pino's getLogLevel does numeric
+    // comparisons on obj.level, so emitting a string label ("info") makes every
+    // record fall through to "fatal". Keep level numeric for the transport;
+    // only transform the log body so bigints are hex-encoded.
+    const l = pino(
+        {
+            mixin: loggerMixin,
+            formatters: {
+                log: customSerializer
+            }
+        },
+        transport
+    )
     l.level = level
     return l
 }

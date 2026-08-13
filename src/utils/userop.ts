@@ -611,3 +611,37 @@ export function parseUserOpReceipt(
 
     return userOpReceipt
 }
+
+// The maximum the EntryPoint can ever charge (and therefore refund to the
+// beneficiary) for a userOp: every gas limit it may bill, priced at the op's
+// own maxFeePerGas. Sponsored (zero-fee) ops return 0.
+export const getRequiredPrefund = (userOp: UserOperation): bigint => {
+    if (isVersion06(userOp)) {
+        // v0.6 bills verificationGasLimit up to three times when a paymaster
+        // is present (validateUserOp, validatePaymasterUserOp, postOp).
+        const multiplier = (userOp.paymasterAndData?.length ?? 0) > 2 ? 3n : 1n
+        const requiredGas =
+            userOp.callGasLimit +
+            userOp.verificationGasLimit * multiplier +
+            userOp.preVerificationGas
+
+        return requiredGas * userOp.maxFeePerGas
+    }
+
+    // Paymaster limits count only when a paymaster is set: packing drops them
+    // otherwise (see getPaymasterAndData), so the EntryPoint never bills them.
+    // The schema allows them to be non-null with a null paymaster, and counting
+    // those phantom limits would inflate the ceiling for free.
+    const paymasterGas = userOp.paymaster
+        ? (userOp.paymasterVerificationGasLimit || 0n) +
+          (userOp.paymasterPostOpGasLimit || 0n)
+        : 0n
+
+    const requiredGas =
+        userOp.verificationGasLimit +
+        userOp.callGasLimit +
+        paymasterGas +
+        userOp.preVerificationGas
+
+    return requiredGas * userOp.maxFeePerGas
+}

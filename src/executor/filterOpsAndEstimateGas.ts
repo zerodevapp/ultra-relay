@@ -9,8 +9,11 @@ import {
 } from "@alto/types"
 import {
     type Logger,
+    getRequiredPrefund,
     getSerializedHandleOpsTx,
+    minBigInt,
     scaleBigIntByPercent,
+    timed,
     toPackedUserOp
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
@@ -296,22 +299,35 @@ export async function filterOpsAndEstimateGas({
 }): Promise<FilterOpsResult> {
     const { utilityWalletAddress: beneficiary } = config
     const { userOps, entryPoint } = userOpBundle
+    const timingCtx = {
+        entryPoint,
+        bundleSize: userOps.length,
+        submissionAttempts: userOpBundle.submissionAttempts
+    }
 
     try {
         // Create promises for parallel execution
-        const filterOpsPromise = getFilterOpsResult({
-            userOpBundle,
-            config,
-            networkBaseFee,
-            beneficiary
-        })
+        const filterOpsPromise = timed(logger, "filterOps", timingCtx, () =>
+            getFilterOpsResult({
+                userOpBundle,
+                config,
+                networkBaseFee,
+                beneficiary
+            })
+        )
 
         // Start chain-specific overhead calculation in parallel
-        const chainSpecificOverheadPromise = getChainSpecificOverhead({
-            config,
-            entryPoint,
-            userOps: userOps.map(({ userOp }) => userOp)
-        })
+        const chainSpecificOverheadPromise = timed(
+            logger,
+            "chainSpecificOverhead",
+            timingCtx,
+            () =>
+                getChainSpecificOverhead({
+                    config,
+                    entryPoint,
+                    userOps: userOps.map(({ userOp }) => userOp)
+                })
+        )
 
         const results = await Promise.all([
             filterOpsPromise,
@@ -395,12 +411,40 @@ export async function filterOpsAndEstimateGas({
             filterOpsResult.gasUsed + 21_000n + offChainOverhead.gasUsed
 
         // Find gasLimit needed for this bundle
-        const bundleGasLimit = await getBundleGasLimit({
-            config,
-            userOpBundle: userOpsToBundle,
-            entryPoint,
-            executorAddress: beneficiary
-        })
+        const bundleGasLimit = await timed(
+            logger,
+            "getBundleGasLimit",
+            timingCtx,
+            () =>
+                getBundleGasLimit({
+                    config,
+                    userOpBundle: userOpsToBundle,
+                    entryPoint,
+                    executorAddress: beneficiary
+                })
+        )
+
+        const maxPossibleRefund = userOpsToBundle.reduce(
+            (acc, { userOp }) => acc + getRequiredPrefund(userOp),
+            0n
+        )
+
+        if (filterOpsResult.balanceChange > maxPossibleRefund) {
+            // The simulated beneficiary gain exceeds anything the EntryPoint
+            // could refund, so the bundle sends it native value directly.
+            // Pricing off that would overbid; log it, since it also means a
+            // sender is moving funds to the beneficiary wallet.
+            logger.warn(
+                {
+                    balanceChange: filterOpsResult.balanceChange.toString(),
+                    maxPossibleRefund: maxPossibleRefund.toString(),
+                    userOpHashes: userOpsToBundle.map(
+                        ({ userOpHash }) => userOpHash
+                    )
+                },
+                "simulated beneficiary balance change exceeds max possible refund, clamping"
+            )
+        }
 
         return {
             status: "success",
@@ -408,7 +452,10 @@ export async function filterOpsAndEstimateGas({
             rejectedUserOps,
             bundleGasUsed,
             bundleGasLimit: bundleGasLimit + offChainOverhead.gasLimit,
-            totalBeneficiaryFees: filterOpsResult.balanceChange
+            totalBeneficiaryFees: minBigInt(
+                filterOpsResult.balanceChange,
+                maxPossibleRefund
+            )
         }
     } catch (err) {
         logger.error({ err }, "Encountered unhandled error during filterOps")
