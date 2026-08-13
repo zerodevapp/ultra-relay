@@ -9,7 +9,9 @@ import {
 } from "@alto/types"
 import {
     type Logger,
+    getRequiredPrefund,
     getSerializedHandleOpsTx,
+    minBigInt,
     scaleBigIntByPercent,
     timed,
     toPackedUserOp
@@ -422,13 +424,38 @@ export async function filterOpsAndEstimateGas({
                 })
         )
 
+        const maxPossibleRefund = userOpsToBundle.reduce(
+            (acc, { userOp }) => acc + getRequiredPrefund(userOp),
+            0n
+        )
+
+        if (filterOpsResult.balanceChange > maxPossibleRefund) {
+            // The simulated beneficiary gain exceeds anything the EntryPoint
+            // could refund, so the bundle sends it native value directly.
+            // Pricing off that would overbid; log it, since it also means a
+            // sender is moving funds to the beneficiary wallet.
+            logger.warn(
+                {
+                    balanceChange: filterOpsResult.balanceChange.toString(),
+                    maxPossibleRefund: maxPossibleRefund.toString(),
+                    userOpHashes: userOpsToBundle.map(
+                        ({ userOpHash }) => userOpHash
+                    )
+                },
+                "simulated beneficiary balance change exceeds max possible refund, clamping"
+            )
+        }
+
         return {
             status: "success",
             userOpsToBundle,
             rejectedUserOps,
             bundleGasUsed,
             bundleGasLimit: bundleGasLimit + offChainOverhead.gasLimit,
-            totalBeneficiaryFees: filterOpsResult.balanceChange
+            totalBeneficiaryFees: minBigInt(
+                filterOpsResult.balanceChange,
+                maxPossibleRefund
+            )
         }
     } catch (err) {
         logger.error({ err }, "Encountered unhandled error during filterOps")
