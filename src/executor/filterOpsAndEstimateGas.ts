@@ -9,7 +9,9 @@ import {
 } from "@alto/types"
 import {
     type Logger,
+    getRequiredPrefund,
     getSerializedHandleOpsTx,
+    minBigInt,
     scaleBigIntByPercent,
     timed,
     toPackedUserOp
@@ -422,13 +424,21 @@ export async function filterOpsAndEstimateGas({
                 })
         )
 
+        const maxPossibleRefund = userOpsToBundle.reduce(
+            (acc, { userOp }) => acc + getRequiredPrefund(userOp),
+            0n
+        )
+
         return {
             status: "success",
             userOpsToBundle,
             rejectedUserOps,
             bundleGasUsed,
             bundleGasLimit: bundleGasLimit + offChainOverhead.gasLimit,
-            totalBeneficiaryFees: filterOpsResult.balanceChange
+            totalBeneficiaryFees: minBigInt(
+                filterOpsResult.balanceChange,
+                maxPossibleRefund
+            )
         }
     } catch (err) {
         logger.error({ err }, "Encountered unhandled error during filterOps")
