@@ -1,0 +1,110 @@
+name: Build and Push to AWS ECR
+
+on:
+  pull_request:
+    types: [ closed ]
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'contracts/**'
+      - 'Dockerfile'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: offchain-labs/ultra-relay
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-push:
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ocl-2cpu-8ram-dind
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: Generate release notes
+        id: release-notes
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+
+          RELEASE_NOTES=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges | head -20)
+
+          if [ -z "$RELEASE_NOTES" ]; then
+            RELEASE_NOTES="- Initial release"
+          fi
+
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "## Changes" >> $GITHUB_OUTPUT
+          echo "$RELEASE_NOTES" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "## Docker Images" >> $GITHUB_OUTPUT
+          echo "- \`${REGISTRY}/${ECR_REPOSITORY}:latest\`" >> $GITHUB_OUTPUT
+          echo "- \`${REGISTRY}/${ECR_REPOSITORY}:main-${GITHUB_SHA}\`" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        env:
+          RELEASE_TAG: v${{ github.run_number }}
+          RELEASE_NOTES: ${{ steps.release-notes.outputs.notes }}
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.RELEASE_TAG,
+              name: `Release ${process.env.RELEASE_TAG}`,
+              body: process.env.RELEASE_NOTES,
+              draft: false,
+              prerelease: false,
+            });

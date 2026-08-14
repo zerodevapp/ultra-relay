@@ -1,0 +1,121 @@
+application:
+  applicationName: ultra-relay
+
+  labels:
+    app: ultra-relay
+    component: ultra-relay
+
+  serviceMonitor:
+    enabled: true
+    endpoints:
+      - interval: 15s
+        path: /metrics
+        port: http
+
+  rbac:
+    enabled: true
+    serviceAccount:
+      enabled: true
+      name: ultra-relay
+
+  deployment:
+    enabled: true
+    replicas: 2
+    reloadOnChange: true
+    configMapChecksum: true
+    serviceAccountName: ultra-relay
+    # image.repository (ECR registry, references the OCL AWS account) is set from
+    # zerodev-helm-charts' private $secrets values, not committed in this public repo.
+    # Dockerfile never sets a non-root USER, so the chart's default runAsNonRoot/readOnlyRootFilesystem would fail admission.
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+      runAsNonRoot: false
+    # No CLI flag reads these from a file path; the wrapper reads the mounted secret files into flag values itself.
+    command:
+      - /bin/sh
+      - -c
+    args:
+      - >-
+        exec pnpm start run
+        --config /configs/alto-config.json
+        --executor-private-keys "$(cat /secrets/executor-private-keys)"
+        --utility-private-key "$(cat /secrets/utility-private-key)"
+    env:
+      SENTRY_DSN:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: SENTRY_DSN
+      BETTER_STACK_TOKEN:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: BETTER_STACK_TOKEN
+      BETTER_STACK_ENDPOINT:
+        valueFrom:
+          secretKeyRef:
+            name: ultra-relay-secrets
+            key: BETTER_STACK_ENDPOINT
+    ports:
+      - containerPort: 3000
+        name: http
+        protocol: TCP
+    # Long grace period so in-flight mempool restoration (CONTEXT.md) finishes before SIGKILL.
+    terminationGracePeriodSeconds: 60
+    livenessProbe:
+      enabled: true
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 10
+    readinessProbe:
+      enabled: true
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    volumeMounts:
+      config:
+        mountPath: /configs/alto-config.json
+        subPath: alto-config.json
+      secrets:
+        mountPath: /secrets
+        readOnly: true
+    volumes:
+      config:
+        configMap:
+          name: ultra-relay-config
+      secrets:
+        secret:
+          secretName: ultra-relay-secrets
+          items:
+            - key: EXECUTOR_PRIVATE_KEYS
+              path: executor-private-keys
+            - key: UTILITY_PRIVATE_KEY
+              path: utility-private-key
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: ultra-relay
+
+  service:
+    enabled: true
+    ports:
+      - port: 3000
+        targetPort: 3000
+        protocol: TCP
+        name: http
+
+  configMap:
+    enabled: true
