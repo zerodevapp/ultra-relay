@@ -99,7 +99,9 @@ const SUCCESS_HEADER_ALLOWLIST = new Set([
     "content-type",
     "retry-after",
     "cf-ray",
-    "x-request-id"
+    "x-request-id",
+    "x-envoy-upstream-service-time",
+    "x-alchemy-trace-id"
 ])
 
 // Success lines are the hottest log path in the fleet: keep only the headers
