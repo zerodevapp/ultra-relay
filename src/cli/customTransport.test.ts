@@ -44,6 +44,8 @@ describe("pickSuccessHeaders", () => {
                 "cf-ray": "abc-BOM",
                 "x-request-id": "req-1",
                 "x-ratelimit-remaining": "99",
+                "x-envoy-upstream-service-time": "12",
+                "x-alchemy-trace-id": "trace-1",
                 "set-cookie": "__cf_bm=SECRET",
                 "alt-svc": "h3",
                 server: "cloudflare"
@@ -53,7 +55,9 @@ describe("pickSuccessHeaders", () => {
             "retry-after": "1",
             "cf-ray": "abc-BOM",
             "x-request-id": "req-1",
-            "x-ratelimit-remaining": "99"
+            "x-ratelimit-remaining": "99",
+            "x-envoy-upstream-service-time": "12",
+            "x-alchemy-trace-id": "trace-1"
         })
     })
 
