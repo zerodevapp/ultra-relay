@@ -57,6 +57,11 @@ export class ExecutorManager {
 
     private currentlyHandlingBlock = false
 
+    // When handleBlock last reconciled pending bundles, from either trigger
+    // (a new block, or the stale-block watchdog below). Drives the watchdog.
+    private lastReconcileAt = Date.now()
+    private staleBlockTimer: NodeJS.Timeout | undefined
+
     // Executor wallets rotated away from a stuck bundle whose cancel did not
     // confirm. Held out of the sender pool (markWalletProcessed deferred) until
     // their on-chain nonce advances past the stuck nonce, so no other instance
@@ -219,10 +224,62 @@ export class ExecutorManager {
                     includeTransactions: false,
                     emitMissed: false
                 })
+                this.startStaleBlockWatchdog()
             }
 
             this.logger.debug("started watching blocks")
         })
+    }
+
+    // handleBlock is the only path that resolves a submitted bundle: it reads
+    // receipts, applies resubmitStuckTimeout, and returns the executor wallet
+    // to the sender pool. watchBlocks only fires it on a NEW block, which
+    // deadlocks a chain that produces blocks only when it receives a
+    // transaction (Arbitrum Orbit and friends): the bundler stops submitting ->
+    // no blocks -> handleBlock never runs -> no wallet is ever freed -> every
+    // later bundle blocks forever in getWallet(). Nothing inside that loop can
+    // break it; in practice only an unrelated third-party transaction did.
+    //
+    // Receipt polling itself is correctly block-driven (a receipt cannot change
+    // without a new block, and each tick costs one lookup per pending bundle
+    // plus gas price reads), so the watcher stays and the interval below does
+    // no RPC work on a healthy chain. This only re-arms the *time*-based stuck
+    // check that the block gate otherwise makes unreachable — the same fix
+    // reconcileQuarantinedWallets already applies one layer down.
+    private startStaleBlockWatchdog(): void {
+        if (this.staleBlockTimer) {
+            return
+        }
+
+        this.lastReconcileAt = Date.now()
+        this.staleBlockTimer = setInterval(() => {
+            const msSinceReconcile = Date.now() - this.lastReconcileAt
+
+            if (msSinceReconcile < this.config.resubmitStuckTimeout) {
+                return
+            }
+
+            const pendingBundles = this.bundleManager.getPendingBundles().length
+            if (pendingBundles === 0) {
+                return
+            }
+
+            this.logger.warn(
+                {
+                    event: "staleBlockWatchdogFired",
+                    msSinceReconcile,
+                    pendingBundles
+                },
+                "no new block within resubmitStuckTimeout, reconciling pending bundles on a timer"
+            )
+
+            this.handleBlock().catch((err) =>
+                this.logger.error(
+                    { err },
+                    "stale block watchdog failed to reconcile pending bundles"
+                )
+            )
+        }, this.config.blockTime)
     }
 
     async getBaseFee(): Promise<bigint> {
@@ -479,6 +536,10 @@ export class ExecutorManager {
             this.unWatch()
             this.unWatch = undefined
         }
+        if (this.staleBlockTimer) {
+            clearInterval(this.staleBlockTimer)
+            this.staleBlockTimer = undefined
+        }
     }
 
     private async updateTransactionCostMetrics(
@@ -537,29 +598,40 @@ export class ExecutorManager {
             return
         }
 
+        // Held in try/finally rather than reset at the end of handleBlockInner:
+        // an unexpected throw in there (a store error in freeSubmittedBundle,
+        // say) would otherwise leave the flag set and make every later tick
+        // return early at the guard above — wedging bundle reconciliation for
+        // the lifetime of the process. Same guard shape as
+        // reconcileQuarantinedWallets.
+        this.currentlyHandlingBlock = true
+
         // startWatchingBlocks() registers its timers inside whichever flow
         // first started the watcher, so those timers inherit that flow's log
         // context on every future tick. Open a fresh context here so block
         // handling is never attributed to one arbitrary bundle.
-        await runWithLogContext({ flow: "block" }, () =>
-            timed(
-                this.logger,
-                "handleBlock",
-                { blockNumber: block ? Number(block.number) : undefined },
-                () => this.handleBlockInner(block)
+        try {
+            await runWithLogContext({ flow: "block" }, () =>
+                timed(
+                    this.logger,
+                    "handleBlock",
+                    { blockNumber: block ? Number(block.number) : undefined },
+                    () => this.handleBlockInner(block)
+                )
             )
-        )
+        } finally {
+            this.currentlyHandlingBlock = false
+        }
     }
 
     private async handleBlockInner(block?: Block) {
-        this.currentlyHandlingBlock = true
         const blockReceivedTimestamp = Date.now()
+        this.lastReconcileAt = blockReceivedTimestamp
 
         const pendingBundles = this.bundleManager.getPendingBundles()
 
         if (pendingBundles.length === 0) {
             this.stopWatchingBlocks()
-            this.currentlyHandlingBlock = false
             return
         }
 
@@ -623,8 +695,6 @@ export class ExecutorManager {
                 }
             })
         )
-
-        this.currentlyHandlingBlock = false
     }
 
     potentiallyResubmitBundle({
