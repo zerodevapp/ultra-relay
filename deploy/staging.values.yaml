@@ -1,0 +1,40 @@
+application:
+  deployment:
+    image:
+      tag: CHANGEME # bumped after build-push-ecr.yml publishes a tag for this commit
+
+  configMap:
+    files:
+      config:
+        # TODO(zerodev/sre): placeholder chain config, not live values.
+        alto-config.json: |
+          {
+            "network-name": "CHANGEME-staging",
+            "log-environment": "production",
+            "entrypoints": "CHANGEME",
+            "rpc-url": "CHANGEME",
+            "port": 3000,
+            "safe-mode": true,
+            "enable-horizontal-scaling": true,
+            "enable-redis-receipt-cache": true,
+            "redis-endpoint": "CHANGEME-staging-ultra-relay-elasticache-endpoint",
+            "redis-key-prefix": "alto-staging"
+          }
+
+  ingress:
+    enabled: true
+    ingressClassName: "alb"
+    annotations:
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: "ip"
+      alb.ingress.kubernetes.io/healthcheck-port: '3000'
+      alb.ingress.kubernetes.io/healthcheck-path: '/health'
+      alb.ingress.kubernetes.io/backend-protocol: HTTP
+    hosts:
+      - host: aa.staging.zerodev.app # CHANGEME - confirm with team
+        paths:
+          - path: /
+            pathType: Prefix
+            servicePort: http
