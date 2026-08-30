@@ -503,6 +503,13 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             ],
             default: "default"
         },
+        "ordering-policy": {
+            description:
+                "How the chain's sequencer orders transactions, which determines how the bundler bids. Defaults to a value derived from chain-type: 'fcfs' for arbitrum, 'priority-fee' otherwise.",
+            type: "string",
+            choices: ["priority-fee", "fcfs", "timeboost", "pga"],
+            require: false
+        },
         "legacy-transactions": {
             description:
                 "Send a legacy transactions instead of an EIP-1559 transactions",

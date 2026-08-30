@@ -174,6 +174,9 @@ export const compatibilityArgsSchema = z.object({
         "abstract",
         "etherlink"
     ]),
+    "ordering-policy": z
+        .enum(["priority-fee", "fcfs", "timeboost", "pga"])
+        .optional(),
     "legacy-transactions": z.boolean(),
     "api-version": z
         .string()

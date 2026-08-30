@@ -32,6 +32,10 @@ import {
 import type { SendTransactionErrorType } from "viem"
 import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
+import {
+    getBundleGasPrice as computeBundleGasPrice,
+    defaultOrderingPolicy
+} from "./orderingPolicy"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
     encodeHandleOpsCalldata,
@@ -117,87 +121,24 @@ export class Executor {
             resubmitMultiplierCeiling,
             legacyTransactions,
             chainType,
+            orderingPolicy,
             arbitrumGasBidMultiplier
         } = this.config
 
-        // Arbtirum's sequencer orders based on first come first serve.
-        // Because of this, maxFee/maxPriorityFee is ignored and the bundler *always* pays the network's baseFee.
-        // The bundler need to set a large enough gasBid to account for network baseFee fluctuations.
-        // GasBid = min(maxFee, base + priority)
-        if (chainType === "arbitrum") {
-            const scaledBaseFee = scaleBigIntByPercent(
-                networkBaseFee,
-                100n + 20n * BigInt(bundle.submissionAttempts)
-            )
-
-            return {
-                maxFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier,
-                maxPriorityFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier
+        return computeBundleGasPrice({
+            policy: orderingPolicy ?? defaultOrderingPolicy(chainType),
+            submissionAttempts: bundle.submissionAttempts,
+            networkGasPrice,
+            networkBaseFee,
+            totalBeneficiaryFees,
+            bundleGasUsed,
+            config: {
+                bundlerInitialCommission,
+                resubmitMultiplierCeiling,
+                arbitrumGasBidMultiplier,
+                legacyTransactions
             }
-        }
-
-        // Increase network gas price for resubmissions to improve tx inclusion
-        let [networkMaxFeePerGas, networkMaxPriorityFeePerGas] = [
-            networkGasPrice.maxFeePerGas,
-            networkGasPrice.maxPriorityFeePerGas
-        ]
-
-        if (bundle.submissionAttempts > 0) {
-            // Geometric: keeps retry/prev ratio at 1.20; linear `100+20·N`
-            // drops below the 1.10 mempool replacement floor at N=7.
-            let multiplier = 100n
-            for (let i = 0; i < bundle.submissionAttempts; i++) {
-                multiplier = (multiplier * 120n) / 100n
-            }
-
-            networkMaxFeePerGas = scaleBigIntByPercent(
-                networkMaxFeePerGas,
-                minBigInt(multiplier, resubmitMultiplierCeiling)
-            )
-            networkMaxPriorityFeePerGas = scaleBigIntByPercent(
-                networkMaxPriorityFeePerGas,
-                minBigInt(multiplier, resubmitMultiplierCeiling)
-            )
-        }
-
-        // The bundler should place a gasBid that is competetive with the network's gasPrice.
-        const breakEvenGasPrice = totalBeneficiaryFees / bundleGasUsed
-
-        // Calculate commission: start at bundlerInitialCommission%, then
-        // halve the commission with each resubmission attempt
-        const currentCommission =
-            bundlerInitialCommission / 2n ** BigInt(bundle.submissionAttempts)
-        const pricingPercent = 100n - currentCommission
-
-        const bundlingGasPrice = scaleBigIntByPercent(
-            breakEvenGasPrice,
-            pricingPercent
-        )
-
-        if (legacyTransactions) {
-            const gasPrice = maxBigInt(bundlingGasPrice, networkMaxFeePerGas)
-            return {
-                maxFeePerGas: gasPrice,
-                maxPriorityFeePerGas: gasPrice
-            }
-        }
-
-        const effectiveGasPrice = minBigInt(
-            networkMaxFeePerGas,
-            networkBaseFee + networkMaxPriorityFeePerGas
-        )
-
-        if (bundlingGasPrice > effectiveGasPrice) {
-            return {
-                maxFeePerGas: bundlingGasPrice,
-                maxPriorityFeePerGas: bundlingGasPrice
-            }
-        }
-
-        return {
-            maxFeePerGas: networkMaxFeePerGas,
-            maxPriorityFeePerGas: networkMaxPriorityFeePerGas
-        }
+        })
     }
 
     async sendHandleOpsTransaction({
