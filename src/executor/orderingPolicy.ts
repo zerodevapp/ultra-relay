@@ -89,13 +89,12 @@ const BEHAVIOUR: Record<OrderingPolicy, SequencerBehaviour> = {
 
 // Consumers, so that a declared-but-unread capability is not mistaken for a
 // behaviour that is already handled:
-//   feesAffectOrdering          - not yet consumed. Should gate the
-//                                 `preBundle.networkGasPrice` fetch (the value
-//                                 cannot change any outcome when false), and the
-//                                 `isGasPriceTooLow` resubmission trigger in
-//                                 `potentiallyResubmitBundle`, which currently
-//                                 compares an arrival-ordered bid against a
-//                                 network price that orders nothing.
+//   feesAffectOrdering          - read by `isBidNoLongerViable`, which decides
+//                                 the resubmission trigger in
+//                                 `potentiallyResubmitBundle`. Should also gate
+//                                 the `preBundle.networkGasPrice` fetch, since
+//                                 the value cannot change any outcome when
+//                                 false — not yet done.
 //   priorityFeeIsCharged        - implicit in the bid functions below.
 //   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
 //                                 resends the same nonce on every policy. Fixing
@@ -116,6 +115,37 @@ export function getSequencerBehaviour(
 // behaviour of pricing against the network gas price.
 export function defaultOrderingPolicy(chainType: string): OrderingPolicy {
     return chainType === "arbitrum" ? "fcfs" : "priority-fee"
+}
+
+// Has an already-submitted bundle's bid stopped being good enough to rely on?
+// A true result is a reason to re-price and resubmit; it is deliberately
+// separate from the stuck-timeout check, which is about time rather than price.
+export function isBidNoLongerViable({
+    policy,
+    bid,
+    networkGasPrice,
+    networkBaseFee
+}: {
+    policy: OrderingPolicy
+    bid: GasPriceParameters
+    networkGasPrice: GasPriceParameters
+    networkBaseFee: bigint
+}): boolean {
+    if (getSequencerBehaviour(policy).feesAffectOrdering) {
+        // Fees determine position, so falling behind the network price means
+        // losing it and the bundle should be re-priced to compete.
+        return (
+            bid.maxFeePerGas < networkGasPrice.maxFeePerGas ||
+            bid.maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
+        )
+    }
+
+    // Arrival-ordered: the network gas price has no bearing on inclusion, so
+    // comparing against it re-prices bundles that were never at risk. The one
+    // fee-related failure that matters here is the bid falling below the base
+    // fee, where the sequencer rejects the transaction outright rather than
+    // sequencing it late.
+    return bid.maxFeePerGas < networkBaseFee
 }
 
 type BidInputs = {

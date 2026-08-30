@@ -3,7 +3,8 @@ import {
     type OrderingPolicy,
     defaultOrderingPolicy,
     getBundleGasPrice,
-    getSequencerBehaviour
+    getSequencerBehaviour,
+    isBidNoLongerViable
 } from "./orderingPolicy"
 
 const GWEI = 1_000_000_000n
@@ -216,5 +217,64 @@ describe("priority-fee (public mempool)", () => {
             config: { ...config, legacyTransactions: true }
         })
         expect(result.maxFeePerGas).toBe(result.maxPriorityFeePerGas)
+    })
+})
+
+describe("isBidNoLongerViable", () => {
+    const viable = (policy: OrderingPolicy, o: Record<string, unknown> = {}) =>
+        isBidNoLongerViable({
+            policy,
+            bid: {
+                maxFeePerGas: BASE_FEE * 5n,
+                maxPriorityFeePerGas: BASE_FEE * 5n
+            },
+            networkGasPrice: {
+                maxFeePerGas: 100n * GWEI,
+                maxPriorityFeePerGas: 100n * GWEI
+            },
+            networkBaseFee: BASE_FEE,
+            ...o
+        })
+
+    test("arrival-ordered: a healthy bid is not re-priced just for lagging the network price", () => {
+        // The live bug this fixes. An fcfs bid of baseFee x 5 is nowhere near
+        // the network gas price, but the network price orders nothing, so the
+        // bundle was never at risk. Re-pricing it here would resubmit the same
+        // nonce and leave two copies competing.
+        expect(viable("fcfs")).toBe(false)
+        expect(viable("timeboost")).toBe(false)
+    })
+
+    test("arrival-ordered: a bid that no longer clears the base fee is re-priced", () => {
+        // The failure that does matter: below the base fee the sequencer
+        // rejects the transaction outright rather than sequencing it late.
+        expect(viable("fcfs", { networkBaseFee: BASE_FEE * 6n })).toBe(true)
+    })
+
+    test("mempool: falling behind the network price still triggers a re-price", () => {
+        expect(viable("priority-fee")).toBe(true)
+    })
+
+    test("mempool: a competitive bid is left alone", () => {
+        expect(
+            viable("priority-fee", {
+                networkGasPrice: {
+                    maxFeePerGas: 0n,
+                    maxPriorityFeePerGas: 0n
+                }
+            })
+        ).toBe(false)
+    })
+
+    test("pga: fees order again, so the network price is authoritative", () => {
+        expect(viable("pga")).toBe(true)
+        expect(
+            viable("pga", {
+                networkGasPrice: {
+                    maxFeePerGas: 0n,
+                    maxPriorityFeePerGas: 0n
+                }
+            })
+        ).toBe(false)
     })
 })

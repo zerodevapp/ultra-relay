@@ -23,6 +23,7 @@ import {
     formatEther
 } from "viem"
 import type { AltoConfig } from "../createConfig"
+import { defaultOrderingPolicy, isBidNoLongerViable } from "./orderingPolicy"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import type { SenderManager } from "./senderManager"
@@ -644,9 +645,14 @@ export class ExecutorManager {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
-        const isGasPriceTooLow =
-            maxFeePerGas < networkGasPrice.maxFeePerGas ||
-            maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
+        const isGasPriceTooLow = isBidNoLongerViable({
+            policy:
+                this.config.orderingPolicy ??
+                defaultOrderingPolicy(this.config.chainType),
+            bid: { maxFeePerGas, maxPriorityFeePerGas },
+            networkGasPrice,
+            networkBaseFee
+        })
 
         const isStuck =
             Date.now() - lastReplaced > this.config.resubmitStuckTimeout
