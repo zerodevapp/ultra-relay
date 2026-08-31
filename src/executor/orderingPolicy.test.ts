@@ -5,6 +5,7 @@ import {
     type OrderingPolicy,
     buildBundlePricing,
     getBundleGasPrice,
+    getSequencerBehaviour,
     isBidNoLongerViable,
     reportedNetworkGasPrice,
     resolveOrderingPolicy,
@@ -51,6 +52,7 @@ const bid = async (
         submissionAttempts?: number
         networkGasPrice?: GasPriceParameters
         networkBaseFee?: bigint
+        arbitrumGasBidMultiplier?: bigint
     } = {}
 ) =>
     getBundleGasPrice({
@@ -58,7 +60,12 @@ const bid = async (
         submissionAttempts: overrides.submissionAttempts ?? 0,
         totalBeneficiaryFees: 10n * GWEI,
         bundleGasUsed: 1_000_000n,
-        config
+        config: {
+            ...config,
+            arbitrumGasBidMultiplier:
+                overrides.arbitrumGasBidMultiplier ??
+                config.arbitrumGasBidMultiplier
+        }
     })
 
 // The sequencer's ranking key. Getting this wrong is silent: the transaction is
@@ -153,6 +160,53 @@ describe("sorting a policy into its family", () => {
                     })
                 ).toBe(false)
             }
+        }
+    )
+})
+
+const ALL_POLICIES = ["priority-fee", "fcfs", "timeboost", "pga"] as const
+
+describe("priorityFeeIsCharged", () => {
+    // arbitrumGasBidMultiplier is headroom against base-fee movement. Where the
+    // priority fee is not charged, bidding that headroom as tip is free. Where
+    // it is charged the same headroom is money, so it must not reach the tip —
+    // which is the trap the pga bid was written to avoid, stated as a rule that
+    // holds for every charged policy rather than a regression against one.
+    //
+    // Only the charged direction is asserted. That an uncharged policy's tip
+    // does scale with the multiplier is true of today's arrival bid but is a
+    // consequence of it, not a rule worth pinning.
+    const charged = ALL_POLICIES.filter(
+        (policy) => getSequencerBehaviour(policy).priorityFeeIsCharged
+    )
+
+    // Pins the scope of the check below, not the table for its own sake.
+    // Marking a policy as uncharged silently stops the invariant applying to
+    // it, which is how a bid that quietly pays a tip nobody chose would get
+    // through. Whether a chain really charges tips is a fact about that chain
+    // that no test can settle, so this is the tripwire for changing the claim.
+    test("the invariant covers every policy that charges a tip", () => {
+        expect(charged).toEqual(["priority-fee", "pga"])
+    })
+
+    test.each(charged)(
+        "%s: the multiplier is headroom and never reaches the tip",
+        async (policy) => {
+            const networkGasPrice = {
+                maxFeePerGas: 2n * GWEI,
+                maxPriorityFeePerGas: GWEI / 100n
+            }
+
+            const tips = []
+            for (const arbitrumGasBidMultiplier of [1n, 5n, 50n]) {
+                const result = await bid(policy, {
+                    networkGasPrice,
+                    arbitrumGasBidMultiplier
+                })
+                tips.push(String(effectiveTip(result, BASE_FEE)))
+            }
+
+            expect(new Set(tips).size).toBe(1)
         }
     )
 })

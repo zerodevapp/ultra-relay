@@ -125,13 +125,15 @@ export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 //                                 Changing this flag therefore breaks the
 //                                 build rather than changing behaviour
 //                                 silently.
-//   priorityFeeIsCharged        - no reader of any kind. It records why the
-//                                 arrival-ordered bid can afford a large
-//                                 base-fee multiplier and the PGA bid cannot,
-//                                 but nothing enforces that, and it happens to
-//                                 equal feesAffectOrdering on all four
-//                                 policies today, so the bids would behave
-//                                 identically if it were dropped.
+//   priorityFeeIsCharged        - no reader in production; read by the tests to
+//                                 decide which policies must keep
+//                                 arbitrumGasBidMultiplier out of their
+//                                 effective tip. Where the fee is not charged
+//                                 that headroom is free to bid; where it is,
+//                                 the same headroom is money. Marking a policy
+//                                 as charged therefore forces its bid to
+//                                 satisfy that, which is the direction that
+//                                 protects against paying a tip nobody chose.
 //   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
 //                                 resends the same nonce on every policy. Fixing
 //                                 that needs a strategy decision (wait out the
