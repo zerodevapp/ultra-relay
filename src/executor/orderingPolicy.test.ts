@@ -1,7 +1,9 @@
 import type { GasPriceParameters } from "@alto/types"
 import { describe, expect, test } from "vitest"
 import {
+    type ArrivalOrderedPolicy,
     type BundlePricing,
+    type FeeOrderedPolicy,
     type OrderingPolicy,
     defaultOrderingPolicy,
     getBundleGasPrice,
@@ -77,14 +79,28 @@ describe("skipping the network gas price fetch", () => {
         expect(needsNetworkGasPrice("priority-fee")).toBe(true)
     })
 
-    // `needsNetworkGasPrice` narrows the policy type, and the compiler takes
-    // that on trust — it cannot see inside the capability table. This is the
-    // one assertion holding the two together: if a policy's
-    // `feesAffectOrdering` were changed without moving it between the type
-    // families, the narrowing would be a lie and every guarantee below it
-    // would rest on nothing.
+    // The families are derived from the capability table, so they cannot drift
+    // from it. What they can do is derive to something useless — `never`, or a
+    // family with the wrong members — if the condition or the annotation on the
+    // table changes, and that would compile while silently voiding every
+    // narrowing below. Checked by tsc over this file, not at runtime.
+    test("the derived families are exactly the table's two halves", () => {
+        type Exact<A, B> = [A] extends [B]
+            ? [B] extends [A]
+                ? true
+                : false
+            : false
+        const feeOrdered: Exact<FeeOrderedPolicy, "priority-fee" | "pga"> = true
+        const arrival: Exact<ArrivalOrderedPolicy, "fcfs" | "timeboost"> = true
+
+        expect([feeOrdered, arrival]).toEqual([true, true])
+    })
+
+    // Derivation makes the families agree with the table; it does not make the
+    // predicate read the right column. Swapping in another boolean capability
+    // still compiles, and this is what catches it.
     test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
-        "%s: the narrowing agrees with the capability table",
+        "%s: the predicate reads feesAffectOrdering",
         (policy) => {
             expect(needsNetworkGasPrice(policy)).toBe(
                 getSequencerBehaviour(policy).feesAffectOrdering

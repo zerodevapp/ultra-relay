@@ -6,28 +6,20 @@ import { maxBigInt, minBigInt, scaleBigIntByPercent } from "@alto/utils"
 // policy without changing chain (Arbitrum One is moving from Timeboost to PGA),
 // and two chains on the same stack can order differently (Arbitrum One runs
 // Timeboost today while Orbit chains default to first-come-first-served).
-// The bid does not compete for position, so nothing prices against a network
-// gas price and none is fetched.
-export type ArrivalOrderedPolicy =
+export type OrderingPolicy =
+    // Public mempool. The bid determines inclusion order, and replacing a
+    // pending transaction requires clearing the node's replacement rule.
+    | "priority-fee"
     // Arrival order. Fees are ignored for ordering and the sender pays the base
     // fee regardless of what it bids.
     | "fcfs"
     // Arrival order, plus a 200ms delay applied to every transaction that does
     // not arrive through the express lane. Bids still do not affect ordering.
     | "timeboost"
-
-// The bid competes for position, so it is priced against a network gas price
-// and that price has to be fetched.
-export type FeeOrderedPolicy =
-    // Public mempool. The bid determines inclusion order, and replacing a
-    // pending transaction requires clearing the node's replacement rule.
-    | "priority-fee"
     // Priority gas auction. The sequencer ranks a round's transactions by
     // effective tip, and that tip is charged. Arbitrum One, once ArbOS
     // `collectTips` is enabled.
     | "pga"
-
-export type OrderingPolicy = ArrivalOrderedPolicy | FeeOrderedPolicy
 
 // How the sequencer ranks transactions.
 export type OrderingCapabilities = {
@@ -68,7 +60,12 @@ export type SequencerBehaviour = OrderingCapabilities &
     ReplacementCapabilities &
     SubmissionCapabilities
 
-const BEHAVIOUR: Record<OrderingPolicy, SequencerBehaviour> = {
+// `satisfies` rather than a `: Record<...>` annotation, which would widen every
+// flag to `boolean` and leave the policy families below deriving to `never`.
+// `satisfies` checks the table just as the annotation did while keeping each
+// flag's literal type. `as const` adds nothing to that — it is here only to
+// make the table readonly.
+const BEHAVIOUR = {
     "priority-fee": {
         feesAffectOrdering: true,
         priorityFeeIsCharged: true,
@@ -93,7 +90,26 @@ const BEHAVIOUR: Record<OrderingPolicy, SequencerBehaviour> = {
         supportsReplaceByFee: false,
         submitBlocksUntilSequenced: true
     }
-}
+} as const satisfies Record<OrderingPolicy, SequencerBehaviour>
+
+// The two policy families, read off the table rather than declared next to it.
+// Declaring them separately would state `feesAffectOrdering` twice and let a
+// policy be fee-ordered in one place and arrival-ordered in the other; derived,
+// that is not expressible. Adding a policy to the table puts it in a family
+// automatically.
+type PoliciesWhereFeesOrder<Ordered extends boolean> = {
+    [P in OrderingPolicy]: (typeof BEHAVIOUR)[P]["feesAffectOrdering"] extends Ordered
+        ? P
+        : never
+}[OrderingPolicy]
+
+// The bid competes for position, so it is priced against a network gas price
+// and that price has to be fetched.
+export type FeeOrderedPolicy = PoliciesWhereFeesOrder<true>
+
+// The bid does not compete for position, so nothing prices against a network
+// gas price and none is fetched.
+export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 
 // Consumers, so that a declared-but-unread capability is not mistaken for a
 // behaviour that is already handled:
@@ -152,15 +168,18 @@ export function needsNetworkGasPrice(
 // when the policy prices against one, so "fees order but no price was fetched"
 // cannot be constructed — no optional to thread, no guard to forget, and no
 // runtime check that the fetch decision and the bid agree.
+type ArrivalOrderedPricing = {
+    policy: ArrivalOrderedPolicy
+    networkBaseFee: bigint
+}
+
 type FeeOrderedPricing = {
     policy: FeeOrderedPolicy
     networkBaseFee: bigint
     networkGasPrice: GasPriceParameters
 }
 
-export type BundlePricing =
-    | { policy: ArrivalOrderedPolicy; networkBaseFee: bigint }
-    | FeeOrderedPricing
+export type BundlePricing = ArrivalOrderedPricing | FeeOrderedPricing
 
 // The network gas price, where one was fetched. Only for reporting: no pricing
 // decision reads this, since each one narrows on the policy instead.
@@ -248,7 +267,7 @@ export function getBundleGasPrice(inputs: BidInputs): GasPriceParameters {
 // pays the base fee either way.
 function arrivalOrderedBid(
     { submissionAttempts, config }: BidInputs,
-    { networkBaseFee }: { networkBaseFee: bigint }
+    { networkBaseFee }: ArrivalOrderedPricing
 ): GasPriceParameters {
     const scaledBaseFee = scaleBigIntByPercent(
         networkBaseFee,
