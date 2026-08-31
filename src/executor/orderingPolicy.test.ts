@@ -52,7 +52,7 @@ const bid = async (
         submissionAttempts?: number
         networkGasPrice?: GasPriceParameters
         networkBaseFee?: bigint
-        arbitrumGasBidMultiplier?: bigint
+        config?: Partial<typeof config>
     } = {}
 ) =>
     getBundleGasPrice({
@@ -60,12 +60,7 @@ const bid = async (
         submissionAttempts: overrides.submissionAttempts ?? 0,
         totalBeneficiaryFees: 10n * GWEI,
         bundleGasUsed: 1_000_000n,
-        config: {
-            ...config,
-            arbitrumGasBidMultiplier:
-                overrides.arbitrumGasBidMultiplier ??
-                config.arbitrumGasBidMultiplier
-        }
+        config: { ...config, ...overrides.config }
     })
 
 // The sequencer's ranking key. Getting this wrong is silent: the transaction is
@@ -201,7 +196,7 @@ describe("priorityFeeIsCharged", () => {
             for (const arbitrumGasBidMultiplier of [1n, 5n, 50n]) {
                 const result = await bid(policy, {
                     networkGasPrice,
-                    arbitrumGasBidMultiplier
+                    config: { arbitrumGasBidMultiplier }
                 })
                 tips.push(String(effectiveTip(result, BASE_FEE)))
             }
@@ -339,6 +334,65 @@ describe("priority-fee (public mempool)", () => {
             expect(next * 100n).toBeGreaterThanOrEqual(previous * 110n)
             previous = next
         }
+    })
+
+    // The bundler takes a cut of the beneficiary fees, and gives that cut up as
+    // a bundle keeps failing to land — by the time the commission has decayed
+    // to nothing it is bidding the full break-even price, keeping none of the
+    // margin. Priced against a network so cheap that the break-even branch is
+    // the one that wins.
+    test("commission halves per attempt, raising the bid toward break-even", async () => {
+        const breakEven = (10n * GWEI) / 1_000_000n
+        const cheapNetwork = {
+            maxFeePerGas: 1n,
+            maxPriorityFeePerGas: 1n
+        }
+
+        const bids: bigint[] = []
+        for (const submissionAttempts of [0, 1, 2, 3, 4]) {
+            const result = await bid("priority-fee", {
+                networkGasPrice: cheapNetwork,
+                networkBaseFee: 1n,
+                submissionAttempts
+            })
+            bids.push(result.maxFeePerGas)
+        }
+
+        expect(bids[0]).toBeLessThan(breakEven)
+        for (let i = 1; i < bids.length; i++) {
+            expect(bids[i]).toBeGreaterThan(bids[i - 1])
+        }
+        expect(bids[bids.length - 1]).toBe(breakEven)
+    })
+
+    // Without the ceiling the geometric bump compounds without bound, so a
+    // bundle that keeps missing walks its bid up indefinitely.
+    test("the resubmission bump stops compounding at the ceiling", async () => {
+        const networkGasPrice = {
+            maxFeePerGas: 100n * GWEI,
+            maxPriorityFeePerGas: 100n * GWEI
+        }
+        const capped = (submissionAttempts: number) =>
+            bid("priority-fee", {
+                networkGasPrice,
+                submissionAttempts,
+                config: { resubmitMultiplierCeiling: 150n }
+            })
+
+        // 120% at one attempt is under the cap; by four the geometric series
+        // has passed it, and every attempt beyond pins to the same bid. Both
+        // fields are capped: leaving the tip uncapped would advertise a bid the
+        // fee cap can no longer back.
+        expect(await capped(1)).toEqual({
+            maxFeePerGas: 120n * GWEI,
+            maxPriorityFeePerGas: 120n * GWEI
+        })
+        const atCap = {
+            maxFeePerGas: 150n * GWEI,
+            maxPriorityFeePerGas: 150n * GWEI
+        }
+        expect(await capped(4)).toEqual(atCap)
+        expect(await capped(9)).toEqual(atCap)
     })
 
     test("legacy chains collapse to a single gas price", async () => {
