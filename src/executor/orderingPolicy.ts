@@ -152,18 +152,38 @@ export function resolveOrderingPolicy(config: {
     return config.orderingPolicy ?? defaultOrderingPolicy(config.chainType)
 }
 
-// Does this policy's bid compete for position? The families are a type-level
-// split, so this is how a policy read from config at runtime is sorted into
-// one: narrowing here is what lets the matching `BundlePricing` be built
-// without a cast.
+// How a policy read from config becomes the pricing that matches it. The
+// exhaustive switch is the only place the families are branched on, and the
+// compiler checks it both ways: a policy left out fails the exhaustiveness
+// check, and one in the wrong arm fails to match that arm's pricing shape. So
+// moving a policy between families in the table above is caught here rather
+// than trusted — no type predicate, and nothing asserting what the compiler
+// could prove.
 //
-// What follows from the answer is the caller's to decide — for both callers
-// today it is whether to spend a round trip on the network gas price, but that
-// is a consequence rather than the question.
-export function isFeeOrdered(
-    policy: OrderingPolicy
-): policy is FeeOrderedPolicy {
-    return getSequencerBehaviour(policy).feesAffectOrdering
+// The fetchers are lazy because the fetch decision and the family split are the
+// same question. `gasPrice` is only called from the fee-ordered arm, which is
+// what makes "never spend a round trip where fees do not order" structural
+// instead of merely tested.
+export async function buildBundlePricing(
+    policy: OrderingPolicy,
+    fetch: {
+        baseFee: () => bigint | Promise<bigint>
+        gasPrice: () => GasPriceParameters | Promise<GasPriceParameters>
+    }
+): Promise<BundlePricing> {
+    switch (policy) {
+        case "fcfs":
+        case "timeboost":
+            return { policy, networkBaseFee: await fetch.baseFee() }
+        case "pga":
+        case "priority-fee": {
+            const [networkBaseFee, networkGasPrice] = await Promise.all([
+                fetch.baseFee(),
+                fetch.gasPrice()
+            ])
+            return { policy, networkBaseFee, networkGasPrice }
+        }
+    }
 }
 
 // What a bundle is priced against. The network gas price is present exactly
@@ -194,16 +214,13 @@ export function reportedNetworkGasPrice(
 // Pricing that can never judge a bid stale, for when the fetch fails. Zeros
 // leave `isBidNoLongerViable` false and the bundle to the stuck-timeout check,
 // which is how a failed fetch has always been treated.
-export function unpricedFallback(policy: OrderingPolicy): BundlePricing {
-    if (isFeeOrdered(policy)) {
-        return {
-            policy,
-            networkBaseFee: 0n,
-            networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }
-        }
-    }
-
-    return { policy, networkBaseFee: 0n }
+export function unpricedFallback(
+    policy: OrderingPolicy
+): Promise<BundlePricing> {
+    return buildBundlePricing(policy, {
+        baseFee: () => 0n,
+        gasPrice: () => ({ maxFeePerGas: 0n, maxPriorityFeePerGas: 0n })
+    })
 }
 
 // Has an already-submitted bundle's bid stopped being good enough to rely on?

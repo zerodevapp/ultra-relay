@@ -26,9 +26,9 @@ import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import {
     type BundlePricing,
+    buildBundlePricing,
     getSequencerBehaviour,
     isBidNoLongerViable,
-    isFeeOrdered,
     resolveOrderingPolicy,
     unpricedFallback
 } from "./orderingPolicy"
@@ -279,34 +279,26 @@ export class ExecutorManager {
         return await this.gasPriceManager.getBaseFee()
     }
 
-    // The one place that decides what a bundle is priced against. Where fees do
-    // not order, the network gas price is not fetched at all — nothing reads it,
-    // and it is the slowest call on the bundling path. The returned value
-    // carries which case it is, so no caller re-derives the decision and no
-    // absent price is passed around.
+    // Supplies the timed fetchers; `buildBundlePricing` decides which of them
+    // to call. Where fees do not order the gas price is never fetched — it is
+    // the slowest call on the bundling path and nothing downstream reads it.
     //
     // Throws if a fetch fails; both callers already handle that, one by
     // recovering the userOps and one by falling back to unpriced.
-    private async resolveBundlePricing(
+    private resolveBundlePricing(
         step: string,
         ctx: Record<string, unknown>
     ): Promise<BundlePricing> {
-        const policy = resolveOrderingPolicy(this.config)
-        const baseFee = () =>
-            timed(this.logger, `${step}.baseFee`, ctx, () => this.getBaseFee())
-
-        if (!isFeeOrdered(policy)) {
-            return { policy, networkBaseFee: await baseFee() }
-        }
-
-        const [networkGasPrice, networkBaseFee] = await Promise.all([
-            timed(this.logger, `${step}.networkGasPrice`, ctx, () =>
-                this.gasPriceManager.tryGetNetworkGasPrice()
-            ),
-            baseFee()
-        ])
-
-        return { policy, networkBaseFee, networkGasPrice }
+        return buildBundlePricing(resolveOrderingPolicy(this.config), {
+            baseFee: () =>
+                timed(this.logger, `${step}.baseFee`, ctx, () =>
+                    this.getBaseFee()
+                ),
+            gasPrice: () =>
+                timed(this.logger, `${step}.networkGasPrice`, ctx, () =>
+                    this.gasPriceManager.tryGetNetworkGasPrice()
+                )
+        })
     }
 
     async sendBundleToExecutor(

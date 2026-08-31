@@ -1,15 +1,15 @@
 import type { GasPriceParameters } from "@alto/types"
-import { describe, expect, test } from "vitest"
+import { describe, expect, test, vi } from "vitest"
 import {
     type ArrivalOrderedPolicy,
     type BundlePricing,
     type FeeOrderedPolicy,
     type OrderingPolicy,
+    buildBundlePricing,
     defaultOrderingPolicy,
     getBundleGasPrice,
     getSequencerBehaviour,
     isBidNoLongerViable,
-    isFeeOrdered,
     reportedNetworkGasPrice,
     resolveOrderingPolicy,
     unpricedFallback
@@ -41,9 +41,9 @@ const pricingFor = (
         networkBaseFee?: bigint
     } = {}
 ): BundlePricing =>
-    isFeeOrdered(policy)
-        ? { policy, networkBaseFee, networkGasPrice }
-        : { policy, networkBaseFee }
+    policy === "fcfs" || policy === "timeboost"
+        ? { policy, networkBaseFee }
+        : { policy, networkBaseFee, networkGasPrice }
 
 const bid = (
     policy: OrderingPolicy,
@@ -72,12 +72,47 @@ const effectiveTip = (
 }
 
 describe("sorting a policy into its family", () => {
-    test("only fee-ordered policies bid for position", () => {
-        expect(isFeeOrdered("fcfs")).toBe(false)
-        expect(isFeeOrdered("timeboost")).toBe(false)
-        expect(isFeeOrdered("pga")).toBe(true)
-        expect(isFeeOrdered("priority-fee")).toBe(true)
+    const fetchers = () => ({
+        baseFee: vi.fn(() => 7n),
+        gasPrice: vi.fn(() => ({
+            maxFeePerGas: 2n * GWEI,
+            maxPriorityFeePerGas: GWEI
+        }))
     })
+
+    // The guarantee the switch buys: the gas price fetcher is not merely
+    // ignored for an arrival-ordered policy, it is never called. That is what
+    // makes the saved round trip structural rather than a caller's discipline.
+    test.each(["fcfs", "timeboost"] as const)(
+        "%s never calls the gas price fetcher",
+        async (policy) => {
+            const fetch = fetchers()
+
+            await expect(buildBundlePricing(policy, fetch)).resolves.toEqual({
+                policy,
+                networkBaseFee: 7n
+            })
+            expect(fetch.gasPrice).not.toHaveBeenCalled()
+            expect(fetch.baseFee).toHaveBeenCalledTimes(1)
+        }
+    )
+
+    test.each(["pga", "priority-fee"] as const)(
+        "%s fetches both and carries the price",
+        async (policy) => {
+            const fetch = fetchers()
+
+            await expect(buildBundlePricing(policy, fetch)).resolves.toEqual({
+                policy,
+                networkBaseFee: 7n,
+                networkGasPrice: {
+                    maxFeePerGas: 2n * GWEI,
+                    maxPriorityFeePerGas: GWEI
+                }
+            })
+            expect(fetch.gasPrice).toHaveBeenCalledTimes(1)
+        }
+    )
 
     // The families are derived from the capability table, so they cannot drift
     // from it. What they can do is derive to something useless — `never`, or a
@@ -95,18 +130,6 @@ describe("sorting a policy into its family", () => {
 
         expect([feeOrdered, arrival]).toEqual([true, true])
     })
-
-    // Derivation makes the families agree with the table; it does not make the
-    // predicate read the right column. Swapping in another boolean capability
-    // still compiles, and this is what catches it.
-    test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
-        "%s: the predicate reads feesAffectOrdering",
-        (policy) => {
-            expect(isFeeOrdered(policy)).toBe(
-                getSequencerBehaviour(policy).feesAffectOrdering
-            )
-        }
-    )
 
     test.each(["fcfs", "timeboost"] as const)(
         "%s carries no network gas price to report",
@@ -130,7 +153,7 @@ describe("sorting a policy into its family", () => {
     // re-priced against a number we never actually read.
     test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
         "%s: an unpriced fallback never judges a bid stale",
-        (policy) => {
+        async (policy) => {
             // Zero, not merely small: the fallback must be unable to judge
             // any bid stale, and only a zero base fee makes that true for
             // every bid rather than for comfortably-priced ones.
@@ -140,7 +163,7 @@ describe("sorting a policy into its family", () => {
             ]) {
                 expect(
                     isBidNoLongerViable({
-                        pricing: unpricedFallback(policy),
+                        pricing: await unpricedFallback(policy),
                         bid
                     })
                 ).toBe(false)
