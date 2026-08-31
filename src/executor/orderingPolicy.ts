@@ -113,16 +113,25 @@ export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 
 // Consumers, so that a declared-but-unread capability is not mistaken for a
 // behaviour that is already handled:
-//   feesAffectOrdering          - splits the policies into the two families
-//                                 above at the type level, and is read at
-//                                 runtime by `isFeeOrdered` to sort a config
-//                                 value into one. Everything downstream —
-//                                 which bid is built, whether a gas price is
-//                                 fetched, what `isBidNoLongerViable` compares
-//                                 against — follows from the resulting
-//                                 `BundlePricing` shape rather than reading
-//                                 this flag again.
-//   priorityFeeIsCharged        - implicit in the bid functions below.
+//   feesAffectOrdering          - no runtime reader. It classifies the policies
+//                                 into the two families above at the type
+//                                 level, and the only branch on those families
+//                                 is the switch in `buildBundlePricing`, which
+//                                 the compiler checks against them. Everything
+//                                 downstream — which bid is built, whether a
+//                                 gas price is fetched, what the viability
+//                                 check compares against — follows from the
+//                                 `BundlePricing` shape that switch returns.
+//                                 Changing this flag therefore breaks the
+//                                 build rather than changing behaviour
+//                                 silently.
+//   priorityFeeIsCharged        - no reader of any kind. It records why the
+//                                 arrival-ordered bid can afford a large
+//                                 base-fee multiplier and the PGA bid cannot,
+//                                 but nothing enforces that, and it happens to
+//                                 equal feesAffectOrdering on all four
+//                                 policies today, so the bids would behave
+//                                 identically if it were dropped.
 //   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
 //                                 resends the same nonce on every policy. Fixing
 //                                 that needs a strategy decision (wait out the
