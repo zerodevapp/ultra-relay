@@ -22,7 +22,7 @@ export type OrderingPolicy =
     | "pga"
 
 // How the sequencer ranks transactions.
-export type OrderingCapabilities = {
+type OrderingCapabilities = {
     // Does the bid influence inclusion order? When false there is no reason to
     // fetch a network gas price at all — the value cannot change any outcome —
     // and "our bid is below the network price" is not a reason to resubmit.
@@ -33,7 +33,7 @@ export type OrderingCapabilities = {
 }
 
 // What happens to a transaction that is already pending.
-export type ReplacementCapabilities = {
+type ReplacementCapabilities = {
     // Can a pending transaction be replaced by resubmitting the same nonce with
     // a higher bid? False on every Arbitrum-stack policy: the sequencer queue is
     // not a mempool and has no replace-by-fee. Resubmitting a nonce there leaves
@@ -43,7 +43,7 @@ export type ReplacementCapabilities = {
 }
 
 // What `eth_sendRawTransaction` means on this chain.
-export type SubmissionCapabilities = {
+type SubmissionCapabilities = {
     // Does the submit call return only once the transaction has been sequenced
     // into a block? True across the Arbitrum stack, false on a standard mempool
     // chain where submission returns on acceptance. When true the receipt exists
@@ -105,11 +105,11 @@ type PoliciesWhereFeesOrder<Ordered extends boolean> = {
 
 // The bid competes for position, so it is priced against a network gas price
 // and that price has to be fetched.
-export type FeeOrderedPolicy = PoliciesWhereFeesOrder<true>
+type FeeOrderedPolicy = PoliciesWhereFeesOrder<true>
 
 // The bid does not compete for position, so nothing prices against a network
 // gas price and none is fetched.
-export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
+type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 
 // Consumers, so that a declared-but-unread capability is not mistaken for a
 // behaviour that is already handled:
@@ -154,7 +154,7 @@ export function getSequencerBehaviour(
 
 // Chains whose ordering policy we know. Everything else keeps the historical
 // behaviour of pricing against the network gas price.
-export function defaultOrderingPolicy(chainType: string): OrderingPolicy {
+function defaultOrderingPolicy(chainType: string): OrderingPolicy {
     return chainType === "arbitrum" ? "fcfs" : "priority-fee"
 }
 

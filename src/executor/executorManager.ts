@@ -486,6 +486,19 @@ export class ExecutorManager {
                     bundleSubmitted = true
                     this.startWatchingBlocks()
 
+                    await this.mempool.markUserOpsAsSubmitted({
+                        userOps: submittedBundle.bundle.userOps,
+                        entryPoint: submittedBundle.bundle.entryPoint,
+                        transactionHash: submittedBundle.transactionHash
+                    })
+
+                    // Must follow markUserOpsAsSubmitted. The check can find
+                    // the bundle included and run processIncludedBundle, which
+                    // removes the userOps from the submitted store and marks
+                    // them included; if that landed first, the marking above
+                    // would then re-add a mined userOp to the submitted store
+                    // and regress its status back to submitted, leaving a
+                    // record nothing is tracking any more.
                     if (this.earlyInclusionChecksEnabled()) {
                         this.runEarlyInclusionChecks(submittedBundle).catch(
                             (err) =>
@@ -495,12 +508,6 @@ export class ExecutorManager {
                                 )
                         )
                     }
-
-                    await this.mempool.markUserOpsAsSubmitted({
-                        userOps: submittedBundle.bundle.userOps,
-                        entryPoint: submittedBundle.bundle.entryPoint,
-                        transactionHash: submittedBundle.transactionHash
-                    })
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
                     this.metrics.bundlesSubmitted
@@ -647,9 +654,11 @@ export class ExecutorManager {
         // Only the not_found branch prices anything — `included` needs the
         // receipt and a timestamp, `reverted` needs the receipt and the block.
         // Fetching gas price and base fee up front made every tick pay three
-        // extra RPC calls, and wait on the slowest of them (the gas price, at
-        // ~23ms against ~7ms for a receipt) before it could act on any status.
-        // Resolve them only once something actually needs re-pricing.
+        // extra RPC calls and wait on the slowest before it could act on any
+        // status. The gas price is that slowest call: it bypasses the cache and
+        // reaches viem's estimateFeesPerGas, which awaits getBlock and only then
+        // issues eth_maxPriorityFeePerGas, so it costs two serial round trips.
+        // Resolve it only once something actually needs re-pricing.
         const needsPricing =
             repriceStuckBundles &&
             bundleStatuses.some(({ status }) => status === "not_found")
