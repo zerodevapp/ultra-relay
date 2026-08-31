@@ -6,20 +6,26 @@ import { maxBigInt, minBigInt, scaleBigIntByPercent } from "@alto/utils"
 // policy without changing chain (Arbitrum One is moving from Timeboost to PGA),
 // and two chains on the same stack can order differently (Arbitrum One runs
 // Timeboost today while Orbit chains default to first-come-first-served).
-export type OrderingPolicy =
+// The policies, listed once. The CLI's validation enum and its yargs choices
+// are built from this array, so the four strings are not kept in step by hand
+// across three files.
+export const ORDERING_POLICIES = [
     // Public mempool. The bid determines inclusion order, and replacing a
     // pending transaction requires clearing the node's replacement rule.
-    | "priority-fee"
+    "priority-fee",
     // Arrival order. Fees are ignored for ordering and the sender pays the base
     // fee regardless of what it bids.
-    | "fcfs"
+    "fcfs",
     // Arrival order, plus a 200ms delay applied to every transaction that does
     // not arrive through the express lane. Bids still do not affect ordering.
-    | "timeboost"
+    "timeboost",
     // Priority gas auction. The sequencer ranks a round's transactions by
     // effective tip, and that tip is charged. Arbitrum One, once ArbOS
     // `collectTips` is enabled.
-    | "pga"
+    "pga"
+] as const
+
+export type OrderingPolicy = (typeof ORDERING_POLICIES)[number]
 
 // How the sequencer ranks transactions.
 type OrderingCapabilities = {

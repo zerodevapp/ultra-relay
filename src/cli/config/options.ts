@@ -1,3 +1,4 @@
+import { ORDERING_POLICIES } from "@alto/executor"
 import { bundlerHandler } from "../handler"
 import type { CliCommand, CliCommandOptions } from "../util"
 import type {
@@ -520,7 +521,7 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             description:
                 "How the chain's sequencer orders transactions, which determines how the bundler bids. Defaults to a value derived from chain-type: 'fcfs' for arbitrum, 'priority-fee' otherwise.",
             type: "string",
-            choices: ["priority-fee", "fcfs", "timeboost", "pga"],
+            choices: [...ORDERING_POLICIES],
             require: false
         },
         "legacy-transactions": {

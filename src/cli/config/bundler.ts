@@ -1,3 +1,4 @@
+import { ORDERING_POLICIES } from "@alto/executor"
 import {
     type ApiVersion,
     addressSchema,
@@ -176,9 +177,7 @@ export const compatibilityArgsSchema = z.object({
         "abstract",
         "etherlink"
     ]),
-    "ordering-policy": z
-        .enum(["priority-fee", "fcfs", "timeboost", "pga"])
-        .optional(),
+    "ordering-policy": z.enum(ORDERING_POLICIES).optional(),
     "legacy-transactions": z.boolean(),
     "api-version": z
         .string()

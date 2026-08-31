@@ -545,3 +545,87 @@ describe("cancelBundle re-broadcasts only where it could win", () => {
         }
     })
 })
+
+// The early check reuses handleBlock, so it can find the bundle already
+// included and run processIncludedBundle — which removes the userOps from the
+// submitted store and marks them included. Ordering it before
+// markUserOpsAsSubmitted therefore lets a mined userOp be re-added to the
+// submitted store with its status regressed, and nothing tracks it afterwards.
+// Pinned as call order because that is the whole of the fix.
+describe("early inclusion checks start only after the submitted marking", () => {
+    const runSubmit = async ({ enabled }: { enabled: boolean }) => {
+        const order: string[] = []
+        const transactionHash = "0xtx"
+
+        const manager = Object.create(ExecutorManager.prototype)
+        Object.assign(manager, {
+            config: { chainType: "arbitrum", publicClient: {} },
+            logger: {
+                info: vi.fn(),
+                warn: vi.fn(),
+                error: vi.fn(),
+                debug: vi.fn()
+            },
+            senderManager: {
+                getWallet: vi.fn().mockResolvedValue({ address: "0xwallet" }),
+                markWalletProcessed: vi.fn().mockResolvedValue(undefined)
+            },
+            bundleManager: { trackBundle: vi.fn() },
+            mempool: {
+                markUserOpsAsSubmitted: vi.fn(async () => {
+                    order.push("markSubmitted")
+                }),
+                dropUserOps: vi.fn().mockResolvedValue(undefined),
+                resubmitUserOps: vi.fn().mockResolvedValue(undefined)
+            },
+            metrics: {
+                bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) },
+                userOpsSubmitted: { labels: () => ({ inc: vi.fn() }) }
+            },
+            executor: {
+                bundle: vi.fn().mockResolvedValue({
+                    success: true,
+                    userOpsBundled: [
+                        { userOpHash: "0xop", submissionAttempts: 0 }
+                    ],
+                    rejectedUserOps: [],
+                    transactionRequest: { nonce: 1 },
+                    transactionHash
+                })
+            },
+            resolveBundlePricing: vi
+                .fn()
+                .mockResolvedValue({ policy: "fcfs", networkBaseFee: 1n }),
+            startWatchingBlocks: vi.fn(),
+            earlyInclusionChecksEnabled: () => enabled,
+            runEarlyInclusionChecks: vi.fn(async () => {
+                order.push("earlyCheck")
+            })
+        })
+        Object.assign(manager.config, {
+            publicClient: { getTransactionCount: vi.fn().mockResolvedValue(3) }
+        })
+
+        await manager.sendBundleToExecutor({
+            entryPoint: "0xep",
+            version: "0.7",
+            submissionAttempts: 0,
+            userOps: [{ userOpHash: "0xop", submissionAttempts: 0 }]
+        })
+
+        return order
+    }
+
+    test("the submitted marking completes first", async () => {
+        await expect(runSubmit({ enabled: true })).resolves.toEqual([
+            "markSubmitted",
+            "earlyCheck"
+        ])
+    })
+
+    test("and where the check is disabled, nothing runs it", async () => {
+        await expect(runSubmit({ enabled: false })).resolves.toEqual([
+            "markSubmitted"
+        ])
+    })
+})
