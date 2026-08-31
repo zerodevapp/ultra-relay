@@ -255,6 +255,27 @@ describe("isBidNoLongerViable", () => {
         expect(viable("priority-fee")).toBe(true)
     })
 
+    test("mempool: re-prices when only one of the two fees lags", () => {
+        // Guards the || in the fee-ordered branch: either field falling behind
+        // is enough, and requiring both would let a stale bid sit.
+        expect(
+            viable("priority-fee", {
+                bid: {
+                    maxFeePerGas: 1n,
+                    maxPriorityFeePerGas: 100n * GWEI
+                }
+            })
+        ).toBe(true)
+        expect(
+            viable("priority-fee", {
+                bid: {
+                    maxFeePerGas: 100n * GWEI,
+                    maxPriorityFeePerGas: 1n
+                }
+            })
+        ).toBe(true)
+    })
+
     test("mempool: a competitive bid is left alone", () => {
         expect(
             viable("priority-fee", {
