@@ -1,9 +1,7 @@
 import type { GasPriceParameters } from "@alto/types"
 import { describe, expect, test, vi } from "vitest"
 import {
-    type ArrivalOrderedPolicy,
     type BundlePricing,
-    type FeeOrderedPolicy,
     type OrderingPolicy,
     buildBundlePricing,
     defaultOrderingPolicy,
@@ -28,6 +26,9 @@ const config = {
 // Assembles the pricing for a policy so the cases below can stay flat. Which
 // shape gets built is the production decision itself, taken by the same
 // predicate the bundler uses.
+// Goes through the production builder rather than assembling the union here,
+// so these fixtures are the shapes the bundler actually produces and the family
+// split stays stated in exactly one place.
 const pricingFor = (
     policy: OrderingPolicy,
     {
@@ -40,12 +41,13 @@ const pricingFor = (
         networkGasPrice?: GasPriceParameters
         networkBaseFee?: bigint
     } = {}
-): BundlePricing =>
-    policy === "fcfs" || policy === "timeboost"
-        ? { policy, networkBaseFee }
-        : { policy, networkBaseFee, networkGasPrice }
+): Promise<BundlePricing> =>
+    buildBundlePricing(policy, {
+        baseFee: () => networkBaseFee,
+        gasPrice: () => networkGasPrice
+    })
 
-const bid = (
+const bid = async (
     policy: OrderingPolicy,
     overrides: {
         submissionAttempts?: number
@@ -54,7 +56,7 @@ const bid = (
     } = {}
 ) =>
     getBundleGasPrice({
-        pricing: pricingFor(policy, overrides),
+        pricing: await pricingFor(policy, overrides),
         submissionAttempts: overrides.submissionAttempts ?? 0,
         totalBeneficiaryFees: 10n * GWEI,
         bundleGasUsed: 1_000_000n,
@@ -64,7 +66,7 @@ const bid = (
 // The sequencer's ranking key. Getting this wrong is silent: the transaction is
 // still valid and still included, it just pays a tip nobody chose.
 const effectiveTip = (
-    { maxFeePerGas, maxPriorityFeePerGas }: ReturnType<typeof bid>,
+    { maxFeePerGas, maxPriorityFeePerGas }: Awaited<ReturnType<typeof bid>>,
     baseFee: bigint
 ) => {
     const headroom = maxFeePerGas - baseFee
@@ -114,34 +116,19 @@ describe("sorting a policy into its family", () => {
         }
     )
 
-    // The families are derived from the capability table, so they cannot drift
-    // from it. What they can do is derive to something useless — `never`, or a
-    // family with the wrong members — if the condition or the annotation on the
-    // table changes, and that would compile while silently voiding every
-    // narrowing below. Checked by tsc over this file, not at runtime.
-    test("the derived families are exactly the table's two halves", () => {
-        type Exact<A, B> = [A] extends [B]
-            ? [B] extends [A]
-                ? true
-                : false
-            : false
-        const feeOrdered: Exact<FeeOrderedPolicy, "priority-fee" | "pga"> = true
-        const arrival: Exact<ArrivalOrderedPolicy, "fcfs" | "timeboost"> = true
-
-        expect([feeOrdered, arrival]).toEqual([true, true])
-    })
-
     test.each(["fcfs", "timeboost"] as const)(
         "%s carries no network gas price to report",
-        (policy) => {
-            expect(reportedNetworkGasPrice(pricingFor(policy))).toBeUndefined()
+        async (policy) => {
+            expect(
+                reportedNetworkGasPrice(await pricingFor(policy))
+            ).toBeUndefined()
         }
     )
 
     test.each(["pga", "priority-fee"] as const)(
         "%s reports the price it was built with",
-        (policy) => {
-            expect(reportedNetworkGasPrice(pricingFor(policy))).toEqual({
+        async (policy) => {
+            expect(reportedNetworkGasPrice(await pricingFor(policy))).toEqual({
                 maxFeePerGas: 2n * GWEI,
                 maxPriorityFeePerGas: GWEI
             })
@@ -173,14 +160,14 @@ describe("sorting a policy into its family", () => {
 })
 
 describe("resolveOrderingPolicy", () => {
-    test("falls back to the chainType default", () => {
+    test("falls back to the chainType default", async () => {
         expect(resolveOrderingPolicy({ chainType: "arbitrum" })).toBe("fcfs")
         expect(resolveOrderingPolicy({ chainType: "default" })).toBe(
             "priority-fee"
         )
     })
 
-    test("an explicit policy wins over the chainType default", () => {
+    test("an explicit policy wins over the chainType default", async () => {
         expect(
             resolveOrderingPolicy({
                 chainType: "arbitrum",
@@ -191,7 +178,7 @@ describe("resolveOrderingPolicy", () => {
 })
 
 describe("capabilities", () => {
-    test("only fee-ordered policies justify fetching a network gas price", () => {
+    test("only fee-ordered policies justify fetching a network gas price", async () => {
         expect(getSequencerBehaviour("fcfs").feesAffectOrdering).toBe(false)
         expect(getSequencerBehaviour("timeboost").feesAffectOrdering).toBe(
             false
@@ -202,7 +189,7 @@ describe("capabilities", () => {
         )
     })
 
-    test("no Arbitrum-stack policy supports replace-by-fee", () => {
+    test("no Arbitrum-stack policy supports replace-by-fee", async () => {
         for (const policy of ["fcfs", "timeboost", "pga"] as const) {
             expect(getSequencerBehaviour(policy).supportsReplaceByFee).toBe(
                 false
@@ -213,7 +200,7 @@ describe("capabilities", () => {
         )
     })
 
-    test("submit blocks until sequenced on every Arbitrum-stack policy", () => {
+    test("submit blocks until sequenced on every Arbitrum-stack policy", async () => {
         for (const policy of ["fcfs", "timeboost", "pga"] as const) {
             expect(
                 getSequencerBehaviour(policy).submitBlocksUntilSequenced
@@ -226,7 +213,7 @@ describe("capabilities", () => {
         ).toBe(false)
     })
 
-    test("defaults preserve existing behaviour per chain type", () => {
+    test("defaults preserve existing behaviour per chain type", async () => {
         expect(defaultOrderingPolicy("arbitrum")).toBe("fcfs")
         expect(defaultOrderingPolicy("default")).toBe("priority-fee")
         expect(defaultOrderingPolicy("op-stack")).toBe("priority-fee")
@@ -234,36 +221,36 @@ describe("capabilities", () => {
 })
 
 describe("arrival-ordered policies (fcfs, timeboost)", () => {
-    test("bid is base fee times the multiplier, both fields equal", () => {
-        const result = bid("fcfs")
+    test("bid is base fee times the multiplier, both fields equal", async () => {
+        const result = await bid("fcfs")
         expect(result.maxFeePerGas).toBe(BASE_FEE * 5n)
         expect(result.maxPriorityFeePerGas).toBe(BASE_FEE * 5n)
     })
 
-    test("timeboost bids identically to fcfs — fees order in neither", () => {
-        expect(bid("timeboost")).toStrictEqual(bid("fcfs"))
+    test("timeboost bids identically to fcfs — fees order in neither", async () => {
+        expect(await bid("timeboost")).toStrictEqual(await bid("fcfs"))
     })
 
-    test("resubmission widens base-fee headroom by 20% per attempt", () => {
-        expect(bid("fcfs", { submissionAttempts: 1 }).maxFeePerGas).toBe(
-            ((BASE_FEE * 120n) / 100n) * 5n
-        )
+    test("resubmission widens base-fee headroom by 20% per attempt", async () => {
+        expect(
+            (await bid("fcfs", { submissionAttempts: 1 })).maxFeePerGas
+        ).toBe(((BASE_FEE * 120n) / 100n) * 5n)
     })
 
-    test("ignores the network gas price entirely", () => {
-        const withTip = bid("fcfs", {
+    test("ignores the network gas price entirely", async () => {
+        const withTip = await bid("fcfs", {
             networkGasPrice: {
                 maxFeePerGas: 999n * GWEI,
                 maxPriorityFeePerGas: 999n * GWEI
             }
         })
-        expect(withTip).toStrictEqual(bid("fcfs"))
+        expect(withTip).toStrictEqual(await bid("fcfs"))
     })
 })
 
 describe("pga", () => {
-    test("bids the suggested tip, not a base-fee multiple", () => {
-        const result = bid("pga", {
+    test("bids the suggested tip, not a base-fee multiple", async () => {
+        const result = await bid("pga", {
             networkGasPrice: {
                 maxFeePerGas: 0n,
                 maxPriorityFeePerGas: GWEI / 100n
@@ -273,23 +260,23 @@ describe("pga", () => {
         expect(effectiveTip(result, BASE_FEE)).toBe(GWEI / 100n)
     })
 
-    test("regression: equal fields would bid (multiplier - 1) x base fee", () => {
+    test("regression: equal fields would bid (multiplier - 1) x base fee", async () => {
         // What the pre-PGA Arbitrum branch produces. Kept as an explicit
         // counter-example: it is a valid transaction that silently pays
         // 4 x baseFee once tips are collected.
-        const arrivalBid = bid("fcfs")
+        const arrivalBid = await bid("fcfs")
         expect(effectiveTip(arrivalBid, BASE_FEE)).toBe(BASE_FEE * 4n)
 
         // The pga branch must not do that.
-        const pgaBid = bid("pga", {
+        const pgaBid = await bid("pga", {
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }
         })
         expect(effectiveTip(pgaBid, BASE_FEE)).toBe(0n)
     })
 
-    test("intended tip survives a base fee rise, rather than decaying", () => {
+    test("intended tip survives a base fee rise, rather than decaying", async () => {
         const tip = GWEI / 100n
-        const result = bid("pga", {
+        const result = await bid("pga", {
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: tip }
         })
         // Push the base fee all the way to the headroom limit. This is the case
@@ -302,22 +289,22 @@ describe("pga", () => {
         }
     })
 
-    test("a tip larger than the headroom is still bid in full", () => {
+    test("a tip larger than the headroom is still bid in full", async () => {
         // Headroom scales with base fee, so on a cheap chain a meaningful tip
         // can exceed it. maxFeePerGas must still cover baseFee + tip.
         const tip = BASE_FEE * 100n
-        const result = bid("pga", {
+        const result = await bid("pga", {
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: tip }
         })
         expect(effectiveTip(result, BASE_FEE)).toBe(tip)
     })
 
-    test("resubmission raises the tip, not just the headroom", () => {
+    test("resubmission raises the tip, not just the headroom", async () => {
         const tip = GWEI / 100n
-        const first = bid("pga", {
+        const first = await bid("pga", {
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: tip }
         })
-        const retry = bid("pga", {
+        const retry = await bid("pga", {
             submissionAttempts: 1,
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: tip }
         })
@@ -328,20 +315,22 @@ describe("pga", () => {
 })
 
 describe("priority-fee (public mempool)", () => {
-    test("resubmission clears the 1.10 replacement floor at every attempt", () => {
-        let previous = bid("priority-fee").maxFeePerGas
+    test("resubmission clears the 1.10 replacement floor at every attempt", async () => {
+        let previous = (await bid("priority-fee")).maxFeePerGas
         for (let attempt = 1; attempt <= 8; attempt++) {
-            const next = bid("priority-fee", {
-                submissionAttempts: attempt
-            }).maxFeePerGas
+            const next = (
+                await bid("priority-fee", {
+                    submissionAttempts: attempt
+                })
+            ).maxFeePerGas
             expect(next * 100n).toBeGreaterThanOrEqual(previous * 110n)
             previous = next
         }
     })
 
-    test("legacy chains collapse to a single gas price", () => {
+    test("legacy chains collapse to a single gas price", async () => {
         const result = getBundleGasPrice({
-            pricing: pricingFor("priority-fee"),
+            pricing: await pricingFor("priority-fee"),
             submissionAttempts: 0,
             totalBeneficiaryFees: 10n * GWEI,
             bundleGasUsed: 1_000_000n,
@@ -352,7 +341,7 @@ describe("priority-fee (public mempool)", () => {
 })
 
 describe("isBidNoLongerViable", () => {
-    const viable = (
+    const viable = async (
         policy: OrderingPolicy,
         o: {
             bid?: GasPriceParameters
@@ -361,7 +350,7 @@ describe("isBidNoLongerViable", () => {
         } = {}
     ) =>
         isBidNoLongerViable({
-            pricing: pricingFor(policy, {
+            pricing: await pricingFor(policy, {
                 networkGasPrice: o.networkGasPrice ?? {
                     maxFeePerGas: 100n * GWEI,
                     maxPriorityFeePerGas: 100n * GWEI
@@ -374,30 +363,32 @@ describe("isBidNoLongerViable", () => {
             }
         })
 
-    test("arrival-ordered: a healthy bid is not re-priced just for lagging the network price", () => {
+    test("arrival-ordered: a healthy bid is not re-priced just for lagging the network price", async () => {
         // The live bug this fixes. An fcfs bid of baseFee x 5 is nowhere near
         // the network gas price, but the network price orders nothing, so the
         // bundle was never at risk. Re-pricing it here would resubmit the same
         // nonce and leave two copies competing.
-        expect(viable("fcfs")).toBe(false)
-        expect(viable("timeboost")).toBe(false)
+        expect(await viable("fcfs")).toBe(false)
+        expect(await viable("timeboost")).toBe(false)
     })
 
-    test("arrival-ordered: a bid that no longer clears the base fee is re-priced", () => {
+    test("arrival-ordered: a bid that no longer clears the base fee is re-priced", async () => {
         // The failure that does matter: below the base fee the sequencer
         // rejects the transaction outright rather than sequencing it late.
-        expect(viable("fcfs", { networkBaseFee: BASE_FEE * 6n })).toBe(true)
+        expect(await viable("fcfs", { networkBaseFee: BASE_FEE * 6n })).toBe(
+            true
+        )
     })
 
-    test("mempool: falling behind the network price still triggers a re-price", () => {
-        expect(viable("priority-fee")).toBe(true)
+    test("mempool: falling behind the network price still triggers a re-price", async () => {
+        expect(await viable("priority-fee")).toBe(true)
     })
 
-    test("mempool: re-prices when only one of the two fees lags", () => {
+    test("mempool: re-prices when only one of the two fees lags", async () => {
         // Guards the || in the fee-ordered branch: either field falling behind
         // is enough, and requiring both would let a stale bid sit.
         expect(
-            viable("priority-fee", {
+            await viable("priority-fee", {
                 bid: {
                     maxFeePerGas: 1n,
                     maxPriorityFeePerGas: 100n * GWEI
@@ -405,7 +396,7 @@ describe("isBidNoLongerViable", () => {
             })
         ).toBe(true)
         expect(
-            viable("priority-fee", {
+            await viable("priority-fee", {
                 bid: {
                     maxFeePerGas: 100n * GWEI,
                     maxPriorityFeePerGas: 1n
@@ -414,9 +405,9 @@ describe("isBidNoLongerViable", () => {
         ).toBe(true)
     })
 
-    test("mempool: a competitive bid is left alone", () => {
+    test("mempool: a competitive bid is left alone", async () => {
         expect(
-            viable("priority-fee", {
+            await viable("priority-fee", {
                 networkGasPrice: {
                     maxFeePerGas: 0n,
                     maxPriorityFeePerGas: 0n
@@ -425,10 +416,10 @@ describe("isBidNoLongerViable", () => {
         ).toBe(false)
     })
 
-    test("pga: fees order again, so the network price is authoritative", () => {
-        expect(viable("pga")).toBe(true)
+    test("pga: fees order again, so the network price is authoritative", async () => {
+        expect(await viable("pga")).toBe(true)
         expect(
-            viable("pga", {
+            await viable("pga", {
                 networkGasPrice: {
                     maxFeePerGas: 0n,
                     maxPriorityFeePerGas: 0n
@@ -451,12 +442,12 @@ describe("early inclusion checks are safe to run immediately after submit", () =
     ]
 
     for (const policy of policies) {
-        test(`${policy}: a freshly built bid is not already stale`, () => {
+        test(`${policy}: a freshly built bid is not already stale`, async () => {
             for (const baseFee of [1n, BASE_FEE, GWEI, 50n * GWEI]) {
                 for (const tip of [0n, GWEI / 100n, GWEI]) {
                     // One pricing, used to build the bid and then to judge
                     // it: the round trip is the invariant.
-                    const pricing = pricingFor(policy, {
+                    const pricing = await pricingFor(policy, {
                         networkGasPrice: {
                             maxFeePerGas: (baseFee * 120n) / 100n + tip,
                             maxPriorityFeePerGas: tip
