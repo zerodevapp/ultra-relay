@@ -1,0 +1,23 @@
+// Type-checks the unit tests, which tsconfig.json deliberately excludes so they
+// are not emitted into the build output. Check-only: no emit, so it can share
+// every strictness setting with the build without producing artifacts.
+//
+// Without this, test files are never type-checked at all. Vitest transpiles via
+// esbuild, which strips types without checking them, so a test can hold a real
+// type error — an unawaited promise, a wrong argument shape — and still pass.
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "declaration": false,
+        "declarationMap": false,
+        "sourceMap": false
+    },
+    "include": [
+        "./**/*",
+        "./utils/metrics.ts",
+        "./cli",
+        "./utils/logger.ts"
+    ],
+    "exclude": ["./lib/*", "./node_modules/*", "./esm/*"]
+}

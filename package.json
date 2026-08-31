@@ -27,6 +27,7 @@
         "test": "pnpm --filter e2e run test",
         "test:ci": "pnpm --filter e2e run test:ci",
         "test:spec": "./test/spec-tests/run-spec-tests.sh",
+        "typecheck": "pnpm -r run typecheck",
         "lint": "biome check .",
         "lint:fix": "pnpm run lint --apply",
         "format": "biome format . --write",

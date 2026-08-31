@@ -29,3 +29,9 @@ jobs:
           commit_message: 'chore: format'
           commit_user_name: 'github-actions[bot]'
           commit_user_email: 'github-actions[bot]@users.noreply.github.com'
+
+      # Covers the unit tests, which the build config excludes so they are not
+      # emitted. Runs after the format commit so a type error does not discard
+      # the formatting fixes.
+      - name: Type check
+        run: pnpm run typecheck
