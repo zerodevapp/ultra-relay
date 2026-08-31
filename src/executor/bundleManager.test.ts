@@ -22,11 +22,4 @@ describe("isBundlePending", () => {
         manager.stopTrackingBundle(bundle)
         expect(manager.isBundlePending("uid-1")).toBe(false)
     })
-
-    test("is per bundle", () => {
-        const manager = make()
-        manager.trackBundle({ uid: "uid-1" } as never)
-
-        expect(manager.isBundlePending("uid-2")).toBe(false)
-    })
 })

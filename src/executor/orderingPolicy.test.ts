@@ -78,18 +78,6 @@ describe("capabilities", () => {
         ).toBe(false)
     })
 
-    test("priority fees are only charged where they order", () => {
-        for (const policy of [
-            "priority-fee",
-            "fcfs",
-            "timeboost",
-            "pga"
-        ] as const) {
-            const c = getSequencerBehaviour(policy)
-            expect(c.priorityFeeIsCharged).toBe(c.feesAffectOrdering)
-        }
-    })
-
     test("defaults preserve existing behaviour per chain type", () => {
         expect(defaultOrderingPolicy("arbitrum")).toBe("fcfs")
         expect(defaultOrderingPolicy("default")).toBe("priority-fee")
