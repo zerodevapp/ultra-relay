@@ -480,3 +480,68 @@ describe("recovery respects whether the sequencer has replace-by-fee", () => {
         expect(m.rotateStuckBundle).not.toHaveBeenCalled()
     })
 })
+
+// A cancel is a same-nonce transaction, so re-broadcasting it can only displace
+// the original where a replacement rule exists.
+describe("cancelBundle re-broadcasts only where it could win", () => {
+    const makeCancel = ({ chainType }: { chainType: string }) => {
+        const sendTransaction = vi.fn().mockResolvedValue("0xcancel")
+        // Never clears, so the loop runs its full budget of attempts.
+        const getTransactionCount = vi.fn().mockResolvedValue(1)
+
+        const manager = Object.create(ExecutorManager.prototype)
+        Object.assign(manager, {
+            config: {
+                chainType,
+                cancelTransactionTimeout: 5,
+                walletClients: { public: { sendTransaction } },
+                publicClient: { getTransactionCount }
+            },
+            logger: {
+                child: () => ({
+                    info: vi.fn(),
+                    warn: vi.fn(),
+                    error: vi.fn(),
+                    debug: vi.fn()
+                })
+            }
+        })
+
+        return {
+            run: () =>
+                manager.cancelBundle({
+                    bundle: { userOps: [] },
+                    executor: { address: "0xexec" },
+                    transactionHash: "0xtx",
+                    transactionRequest: {
+                        nonce: 1,
+                        maxFeePerGas: 100n,
+                        maxPriorityFeePerGas: 100n
+                    }
+                }),
+            sendTransaction
+        }
+    }
+
+    test("arrival-ordered: sent once, then the window is spent polling", async () => {
+        const m = makeCancel({ chainType: "arbitrum" })
+
+        await expect(m.run()).resolves.toBe(false)
+
+        expect(m.sendTransaction).toHaveBeenCalledTimes(1)
+    })
+
+    test("mempool: re-broadcast each attempt at a strictly rising bid", async () => {
+        const m = makeCancel({ chainType: "default" })
+
+        await expect(m.run()).resolves.toBe(false)
+
+        expect(m.sendTransaction.mock.calls.length).toBeGreaterThan(1)
+        const bids = m.sendTransaction.mock.calls.map(
+            ([tx]) => tx.maxFeePerGas as bigint
+        )
+        for (let i = 1; i < bids.length; i++) {
+            expect(bids[i]).toBeGreaterThan(bids[i - 1])
+        }
+    })
+})

@@ -1168,13 +1168,32 @@ export class ExecutorManager {
             }
         }
 
+        // Re-broadcasting only helps where a replacement rule exists. On a
+        // sequencer queue the cancel cannot displace the original at any price,
+        // so resends are extra blocking submissions that the nonce check will
+        // reject. One send is still worth it: a submit that timed out may have
+        // left the nonce unused, and then the cancel claims it and frees the
+        // wallet. After that the window is better spent polling, since the
+        // original mining clears the nonce too.
+        const canOutbidPending = getSequencerBehaviour(
+            resolveOrderingPolicy(this.config)
+        ).supportsReplaceByFee
+
         let gasMultiplier = 150n // Start with 50% increase
+        let cancelSent = false
 
         for (let attempt = 0; attempt < MAX_CANCEL_ATTEMPTS; attempt++) {
             try {
                 if (await nonceCleared()) {
                     logger.info("Transaction already mined or cancelled")
                     return true
+                }
+
+                if (cancelSent && !canOutbidPending) {
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, pollInterval)
+                    )
+                    continue
                 }
 
                 logger.info(`Trying to cancel bundle, attempt ${attempt + 1}`)
@@ -1194,6 +1213,8 @@ export class ExecutorManager {
                     )
                 })
 
+                cancelSent = true
+
                 logger.info(
                     {
                         originalTxHash: transactionHash,
@@ -1209,7 +1230,10 @@ export class ExecutorManager {
             // Escalate every re-broadcast (not just on error) so each resend
             // strictly outbids the last and satisfies bor's +10% replacement
             // rule instead of failing "replacement transaction underpriced".
-            gasMultiplier += 20n
+            // Nothing to outbid where there is no replacement rule.
+            if (canOutbidPending) {
+                gasMultiplier += 20n
+            }
             await new Promise((resolve) => setTimeout(resolve, pollInterval))
         }
 
