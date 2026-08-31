@@ -25,6 +25,12 @@ const makeManager = ({
     Object.assign(manager, {
         currentlyHandlingBlock: false,
         config: { chainType },
+        logger: {
+            info: vi.fn(),
+            warn: vi.fn(),
+            error: vi.fn(),
+            debug: vi.fn()
+        },
         bundleManager: {
             getPendingBundles: () => bundles,
             getBundleStatuses,
@@ -103,14 +109,18 @@ describe("handleBlockInner pricing is lazy", () => {
         expect(arb.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
     })
 
-    test("the skipped gas price reaches re-pricing as undefined, not as zeros", async () => {
+    // The pricing that reaches re-pricing carries no network gas price at
+    // all, rather than a zero that a fee comparison would silently act on.
+    test("re-pricing is handed arrival-ordered pricing with no network price", async () => {
         const arb = makeManager({ chainType: "arbitrum" })
         arb.getBundleStatuses.mockResolvedValue(notFound)
 
         await arb.handleBlockInner(true)
 
         expect(arb.potentiallyResubmitBundle).toHaveBeenCalledWith(
-            expect.objectContaining({ networkGasPrice: undefined })
+            expect.objectContaining({
+                pricing: { policy: "fcfs", networkBaseFee: 1n }
+            })
         )
     })
 })
@@ -218,8 +228,7 @@ describe("sendBundleToExecutor skips the gas price where fees do not order", () 
         expect(m.getTransactionCount).toHaveBeenCalledTimes(1)
         expect(m.bundle).toHaveBeenCalledWith(
             expect.objectContaining({
-                networkGasPrice: undefined,
-                networkBaseFee: 7n,
+                pricing: { policy: "fcfs", networkBaseFee: 7n },
                 nonce: 3
             })
         )
@@ -233,7 +242,14 @@ describe("sendBundleToExecutor skips the gas price where fees do not order", () 
         expect(m.tryGetNetworkGasPrice).toHaveBeenCalledTimes(1)
         expect(m.bundle).toHaveBeenCalledWith(
             expect.objectContaining({
-                networkGasPrice: { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n }
+                pricing: {
+                    policy: "priority-fee",
+                    networkBaseFee: 7n,
+                    networkGasPrice: {
+                        maxFeePerGas: 2n,
+                        maxPriorityFeePerGas: 1n
+                    }
+                }
             })
         )
     })

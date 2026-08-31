@@ -34,8 +34,9 @@ import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
+    type BundlePricing,
     getBundleGasPrice as computeBundleGasPrice,
-    resolveOrderingPolicy
+    reportedNetworkGasPrice
 } from "./orderingPolicy"
 import {
     encodeHandleOpsCalldata,
@@ -105,14 +106,12 @@ export class Executor {
 
     getBundleGasPrice({
         bundle,
-        networkGasPrice,
-        networkBaseFee,
+        pricing,
         totalBeneficiaryFees,
         bundleGasUsed
     }: {
         bundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters | undefined
-        networkBaseFee: bigint
+        pricing: BundlePricing
         totalBeneficiaryFees: bigint
         bundleGasUsed: bigint
     }): GasPriceParameters {
@@ -124,10 +123,8 @@ export class Executor {
         } = this.config
 
         return computeBundleGasPrice({
-            policy: resolveOrderingPolicy(this.config),
+            pricing,
             submissionAttempts: bundle.submissionAttempts,
-            networkGasPrice,
-            networkBaseFee,
             totalBeneficiaryFees,
             bundleGasUsed,
             config: {
@@ -356,15 +353,13 @@ export class Executor {
     async bundle({
         executor,
         userOpBundle,
-        networkGasPrice,
-        networkBaseFee,
+        pricing,
         nonce,
         previousTransactionRequest
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters | undefined
-        networkBaseFee: bigint
+        pricing: BundlePricing
         nonce: number
         previousTransactionRequest?: {
             maxFeePerGas: bigint
@@ -381,7 +376,7 @@ export class Executor {
         })
 
         const filterOpsResult = await filterOpsAndEstimateGas({
-            networkBaseFee,
+            networkBaseFee: pricing.networkBaseFee,
             userOpBundle,
             config: this.config,
             logger: childLogger
@@ -427,8 +422,7 @@ export class Executor {
 
         let { maxFeePerGas, maxPriorityFeePerGas } = this.getBundleGasPrice({
             bundle: userOpBundle,
-            networkGasPrice,
-            networkBaseFee,
+            pricing,
             totalBeneficiaryFees,
             bundleGasUsed
         })
@@ -543,10 +537,11 @@ export class Executor {
                 submissionAttempts: userOpBundle.submissionAttempts,
                 bundlerMaxFeePerGas: maxFeePerGas,
                 bundlerMaxPriorityFeePerGas: maxPriorityFeePerGas,
-                networkMaxFeePerGas: networkGasPrice?.maxFeePerGas,
+                networkMaxFeePerGas:
+                    reportedNetworkGasPrice(pricing)?.maxFeePerGas,
                 networkMaxPriorityFeePerGas:
-                    networkGasPrice?.maxPriorityFeePerGas,
-                networkBaseFee
+                    reportedNetworkGasPrice(pricing)?.maxPriorityFeePerGas,
+                networkBaseFee: pricing.networkBaseFee
             })
         } catch (err: unknown) {
             const { rejectedUserOps, userOpsToBundle } = filterOpsResult

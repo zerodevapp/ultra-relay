@@ -1,12 +1,16 @@
+import type { GasPriceParameters } from "@alto/types"
 import { describe, expect, test } from "vitest"
 import {
+    type BundlePricing,
     type OrderingPolicy,
     defaultOrderingPolicy,
     getBundleGasPrice,
     getSequencerBehaviour,
     isBidNoLongerViable,
     needsNetworkGasPrice,
-    resolveOrderingPolicy
+    reportedNetworkGasPrice,
+    resolveOrderingPolicy,
+    unpricedFallback
 } from "./orderingPolicy"
 
 const GWEI = 1_000_000_000n
@@ -19,19 +23,40 @@ const config = {
     legacyTransactions: false
 }
 
-const bid = (policy: OrderingPolicy, overrides = {}) =>
-    getBundleGasPrice({
-        policy,
-        submissionAttempts: 0,
-        networkGasPrice: {
+// Assembles the pricing for a policy so the cases below can stay flat. Which
+// shape gets built is the production decision itself, taken by the same
+// predicate the bundler uses.
+const pricingFor = (
+    policy: OrderingPolicy,
+    {
+        networkGasPrice = {
             maxFeePerGas: 2n * GWEI,
             maxPriorityFeePerGas: GWEI
         },
-        networkBaseFee: BASE_FEE,
+        networkBaseFee = BASE_FEE
+    }: {
+        networkGasPrice?: GasPriceParameters
+        networkBaseFee?: bigint
+    } = {}
+): BundlePricing =>
+    needsNetworkGasPrice(policy)
+        ? { policy, networkBaseFee, networkGasPrice }
+        : { policy, networkBaseFee }
+
+const bid = (
+    policy: OrderingPolicy,
+    overrides: {
+        submissionAttempts?: number
+        networkGasPrice?: GasPriceParameters
+        networkBaseFee?: bigint
+    } = {}
+) =>
+    getBundleGasPrice({
+        pricing: pricingFor(policy, overrides),
+        submissionAttempts: overrides.submissionAttempts ?? 0,
         totalBeneficiaryFees: 10n * GWEI,
         bundleGasUsed: 1_000_000n,
-        config,
-        ...overrides
+        config
     })
 
 // The sequencer's ranking key. Getting this wrong is silent: the transaction is
@@ -52,42 +77,60 @@ describe("skipping the network gas price fetch", () => {
         expect(needsNetworkGasPrice("priority-fee")).toBe(true)
     })
 
-    // The gate and the bid must agree about who needs a price. These two pin
-    // both halves of that contract: the policies the gate exempts must build a
-    // bid without one, and the policies it does not exempt must refuse to
-    // invent one rather than silently misbidding every bundle.
-    test.each(["fcfs", "timeboost"] as const)(
-        "%s bids without a network gas price",
+    // `needsNetworkGasPrice` narrows the policy type, and the compiler takes
+    // that on trust — it cannot see inside the capability table. This is the
+    // one assertion holding the two together: if a policy's
+    // `feesAffectOrdering` were changed without moving it between the type
+    // families, the narrowing would be a lie and every guarantee below it
+    // would rest on nothing.
+    test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
+        "%s: the narrowing agrees with the capability table",
         (policy) => {
-            const priced = bid(policy)
-            const unpriced = bid(policy, { networkGasPrice: undefined })
-
-            expect(unpriced).toEqual(priced)
-        }
-    )
-
-    test.each(["pga", "priority-fee"] as const)(
-        "%s refuses to bid without a network gas price",
-        (policy) => {
-            expect(() => bid(policy, { networkGasPrice: undefined })).toThrow(
-                /network gas price/
+            expect(needsNetworkGasPrice(policy)).toBe(
+                getSequencerBehaviour(policy).feesAffectOrdering
             )
         }
     )
 
-    // A fee-ordered chain whose fetch fails still passes zeros, so undefined
-    // here can only mean the gate skipped it — on a policy that never consults
-    // it. Re-pricing on that absence would resubmit against no evidence.
-    test("an absent price is not treated as the network having fallen to zero", () => {
-        expect(
-            isBidNoLongerViable({
-                policy: "priority-fee",
-                bid: { maxFeePerGas: GWEI, maxPriorityFeePerGas: GWEI },
-                networkGasPrice: undefined,
-                networkBaseFee: BASE_FEE
+    test.each(["fcfs", "timeboost"] as const)(
+        "%s carries no network gas price to report",
+        (policy) => {
+            expect(reportedNetworkGasPrice(pricingFor(policy))).toBeUndefined()
+        }
+    )
+
+    test.each(["pga", "priority-fee"] as const)(
+        "%s reports the price it was built with",
+        (policy) => {
+            expect(reportedNetworkGasPrice(pricingFor(policy))).toEqual({
+                maxFeePerGas: 2n * GWEI,
+                maxPriorityFeePerGas: GWEI
             })
-        ).toBe(false)
-    })
+        }
+    )
+
+    // What a failed fetch degrades to. Zeros can never make a bid look stale,
+    // so the bundle is left to the stuck-timeout check instead of being
+    // re-priced against a number we never actually read.
+    test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
+        "%s: an unpriced fallback never judges a bid stale",
+        (policy) => {
+            // Zero, not merely small: the fallback must be unable to judge
+            // any bid stale, and only a zero base fee makes that true for
+            // every bid rather than for comfortably-priced ones.
+            for (const bid of [
+                { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n },
+                { maxFeePerGas: GWEI, maxPriorityFeePerGas: GWEI }
+            ]) {
+                expect(
+                    isBidNoLongerViable({
+                        pricing: unpricedFallback(policy),
+                        bid
+                    })
+                ).toBe(false)
+            }
+        }
+    )
 })
 
 describe("resolveOrderingPolicy", () => {
@@ -259,13 +302,8 @@ describe("priority-fee (public mempool)", () => {
 
     test("legacy chains collapse to a single gas price", () => {
         const result = getBundleGasPrice({
-            policy: "priority-fee",
+            pricing: pricingFor("priority-fee"),
             submissionAttempts: 0,
-            networkGasPrice: {
-                maxFeePerGas: 2n * GWEI,
-                maxPriorityFeePerGas: GWEI
-            },
-            networkBaseFee: BASE_FEE,
             totalBeneficiaryFees: 10n * GWEI,
             bundleGasUsed: 1_000_000n,
             config: { ...config, legacyTransactions: true }
@@ -275,19 +313,26 @@ describe("priority-fee (public mempool)", () => {
 })
 
 describe("isBidNoLongerViable", () => {
-    const viable = (policy: OrderingPolicy, o: Record<string, unknown> = {}) =>
+    const viable = (
+        policy: OrderingPolicy,
+        o: {
+            bid?: GasPriceParameters
+            networkGasPrice?: GasPriceParameters
+            networkBaseFee?: bigint
+        } = {}
+    ) =>
         isBidNoLongerViable({
-            policy,
-            bid: {
+            pricing: pricingFor(policy, {
+                networkGasPrice: o.networkGasPrice ?? {
+                    maxFeePerGas: 100n * GWEI,
+                    maxPriorityFeePerGas: 100n * GWEI
+                },
+                networkBaseFee: o.networkBaseFee ?? BASE_FEE
+            }),
+            bid: o.bid ?? {
                 maxFeePerGas: BASE_FEE * 5n,
                 maxPriorityFeePerGas: BASE_FEE * 5n
-            },
-            networkGasPrice: {
-                maxFeePerGas: 100n * GWEI,
-                maxPriorityFeePerGas: 100n * GWEI
-            },
-            networkBaseFee: BASE_FEE,
-            ...o
+            }
         })
 
     test("arrival-ordered: a healthy bid is not re-priced just for lagging the network price", () => {
@@ -370,27 +415,25 @@ describe("early inclusion checks are safe to run immediately after submit", () =
         test(`${policy}: a freshly built bid is not already stale`, () => {
             for (const baseFee of [1n, BASE_FEE, GWEI, 50n * GWEI]) {
                 for (const tip of [0n, GWEI / 100n, GWEI]) {
-                    const networkGasPrice = {
-                        maxFeePerGas: (baseFee * 120n) / 100n + tip,
-                        maxPriorityFeePerGas: tip
-                    }
+                    // One pricing, used to build the bid and then to judge
+                    // it: the round trip is the invariant.
+                    const pricing = pricingFor(policy, {
+                        networkGasPrice: {
+                            maxFeePerGas: (baseFee * 120n) / 100n + tip,
+                            maxPriorityFeePerGas: tip
+                        },
+                        networkBaseFee: baseFee
+                    })
                     const bid = getBundleGasPrice({
-                        policy,
+                        pricing,
                         submissionAttempts: 0,
-                        networkGasPrice,
-                        networkBaseFee: baseFee,
                         totalBeneficiaryFees: 10n * GWEI,
                         bundleGasUsed: 1_000_000n,
                         config
                     })
 
                     expect(
-                        isBidNoLongerViable({
-                            policy,
-                            bid,
-                            networkGasPrice,
-                            networkBaseFee: baseFee
-                        }),
+                        isBidNoLongerViable({ pricing, bid }),
                         `${policy} baseFee=${baseFee} tip=${tip} -> ${JSON.stringify(
                             {
                                 maxFeePerGas: String(bid.maxFeePerGas),

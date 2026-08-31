@@ -6,7 +6,6 @@ import type {
     SubmittedBundleInfo,
     UserOperationBundle
 } from "@alto/types"
-import type { GasPriceParameters } from "@alto/types"
 import {
     type Logger,
     type Metrics,
@@ -26,10 +25,12 @@ import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import {
+    type BundlePricing,
     getSequencerBehaviour,
     isBidNoLongerViable,
     needsNetworkGasPrice,
-    resolveOrderingPolicy
+    resolveOrderingPolicy,
+    unpricedFallback
 } from "./orderingPolicy"
 import type { SenderManager } from "./senderManager"
 import { getUserOpHashes } from "./utils"
@@ -278,6 +279,36 @@ export class ExecutorManager {
         return await this.gasPriceManager.getBaseFee()
     }
 
+    // The one place that decides what a bundle is priced against. Where fees do
+    // not order, the network gas price is not fetched at all — nothing reads it,
+    // and it is the slowest call on the bundling path. The returned value
+    // carries which case it is, so no caller re-derives the decision and no
+    // absent price is passed around.
+    //
+    // Throws if a fetch fails; both callers already handle that, one by
+    // recovering the userOps and one by falling back to unpriced.
+    private async resolveBundlePricing(
+        step: string,
+        ctx: Record<string, unknown>
+    ): Promise<BundlePricing> {
+        const policy = resolveOrderingPolicy(this.config)
+        const baseFee = () =>
+            timed(this.logger, `${step}.baseFee`, ctx, () => this.getBaseFee())
+
+        if (!needsNetworkGasPrice(policy)) {
+            return { policy, networkBaseFee: await baseFee() }
+        }
+
+        const [networkGasPrice, networkBaseFee] = await Promise.all([
+            timed(this.logger, `${step}.networkGasPrice`, ctx, () =>
+                this.gasPriceManager.tryGetNetworkGasPrice()
+            ),
+            baseFee()
+        ])
+
+        return { policy, networkBaseFee, networkGasPrice }
+    }
+
     async sendBundleToExecutor(
         userOpBundle: UserOperationBundle
     ): Promise<Hex | undefined> {
@@ -306,23 +337,8 @@ export class ExecutorManager {
                         executor: wallet.address
                     }
 
-                    // The slowest of these three gates every bundle, and the
-                    // gas price is the slowest of them where it runs at all.
-                    // Where fees do not order, nothing downstream reads it, so
-                    // skipping it takes a round trip off the bundling path.
                     const preBundleParams = await Promise.all([
-                        needsNetworkGasPrice(resolveOrderingPolicy(this.config))
-                            ? timed(
-                                  this.logger,
-                                  "preBundle.networkGasPrice",
-                                  bundleCtx,
-                                  () =>
-                                      this.gasPriceManager.tryGetNetworkGasPrice()
-                              )
-                            : undefined,
-                        timed(this.logger, "preBundle.baseFee", bundleCtx, () =>
-                            this.getBaseFee()
-                        ),
+                        this.resolveBundlePricing("preBundle", bundleCtx),
                         timed(
                             this.logger,
                             "preBundle.getTransactionCount",
@@ -335,9 +351,6 @@ export class ExecutorManager {
                         )
                     ]).catch(() => undefined)
 
-                    // A skipped gas price is indistinguishable from a failed
-                    // one once destructured, so failure is detected on the
-                    // settled tuple rather than on any single value.
                     if (!preBundleParams) {
                         // Free executor if failed to get initial params.
                         await this.senderManager.markWalletProcessed(wallet)
@@ -349,13 +362,12 @@ export class ExecutorManager {
                         return undefined
                     }
 
-                    const [gasPriceParams, baseFee, nonce] = preBundleParams
+                    const [pricing, nonce] = preBundleParams
 
                     const bundleResult = await this.executor.bundle({
                         executor: wallet,
                         userOpBundle,
-                        networkGasPrice: gasPriceParams,
-                        networkBaseFee: baseFee,
+                        pricing,
                         nonce
                     })
 
@@ -650,26 +662,18 @@ export class ExecutorManager {
             repriceStuckBundles &&
             bundleStatuses.some(({ status }) => status === "not_found")
 
-        // Same gate as the bundling path: the re-priced bid only consults the
-        // network gas price where fees order, so on every other policy this is
-        // a round trip whose result no branch reads.
-        const wantsGasPrice =
-            needsPricing &&
-            needsNetworkGasPrice(resolveOrderingPolicy(this.config))
-
-        // undefined means "deliberately not fetched" and only ever reaches a
-        // policy that does not read it. A failed fetch on a policy that does
-        // read it still falls back to zeros, which reads as "no evidence the
-        // bid is stale" and leaves the bundle alone, as it did before.
-        const [networkGasPrice, networkBaseFee] = await Promise.all([
-            wantsGasPrice
-                ? this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
-                      maxFeePerGas: 0n,
-                      maxPriorityFeePerGas: 0n
-                  }))
-                : undefined,
-            needsPricing ? this.getBaseFee().catch(() => 0n) : 0n
-        ])
+        // A failed fetch degrades to unpriced rather than skipping re-pricing
+        // entirely: the stuck-timeout check still has to run. Logged because
+        // the fallback is otherwise indistinguishable from a healthy tick.
+        const pricing = needsPricing
+            ? await this.resolveBundlePricing("block", {}).catch((err) => {
+                  this.logger.warn(
+                      { err },
+                      "failed to price bundles this block, leaving them to the stuck-timeout check"
+                  )
+                  return unpricedFallback(resolveOrderingPolicy(this.config))
+              })
+            : undefined
 
         await Promise.all(
             bundleStatuses.map(async (bundleStatus, index) => {
@@ -711,15 +715,17 @@ export class ExecutorManager {
                 }
 
                 // can be potentially resubmitted - so we first submit it again to optimize for the speed
+                // `pricing` is set for exactly this case: it is resolved when
+                // re-pricing is on and some bundle is not_found.
                 if (
                     bundleStatus.status === "not_found" &&
-                    repriceStuckBundles
+                    repriceStuckBundles &&
+                    pricing
                 ) {
                     this.potentiallyResubmitBundle({
                         blockReceivedTimestamp,
                         submittedBundle,
-                        networkGasPrice,
-                        networkBaseFee
+                        pricing
                     })
                 }
             })
@@ -731,22 +737,18 @@ export class ExecutorManager {
     potentiallyResubmitBundle({
         blockReceivedTimestamp,
         submittedBundle,
-        networkGasPrice,
-        networkBaseFee
+        pricing
     }: {
         blockReceivedTimestamp: number
         submittedBundle: SubmittedBundleInfo
-        networkGasPrice: GasPriceParameters | undefined
-        networkBaseFee: bigint
+        pricing: BundlePricing
     }) {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
         const isGasPriceTooLow = isBidNoLongerViable({
-            policy: resolveOrderingPolicy(this.config),
-            bid: { maxFeePerGas, maxPriorityFeePerGas },
-            networkGasPrice,
-            networkBaseFee
+            pricing,
+            bid: { maxFeePerGas, maxPriorityFeePerGas }
         })
 
         const isStuck =
@@ -784,8 +786,7 @@ export class ExecutorManager {
             this.replaceTransaction({
                 blockReceivedTimestamp,
                 submittedBundle,
-                networkGasPrice,
-                networkBaseFee,
+                pricing,
                 reason: "gas_price"
             })
             return
@@ -836,8 +837,7 @@ export class ExecutorManager {
         this.replaceTransaction({
             blockReceivedTimestamp,
             submittedBundle,
-            networkGasPrice,
-            networkBaseFee,
+            pricing,
             reason: "stuck"
         })
     }
@@ -1205,14 +1205,12 @@ export class ExecutorManager {
     async replaceTransaction({
         blockReceivedTimestamp,
         submittedBundle,
-        networkGasPrice,
-        networkBaseFee,
+        pricing,
         reason
     }: {
         blockReceivedTimestamp: number
         submittedBundle: SubmittedBundleInfo
-        networkGasPrice: GasPriceParameters | undefined
-        networkBaseFee: bigint
+        pricing: BundlePricing
         reason: "gas_price" | "stuck"
     }): Promise<void> {
         // Fresh context (not addLogContext): mutating the shared block
@@ -1251,8 +1249,7 @@ export class ExecutorManager {
 
                 const bundleResult = await this.executor.bundle({
                     executor: executor,
-                    networkGasPrice,
-                    networkBaseFee,
+                    pricing,
                     userOpBundle: bundle,
                     nonce: transactionRequest.nonce,
                     // Floor the new bid to the previous tx's fee caps + bump so bor
