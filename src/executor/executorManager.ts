@@ -564,15 +564,28 @@ export class ExecutorManager {
             return
         }
 
-        const [bundleStatuses, networkGasPrice, networkBaseFee] =
-            await Promise.all([
-                this.bundleManager.getBundleStatuses(pendingBundles),
-                this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
-                    maxFeePerGas: 0n,
-                    maxPriorityFeePerGas: 0n
-                })),
-                this.getBaseFee().catch(() => 0n)
-            ])
+        const bundleStatuses =
+            await this.bundleManager.getBundleStatuses(pendingBundles)
+
+        // Only the not_found branch prices anything — `included` needs the
+        // receipt and a timestamp, `reverted` needs the receipt and the block.
+        // Fetching gas price and base fee up front made every tick pay three
+        // extra RPC calls, and wait on the slowest of them (the gas price, at
+        // ~23ms against ~7ms for a receipt) before it could act on any status.
+        // Resolve them only once something actually needs re-pricing.
+        const needsPricing = bundleStatuses.some(
+            ({ status }) => status === "not_found"
+        )
+
+        const [networkGasPrice, networkBaseFee] = needsPricing
+            ? await Promise.all([
+                  this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
+                      maxFeePerGas: 0n,
+                      maxPriorityFeePerGas: 0n
+                  })),
+                  this.getBaseFee().catch(() => 0n)
+              ])
+            : [{ maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }, 0n]
 
         await Promise.all(
             bundleStatuses.map(async (bundleStatus, index) => {
