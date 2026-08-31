@@ -117,41 +117,10 @@ type FeeOrderedPolicy = PoliciesWhereFeesOrder<true>
 // gas price and none is fetched.
 type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 
-// Consumers, so that a declared-but-unread capability is not mistaken for a
-// behaviour that is already handled:
-//   feesAffectOrdering          - no runtime reader. It classifies the policies
-//                                 into the two families above at the type
-//                                 level, and the only branch on those families
-//                                 is the switch in `buildBundlePricing`, which
-//                                 the compiler checks against them. Everything
-//                                 downstream — which bid is built, whether a
-//                                 gas price is fetched, what the viability
-//                                 check compares against — follows from the
-//                                 `BundlePricing` shape that switch returns.
-//                                 Changing this flag therefore breaks the
-//                                 build rather than changing behaviour
-//                                 silently.
-//   priorityFeeIsCharged        - no reader in production; read by the tests to
-//                                 decide which policies must keep
-//                                 arbitrumGasBidMultiplier out of their
-//                                 effective tip. Where the fee is not charged
-//                                 that headroom is free to bid; where it is,
-//                                 the same headroom is money. Marking a policy
-//                                 as charged therefore forces its bid to
-//                                 satisfy that, which is the direction that
-//                                 protects against paying a tip nobody chose.
-//   supportsReplaceByFee        - read by `potentiallyResubmitBundle`, which
-//                                 recovers a bundle onto a fresh wallet and
-//                                 nonce rather than resubmitting the old one
-//                                 where the sequencer has no replacement rule.
-//                                 Where rotation is capped it waits instead,
-//                                 since a second copy of the nonce would only
-//                                 compete with the first for a queue slot.
-//   submitBlocksUntilSequenced  - read by `earlyInclusionChecksEnabled`, which
-//                                 decides whether inclusion is polled for
-//                                 immediately after submit or left to the block
-//                                 watcher. Only worth polling where the receipt
-//                                 can already exist when submit returns.
+// Every capability has a consumer — `rg` the name to find it. The one that is
+// not obvious: feesAffectOrdering has no runtime reader at all. It splits the
+// policies into the two families above at the type level, so changing it breaks
+// the build rather than changing behaviour.
 export function getSequencerBehaviour(
     policy: OrderingPolicy
 ): SequencerBehaviour {
