@@ -4,9 +4,7 @@ import {
     type BundlePricing,
     type OrderingPolicy,
     buildBundlePricing,
-    defaultOrderingPolicy,
     getBundleGasPrice,
-    getSequencerBehaviour,
     isBidNoLongerViable,
     reportedNetworkGasPrice,
     resolveOrderingPolicy,
@@ -165,6 +163,10 @@ describe("resolveOrderingPolicy", () => {
         expect(resolveOrderingPolicy({ chainType: "default" })).toBe(
             "priority-fee"
         )
+        // An unrecognised chain keeps the historical mempool behaviour.
+        expect(resolveOrderingPolicy({ chainType: "op-stack" })).toBe(
+            "priority-fee"
+        )
     })
 
     test("an explicit policy wins over the chainType default", async () => {
@@ -174,49 +176,6 @@ describe("resolveOrderingPolicy", () => {
                 orderingPolicy: "pga"
             })
         ).toBe("pga")
-    })
-})
-
-describe("capabilities", () => {
-    test("only fee-ordered policies justify fetching a network gas price", async () => {
-        expect(getSequencerBehaviour("fcfs").feesAffectOrdering).toBe(false)
-        expect(getSequencerBehaviour("timeboost").feesAffectOrdering).toBe(
-            false
-        )
-        expect(getSequencerBehaviour("pga").feesAffectOrdering).toBe(true)
-        expect(getSequencerBehaviour("priority-fee").feesAffectOrdering).toBe(
-            true
-        )
-    })
-
-    test("no Arbitrum-stack policy supports replace-by-fee", async () => {
-        for (const policy of ["fcfs", "timeboost", "pga"] as const) {
-            expect(getSequencerBehaviour(policy).supportsReplaceByFee).toBe(
-                false
-            )
-        }
-        expect(getSequencerBehaviour("priority-fee").supportsReplaceByFee).toBe(
-            true
-        )
-    })
-
-    test("submit blocks until sequenced on every Arbitrum-stack policy", async () => {
-        for (const policy of ["fcfs", "timeboost", "pga"] as const) {
-            expect(
-                getSequencerBehaviour(policy).submitBlocksUntilSequenced
-            ).toBe(true)
-        }
-        // A standard mempool chain returns on acceptance, so the receipt does
-        // not exist yet and inclusion has to be observed rather than fetched.
-        expect(
-            getSequencerBehaviour("priority-fee").submitBlocksUntilSequenced
-        ).toBe(false)
-    })
-
-    test("defaults preserve existing behaviour per chain type", async () => {
-        expect(defaultOrderingPolicy("arbitrum")).toBe("fcfs")
-        expect(defaultOrderingPolicy("default")).toBe("priority-fee")
-        expect(defaultOrderingPolicy("op-stack")).toBe("priority-fee")
     })
 })
 

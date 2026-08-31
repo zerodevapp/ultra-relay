@@ -283,6 +283,19 @@ describe("earlyInclusionChecksEnabled", () => {
         )
     })
 
+    // timeboost is only reachable through an explicit policy — no chainType
+    // maps to it — so without this the capability that gates early checks on
+    // it is pinned by nothing but an assertion about the table's contents.
+    test("on for timeboost, which submit also blocks for", () => {
+        expect(
+            enabled({
+                earlyInclusionChecks: 4,
+                chainType: "default",
+                orderingPolicy: "timeboost"
+            })
+        ).toBe(true)
+    })
+
     test("an explicit policy overrides the chainType default", () => {
         expect(
             enabled({
