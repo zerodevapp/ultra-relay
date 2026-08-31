@@ -235,6 +235,12 @@ export class BundleManager {
         })()
     }
 
+    // Whether a bundle is still awaiting resolution. Lets the early inclusion
+    // check stop as soon as some other path has taken the bundle.
+    public isBundlePending(uid: string): boolean {
+        return this.pendingBundles.has(uid)
+    }
+
     public trackBundle(submittedBundle: SubmittedBundleInfo) {
         this.pendingBundles.set(submittedBundle.uid, submittedBundle)
     }

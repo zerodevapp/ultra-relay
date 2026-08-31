@@ -23,7 +23,11 @@ import {
     formatEther
 } from "viem"
 import type { AltoConfig } from "../createConfig"
-import { defaultOrderingPolicy, isBidNoLongerViable } from "./orderingPolicy"
+import {
+    defaultOrderingPolicy,
+    getSequencerBehaviour,
+    isBidNoLongerViable
+} from "./orderingPolicy"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import type { SenderManager } from "./senderManager"
@@ -175,6 +179,48 @@ export class ExecutorManager {
                 setTimeout(this.autoScalingBundling.bind(this), nextInterval)
             }
         })
+    }
+
+    // Where submitting blocks until the transaction is sequenced, the receipt
+    // already exists by the time submit resolves — so the block watcher's first
+    // poll, a full interval later, is dead time. Run the watcher's own check
+    // early instead. Elsewhere the receipt cannot exist yet and every check
+    // would be a guaranteed miss.
+    private earlyInclusionChecksEnabled(): boolean {
+        if (this.config.earlyInclusionChecks <= 0) {
+            return false
+        }
+
+        return getSequencerBehaviour(
+            this.config.orderingPolicy ??
+                defaultOrderingPolicy(this.config.chainType)
+        ).submitBlocksUntilSequenced
+    }
+
+    // Deliberately reuses handleBlock rather than confirming inclusion on its
+    // own: the resubmit branch self-guards (a freshly submitted bundle is
+    // neither stuck nor underpriced), the overlap guard serialises this against
+    // the watcher, and a miss simply leaves the bundle to the watcher exactly as
+    // today. The read node may lag the sequencer, hence more than one attempt.
+    private async runEarlyInclusionChecks(
+        submittedBundle: SubmittedBundleInfo
+    ): Promise<void> {
+        const { earlyInclusionChecks, earlyInclusionCheckInterval } =
+            this.config
+
+        for (let attempt = 0; attempt < earlyInclusionChecks; attempt++) {
+            if (attempt > 0) {
+                await new Promise((resolve) =>
+                    setTimeout(resolve, earlyInclusionCheckInterval)
+                )
+            }
+
+            if (!this.bundleManager.isBundlePending(submittedBundle.uid)) {
+                return
+            }
+
+            await this.handleBlock(undefined, { repriceStuckBundles: false })
+        }
     }
 
     startWatchingBlocks(): void {
@@ -427,6 +473,16 @@ export class ExecutorManager {
                     bundleSubmitted = true
                     this.startWatchingBlocks()
 
+                    if (this.earlyInclusionChecksEnabled()) {
+                        this.runEarlyInclusionChecks(submittedBundle).catch(
+                            (err) =>
+                                this.logger.error(
+                                    { err },
+                                    "unhandled error in early inclusion check"
+                                )
+                        )
+                    }
+
                     await this.mempool.markUserOpsAsSubmitted({
                         userOps: submittedBundle.bundle.userOps,
                         entryPoint: submittedBundle.bundle.entryPoint,
@@ -529,7 +585,15 @@ export class ExecutorManager {
         }
     }
 
-    private async handleBlock(block?: Block) {
+    // `repriceStuckBundles` is false for the early post-submit check: that
+    // check exists to confirm inclusion, and has no business deciding a bundle
+    // submitted milliseconds ago is stuck. Skipping it also keeps a miss cheap —
+    // a not-yet-propagated receipt would otherwise pull in a gas price and base
+    // fee that only the re-pricing decision reads.
+    private async handleBlock(
+        block?: Block,
+        { repriceStuckBundles = true }: { repriceStuckBundles?: boolean } = {}
+    ) {
         // Checked before opening a context or starting the timer so overlapping
         // ticks don't emit a [timing] line for work that never ran. Synchronous
         // and before any await, so the guard is as tight as it was inside.
@@ -547,12 +611,12 @@ export class ExecutorManager {
                 this.logger,
                 "handleBlock",
                 { blockNumber: block ? Number(block.number) : undefined },
-                () => this.handleBlockInner(block)
+                () => this.handleBlockInner(block, repriceStuckBundles)
             )
         )
     }
 
-    private async handleBlockInner(block?: Block) {
+    private async handleBlockInner(block?: Block, repriceStuckBundles = true) {
         this.currentlyHandlingBlock = true
         const blockReceivedTimestamp = Date.now()
 
@@ -573,9 +637,9 @@ export class ExecutorManager {
         // extra RPC calls, and wait on the slowest of them (the gas price, at
         // ~23ms against ~7ms for a receipt) before it could act on any status.
         // Resolve them only once something actually needs re-pricing.
-        const needsPricing = bundleStatuses.some(
-            ({ status }) => status === "not_found"
-        )
+        const needsPricing =
+            repriceStuckBundles &&
+            bundleStatuses.some(({ status }) => status === "not_found")
 
         const [networkGasPrice, networkBaseFee] = needsPricing
             ? await Promise.all([
@@ -627,7 +691,10 @@ export class ExecutorManager {
                 }
 
                 // can be potentially resubmitted - so we first submit it again to optimize for the speed
-                if (bundleStatus.status === "not_found") {
+                if (
+                    bundleStatus.status === "not_found" &&
+                    repriceStuckBundles
+                ) {
                     this.potentiallyResubmitBundle({
                         blockReceivedTimestamp,
                         submittedBundle,

@@ -471,6 +471,19 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: 3
     },
+    "early-inclusion-checks": {
+        description:
+            "On chains where eth_sendRawTransaction returns only once sequenced, how many times to run the inclusion check straight after submitting rather than waiting for the block watcher's next poll. 0 disables it.",
+        type: "number",
+        require: false,
+        default: 4
+    },
+    "early-inclusion-check-interval": {
+        description: "Delay in ms between early post-submit inclusion checks",
+        type: "number",
+        require: false,
+        default: 25
+    },
     "max-stuck-attempts-before-rotation": {
         description:
             "Total submission attempts on a stuck bundle's wallet (including the initial send) before rotating the userOps to a fresh executor wallet",

@@ -278,3 +278,55 @@ describe("isBidNoLongerViable", () => {
         ).toBe(false)
     })
 })
+
+describe("early inclusion checks are safe to run immediately after submit", () => {
+    // The early check reuses handleBlock, whose not_found branch can re-price a
+    // bundle. That is only safe because a bundle we just built and submitted is
+    // never itself considered non-viable — otherwise the check would resubmit
+    // the transaction it had just sent. Pin the round trip for every policy.
+    const policies: OrderingPolicy[] = [
+        "priority-fee",
+        "fcfs",
+        "timeboost",
+        "pga"
+    ]
+
+    for (const policy of policies) {
+        test(`${policy}: a freshly built bid is not already stale`, () => {
+            for (const baseFee of [1n, BASE_FEE, GWEI, 50n * GWEI]) {
+                for (const tip of [0n, GWEI / 100n, GWEI]) {
+                    const networkGasPrice = {
+                        maxFeePerGas: (baseFee * 120n) / 100n + tip,
+                        maxPriorityFeePerGas: tip
+                    }
+                    const bid = getBundleGasPrice({
+                        policy,
+                        submissionAttempts: 0,
+                        networkGasPrice,
+                        networkBaseFee: baseFee,
+                        totalBeneficiaryFees: 10n * GWEI,
+                        bundleGasUsed: 1_000_000n,
+                        config
+                    })
+
+                    expect(
+                        isBidNoLongerViable({
+                            policy,
+                            bid,
+                            networkGasPrice,
+                            networkBaseFee: baseFee
+                        }),
+                        `${policy} baseFee=${baseFee} tip=${tip} -> ${JSON.stringify(
+                            {
+                                maxFeePerGas: String(bid.maxFeePerGas),
+                                maxPriorityFeePerGas: String(
+                                    bid.maxPriorityFeePerGas
+                                )
+                            }
+                        )}`
+                    ).toBe(false)
+                }
+            }
+        })
+    }
+})
