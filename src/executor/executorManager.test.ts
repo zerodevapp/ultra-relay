@@ -363,3 +363,120 @@ describe("runEarlyInclusionChecks", () => {
         expect(handleBlock).toHaveBeenCalledTimes(3)
     })
 })
+
+// A same-nonce resubmission only replaces anything where the mempool has a
+// replacement rule. Driven through the real method so the choice between
+// replacing, rotating and waiting is observed where it is made.
+describe("recovery respects whether the sequencer has replace-by-fee", () => {
+    const makeResubmit = ({
+        policy,
+        walletCount = 10,
+        quarantined = 0
+    }: {
+        policy: "fcfs" | "pga" | "priority-fee"
+        walletCount?: number
+        quarantined?: number
+    }) => {
+        const replaceTransaction = vi.fn()
+        const rotateStuckBundle = vi.fn().mockResolvedValue(undefined)
+        const stopTrackingBundle = vi.fn()
+        const warn = vi.fn()
+
+        const manager = Object.create(ExecutorManager.prototype)
+        Object.assign(manager, {
+            config: {
+                resubmitStuckTimeout: 0,
+                maxStuckAttemptsBeforeRotation: 100,
+                maxBundlingGasPrice: undefined
+            },
+            logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+            bundleManager: { stopTrackingBundle },
+            senderManager: {
+                getAllWallets: () => new Array(walletCount).fill({})
+            },
+            quarantinedWallets: new Map(
+                Array.from({ length: quarantined }, (_, i) => [`0x${i}`, {}])
+            ),
+            cancelsInFlight: new Set(),
+            replaceTransaction,
+            rotateStuckBundle
+        })
+
+        const pricing =
+            policy === "fcfs"
+                ? { policy, networkBaseFee: 1n }
+                : {
+                      policy,
+                      networkBaseFee: 1n,
+                      networkGasPrice: {
+                          maxFeePerGas: 1n,
+                          maxPriorityFeePerGas: 1n
+                      }
+                  }
+
+        return {
+            // lastReplaced 0 with a zero stuck timeout makes the bundle stuck.
+            run: () =>
+                manager.potentiallyResubmitBundle({
+                    blockReceivedTimestamp: 1,
+                    submittedBundle: {
+                        uid: "u",
+                        executor: { address: "0xexec" },
+                        lastReplaced: 0,
+                        transactionRequest: {
+                            nonce: 1,
+                            maxFeePerGas: 10n,
+                            maxPriorityFeePerGas: 10n
+                        },
+                        bundle: { submissionAttempts: 0 }
+                    },
+                    pricing
+                }),
+            replaceTransaction,
+            rotateStuckBundle,
+            stopTrackingBundle,
+            warn
+        }
+    }
+
+    test.each(["fcfs", "pga"] as const)(
+        "%s: recovers onto a fresh nonce instead of resubmitting the old one",
+        (policy) => {
+            const m = makeResubmit({ policy })
+
+            m.run()
+
+            expect(m.rotateStuckBundle).toHaveBeenCalledTimes(1)
+            expect(m.replaceTransaction).not.toHaveBeenCalled()
+        }
+    )
+
+    // Rotation capped: a second copy of the nonce would only compete with the
+    // first for a queue slot, so the bundle waits. It must stay tracked, or the
+    // userOps are stranded with nothing scheduled to retry them.
+    test("waits rather than duplicating the nonce when rotation is capped", () => {
+        const m = makeResubmit({
+            policy: "fcfs",
+            walletCount: 4,
+            quarantined: 2
+        })
+
+        m.run()
+
+        expect(m.rotateStuckBundle).not.toHaveBeenCalled()
+        expect(m.replaceTransaction).not.toHaveBeenCalled()
+        expect(m.stopTrackingBundle).not.toHaveBeenCalled()
+        expect(m.warn).toHaveBeenCalled()
+    })
+
+    // The mempool path is unchanged: there a resubmission does replace, and
+    // rotating on the first sign of trouble would burn a wallet needlessly.
+    test("priority-fee still replaces in place", () => {
+        const m = makeResubmit({ policy: "priority-fee" })
+
+        m.run()
+
+        expect(m.replaceTransaction).toHaveBeenCalledTimes(1)
+        expect(m.rotateStuckBundle).not.toHaveBeenCalled()
+    })
+})

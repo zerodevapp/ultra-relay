@@ -134,11 +134,13 @@ export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 //                                 as charged therefore forces its bid to
 //                                 satisfy that, which is the direction that
 //                                 protects against paying a tip nobody chose.
-//   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
-//                                 resends the same nonce on every policy. Fixing
-//                                 that needs a strategy decision (wait out the
-//                                 original, or cancel and replace under a fresh
-//                                 nonce), so it is deliberately deferred.
+//   supportsReplaceByFee        - read by `potentiallyResubmitBundle`, which
+//                                 recovers a bundle onto a fresh wallet and
+//                                 nonce rather than resubmitting the old one
+//                                 where the sequencer has no replacement rule.
+//                                 Where rotation is capped it waits instead,
+//                                 since a second copy of the nonce would only
+//                                 compete with the first for a queue slot.
 //   submitBlocksUntilSequenced  - read by `earlyInclusionChecksEnabled`, which
 //                                 decides whether inclusion is polled for
 //                                 immediately after submit or left to the block

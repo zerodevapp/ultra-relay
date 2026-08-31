@@ -773,6 +773,38 @@ export class ExecutorManager {
             )
         }
 
+        // Everything below assumes resubmitting the nonce replaces the pending
+        // transaction. On a sequencer queue there is no replacement rule, so it
+        // does not: both copies sit in the queue and the loser holds a slot
+        // until it fails the nonce check or times out. Neither the gas-price
+        // bump nor the escalate-then-rotate ladder can help, and a fresh wallet
+        // and nonce is the only move that changes anything.
+        //
+        // Replacing in place is futile but self-healing where a replacement
+        // rule exists; here it is worse than futile, so when the quarantine cap
+        // blocks rotation the bundle waits for the next block instead. It stays
+        // tracked, so it is retried rather than stranded.
+        if (!getSequencerBehaviour(pricing.policy).supportsReplaceByFee) {
+            if (canRotate) {
+                rotate()
+                return
+            }
+
+            this.logger.warn(
+                {
+                    event: "recoveryDeferredQuarantineCap",
+                    policy: pricing.policy,
+                    reason: isGasPriceTooLow ? "gas_price" : "stuck",
+                    executor: submittedBundle.executor.address,
+                    nonce: transactionRequest.nonce,
+                    quarantined: this.quarantinedWallets.size,
+                    maxConcurrentQuarantine
+                },
+                "sequencer has no replace-by-fee and rotation is capped, leaving bundle for the next block"
+            )
+            return
+        }
+
         if (isGasPriceTooLow) {
             this.bundleManager.stopTrackingBundle(submittedBundle)
             this.replaceTransaction({
