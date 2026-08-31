@@ -101,10 +101,11 @@ const BEHAVIOUR: Record<OrderingPolicy, SequencerBehaviour> = {
 //                                 that needs a strategy decision (wait out the
 //                                 original, or cancel and replace under a fresh
 //                                 nonce), so it is deliberately deferred.
-//   submitBlocksUntilSequenced  - not yet consumed. Should decide whether
-//                                 inclusion is confirmed by fetching the receipt
-//                                 immediately after submit, or by waiting for the
-//                                 block watcher.
+//   submitBlocksUntilSequenced  - read by `earlyInclusionChecksEnabled`, which
+//                                 decides whether inclusion is polled for
+//                                 immediately after submit or left to the block
+//                                 watcher. Only worth polling where the receipt
+//                                 can already exist when submit returns.
 export function getSequencerBehaviour(
     policy: OrderingPolicy
 ): SequencerBehaviour {
