@@ -747,8 +747,11 @@ const OpEventType = z.union([
             submissionAttempts: z.number(),
             bundlerMaxFeePerGas: hexDataSchema,
             bundlerMaxPriorityFeePerGas: hexDataSchema,
-            networkMaxFeePerGas: hexDataSchema,
-            networkMaxPriorityFeePerGas: hexDataSchema,
+            // Omitted where the ordering policy does not bid for position, so
+            // no network gas price is fetched. networkBaseFee is always
+            // present and is the only fee input that matters on those chains.
+            networkMaxFeePerGas: hexDataSchema.optional(),
+            networkMaxPriorityFeePerGas: hexDataSchema.optional(),
             networkBaseFee: hexDataSchema
         })
     }),

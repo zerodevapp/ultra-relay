@@ -5,7 +5,9 @@ import { ExecutorManager } from "./executorManager"
 // through the prototype and stub only what the dispatch touches. This exercises
 // the real method: the point is which RPCs it issues and which branches it
 // takes, and that is only observable on the real control flow.
-const makeManager = () => {
+const makeManager = ({
+    chainType = "default"
+}: { chainType?: string } = {}) => {
     const tryGetNetworkGasPrice = vi.fn().mockResolvedValue({
         maxFeePerGas: 1n,
         maxPriorityFeePerGas: 1n
@@ -22,6 +24,7 @@ const makeManager = () => {
     const manager = Object.create(ExecutorManager.prototype) as ExecutorManager
     Object.assign(manager, {
         currentlyHandlingBlock: false,
+        config: { chainType },
         bundleManager: {
             getPendingBundles: () => bundles,
             getBundleStatuses,
@@ -84,6 +87,32 @@ describe("handleBlockInner pricing is lazy", () => {
         expect(m.getBaseFee).toHaveBeenCalledTimes(1)
         expect(m.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
     })
+
+    // Where fees do not order, no branch downstream reads the network gas
+    // price — the viability check compares against the base fee and the bid
+    // ignores it — so fetching it is a round trip that buys nothing. The base
+    // fee is still required, which is what separates this from the lazy gate.
+    test("an arrival-ordered chain skips the gas price but keeps the base fee", async () => {
+        const arb = makeManager({ chainType: "arbitrum" })
+        arb.getBundleStatuses.mockResolvedValue(notFound)
+
+        await arb.handleBlockInner(true)
+
+        expect(arb.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+        expect(arb.getBaseFee).toHaveBeenCalledTimes(1)
+        expect(arb.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+    })
+
+    test("the skipped gas price reaches re-pricing as undefined, not as zeros", async () => {
+        const arb = makeManager({ chainType: "arbitrum" })
+        arb.getBundleStatuses.mockResolvedValue(notFound)
+
+        await arb.handleBlockInner(true)
+
+        expect(arb.potentiallyResubmitBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ networkGasPrice: undefined })
+        )
+    })
 })
 
 describe("early inclusion checks stay cheap and never re-price", () => {
@@ -124,6 +153,89 @@ describe("early inclusion checks stay cheap and never re-price", () => {
 
         expect(m.processIncludedBundle).toHaveBeenCalledTimes(1)
         expect(m.potentiallyResubmitBundle).not.toHaveBeenCalled()
+    })
+})
+
+// The bundling path, which is where skipping the fetch actually buys latency:
+// the three pre-bundle calls race, and the gas price is the slowest of them.
+// Driven through the real method so the gate is observed where it runs, not
+// where it is declared.
+describe("sendBundleToExecutor skips the gas price where fees do not order", () => {
+    const makeSender = ({ chainType }: { chainType: string }) => {
+        const tryGetNetworkGasPrice = vi.fn().mockResolvedValue({
+            maxFeePerGas: 2n,
+            maxPriorityFeePerGas: 1n
+        })
+        const getBaseFee = vi.fn().mockResolvedValue(7n)
+        const getTransactionCount = vi.fn().mockResolvedValue(3)
+        const bundle = vi.fn().mockResolvedValue({
+            success: false,
+            reason: "filterops_failed",
+            rejectedUserOps: [],
+            recoverableOps: []
+        })
+        const noop = vi.fn()
+
+        const manager = Object.create(ExecutorManager.prototype)
+        Object.assign(manager, {
+            config: { chainType, publicClient: { getTransactionCount } },
+            logger: { info: noop, warn: noop, error: noop, debug: noop },
+            senderManager: {
+                getWallet: vi.fn().mockResolvedValue({ address: "0xwallet" }),
+                markWalletProcessed: vi.fn().mockResolvedValue(undefined)
+            },
+            gasPriceManager: { tryGetNetworkGasPrice },
+            getBaseFee,
+            executor: { bundle },
+            mempool: {
+                resubmitUserOps: vi.fn().mockResolvedValue(undefined),
+                dropUserOps: vi.fn().mockResolvedValue(undefined)
+            }
+        })
+
+        return {
+            send: () =>
+                manager.sendBundleToExecutor({
+                    entryPoint: "0xep",
+                    version: "0.7",
+                    submissionAttempts: 0,
+                    userOps: [{ userOpHash: "0xop" }]
+                }),
+            tryGetNetworkGasPrice,
+            getBaseFee,
+            getTransactionCount,
+            bundle
+        }
+    }
+
+    test("arrival-ordered: one fewer RPC call, and the bid still gets built", async () => {
+        const m = makeSender({ chainType: "arbitrum" })
+
+        await m.send()
+
+        expect(m.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+        expect(m.getBaseFee).toHaveBeenCalledTimes(1)
+        expect(m.getTransactionCount).toHaveBeenCalledTimes(1)
+        expect(m.bundle).toHaveBeenCalledWith(
+            expect.objectContaining({
+                networkGasPrice: undefined,
+                networkBaseFee: 7n,
+                nonce: 3
+            })
+        )
+    })
+
+    test("fee-ordered: the price is still fetched and still reaches the bid", async () => {
+        const m = makeSender({ chainType: "default" })
+
+        await m.send()
+
+        expect(m.tryGetNetworkGasPrice).toHaveBeenCalledTimes(1)
+        expect(m.bundle).toHaveBeenCalledWith(
+            expect.objectContaining({
+                networkGasPrice: { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n }
+            })
+        )
     })
 })
 

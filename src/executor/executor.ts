@@ -32,11 +32,11 @@ import {
 import type { SendTransactionErrorType } from "viem"
 import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
+import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
     getBundleGasPrice as computeBundleGasPrice,
-    defaultOrderingPolicy
+    resolveOrderingPolicy
 } from "./orderingPolicy"
-import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
@@ -111,7 +111,7 @@ export class Executor {
         bundleGasUsed
     }: {
         bundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         totalBeneficiaryFees: bigint
         bundleGasUsed: bigint
@@ -120,13 +120,11 @@ export class Executor {
             bundlerInitialCommission,
             resubmitMultiplierCeiling,
             legacyTransactions,
-            chainType,
-            orderingPolicy,
             arbitrumGasBidMultiplier
         } = this.config
 
         return computeBundleGasPrice({
-            policy: orderingPolicy ?? defaultOrderingPolicy(chainType),
+            policy: resolveOrderingPolicy(this.config),
             submissionAttempts: bundle.submissionAttempts,
             networkGasPrice,
             networkBaseFee,
@@ -365,7 +363,7 @@ export class Executor {
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         nonce: number
         previousTransactionRequest?: {
@@ -545,9 +543,9 @@ export class Executor {
                 submissionAttempts: userOpBundle.submissionAttempts,
                 bundlerMaxFeePerGas: maxFeePerGas,
                 bundlerMaxPriorityFeePerGas: maxPriorityFeePerGas,
-                networkMaxFeePerGas: networkGasPrice.maxFeePerGas,
+                networkMaxFeePerGas: networkGasPrice?.maxFeePerGas,
                 networkMaxPriorityFeePerGas:
-                    networkGasPrice.maxPriorityFeePerGas,
+                    networkGasPrice?.maxPriorityFeePerGas,
                 networkBaseFee
             })
         } catch (err: unknown) {

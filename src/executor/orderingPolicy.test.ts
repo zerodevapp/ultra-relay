@@ -4,7 +4,9 @@ import {
     defaultOrderingPolicy,
     getBundleGasPrice,
     getSequencerBehaviour,
-    isBidNoLongerViable
+    isBidNoLongerViable,
+    needsNetworkGasPrice,
+    resolveOrderingPolicy
 } from "./orderingPolicy"
 
 const GWEI = 1_000_000_000n
@@ -41,6 +43,70 @@ const effectiveTip = (
     const headroom = maxFeePerGas - baseFee
     return maxPriorityFeePerGas < headroom ? maxPriorityFeePerGas : headroom
 }
+
+describe("skipping the network gas price fetch", () => {
+    test("only fee-ordered policies need one", () => {
+        expect(needsNetworkGasPrice("fcfs")).toBe(false)
+        expect(needsNetworkGasPrice("timeboost")).toBe(false)
+        expect(needsNetworkGasPrice("pga")).toBe(true)
+        expect(needsNetworkGasPrice("priority-fee")).toBe(true)
+    })
+
+    // The gate and the bid must agree about who needs a price. These two pin
+    // both halves of that contract: the policies the gate exempts must build a
+    // bid without one, and the policies it does not exempt must refuse to
+    // invent one rather than silently misbidding every bundle.
+    test.each(["fcfs", "timeboost"] as const)(
+        "%s bids without a network gas price",
+        (policy) => {
+            const priced = bid(policy)
+            const unpriced = bid(policy, { networkGasPrice: undefined })
+
+            expect(unpriced).toEqual(priced)
+        }
+    )
+
+    test.each(["pga", "priority-fee"] as const)(
+        "%s refuses to bid without a network gas price",
+        (policy) => {
+            expect(() => bid(policy, { networkGasPrice: undefined })).toThrow(
+                /network gas price/
+            )
+        }
+    )
+
+    // A fee-ordered chain whose fetch fails still passes zeros, so undefined
+    // here can only mean the gate skipped it — on a policy that never consults
+    // it. Re-pricing on that absence would resubmit against no evidence.
+    test("an absent price is not treated as the network having fallen to zero", () => {
+        expect(
+            isBidNoLongerViable({
+                policy: "priority-fee",
+                bid: { maxFeePerGas: GWEI, maxPriorityFeePerGas: GWEI },
+                networkGasPrice: undefined,
+                networkBaseFee: BASE_FEE
+            })
+        ).toBe(false)
+    })
+})
+
+describe("resolveOrderingPolicy", () => {
+    test("falls back to the chainType default", () => {
+        expect(resolveOrderingPolicy({ chainType: "arbitrum" })).toBe("fcfs")
+        expect(resolveOrderingPolicy({ chainType: "default" })).toBe(
+            "priority-fee"
+        )
+    })
+
+    test("an explicit policy wins over the chainType default", () => {
+        expect(
+            resolveOrderingPolicy({
+                chainType: "arbitrum",
+                orderingPolicy: "pga"
+            })
+        ).toBe("pga")
+    })
+})
 
 describe("capabilities", () => {
     test("only fee-ordered policies justify fetching a network gas price", () => {

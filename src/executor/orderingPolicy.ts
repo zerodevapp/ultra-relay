@@ -91,10 +91,10 @@ const BEHAVIOUR: Record<OrderingPolicy, SequencerBehaviour> = {
 // behaviour that is already handled:
 //   feesAffectOrdering          - read by `isBidNoLongerViable`, which decides
 //                                 the resubmission trigger in
-//                                 `potentiallyResubmitBundle`. Should also gate
-//                                 the `preBundle.networkGasPrice` fetch, since
-//                                 the value cannot change any outcome when
-//                                 false — not yet done.
+//                                 `potentiallyResubmitBundle`, and by
+//                                 `needsNetworkGasPrice`, which gates the gas
+//                                 price fetch on both the bundling and the
+//                                 re-pricing paths.
 //   priorityFeeIsCharged        - implicit in the bid functions below.
 //   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
 //                                 resends the same nonce on every policy. Fixing
@@ -118,6 +118,21 @@ export function defaultOrderingPolicy(chainType: string): OrderingPolicy {
     return chainType === "arbitrum" ? "fcfs" : "priority-fee"
 }
 
+export function resolveOrderingPolicy(config: {
+    orderingPolicy?: OrderingPolicy
+    chainType: string
+}): OrderingPolicy {
+    return config.orderingPolicy ?? defaultOrderingPolicy(config.chainType)
+}
+
+// Is the network gas price worth an RPC call under this policy? Only where the
+// bid competes for position: elsewhere no bid, resubmission trigger, or gas
+// decision reads it, so fetching it buys nothing and costs a round trip on the
+// bundling path.
+export function needsNetworkGasPrice(policy: OrderingPolicy): boolean {
+    return getSequencerBehaviour(policy).feesAffectOrdering
+}
+
 // Has an already-submitted bundle's bid stopped being good enough to rely on?
 // A true result is a reason to re-price and resubmit; it is deliberately
 // separate from the stuck-timeout check, which is about time rather than price.
@@ -129,10 +144,17 @@ export function isBidNoLongerViable({
 }: {
     policy: OrderingPolicy
     bid: GasPriceParameters
-    networkGasPrice: GasPriceParameters
+    networkGasPrice: GasPriceParameters | undefined
     networkBaseFee: bigint
 }): boolean {
     if (getSequencerBehaviour(policy).feesAffectOrdering) {
+        // Only absent when the caller skipped the fetch, which it does only
+        // for policies that never reach this branch. Treat it as no evidence
+        // the bid has fallen behind rather than re-pricing on a guess.
+        if (!networkGasPrice) {
+            return false
+        }
+
         // Fees determine position, so falling behind the network price means
         // losing it and the bundle should be re-priced to compete.
         return (
@@ -152,7 +174,9 @@ export function isBidNoLongerViable({
 type BidInputs = {
     policy: OrderingPolicy
     submissionAttempts: number
-    networkGasPrice: GasPriceParameters
+    // Absent where `needsNetworkGasPrice` is false and the caller skipped the
+    // fetch. Only the arrival-ordered bids may be built without it.
+    networkGasPrice: GasPriceParameters | undefined
     networkBaseFee: bigint
     totalBeneficiaryFees: bigint
     bundleGasUsed: bigint
@@ -164,16 +188,28 @@ type BidInputs = {
     }
 }
 
+type FeeOrderedBidInputs = BidInputs & { networkGasPrice: GasPriceParameters }
+
 export function getBundleGasPrice(inputs: BidInputs): GasPriceParameters {
-    switch (inputs.policy) {
-        case "fcfs":
-        case "timeboost":
-            return arrivalOrderedBid(inputs)
-        case "pga":
-            return priorityAuctionBid(inputs)
-        default:
-            return mempoolBid(inputs)
+    if (inputs.policy === "fcfs" || inputs.policy === "timeboost") {
+        return arrivalOrderedBid(inputs)
     }
+
+    const { networkGasPrice } = inputs
+    if (!networkGasPrice) {
+        // The caller decides whether to fetch by asking `needsNetworkGasPrice`,
+        // so the two must agree. Reaching here means they have drifted apart,
+        // and guessing a price would quietly misbid every bundle.
+        throw new Error(
+            `ordering policy "${inputs.policy}" bids against the network gas price, but none was fetched`
+        )
+    }
+
+    const feeOrdered: FeeOrderedBidInputs = { ...inputs, networkGasPrice }
+
+    return inputs.policy === "pga"
+        ? priorityAuctionBid(feeOrdered)
+        : mempoolBid(feeOrdered)
 }
 
 // Fees do not order, so the only job of the bid is to stay above the base fee
@@ -215,7 +251,7 @@ function priorityAuctionBid({
     networkGasPrice,
     networkBaseFee,
     config
-}: BidInputs): GasPriceParameters {
+}: FeeOrderedBidInputs): GasPriceParameters {
     const tip = scaleBigIntByPercent(
         networkGasPrice.maxPriorityFeePerGas,
         100n + 20n * BigInt(submissionAttempts)
@@ -236,7 +272,7 @@ function mempoolBid({
     totalBeneficiaryFees,
     bundleGasUsed,
     config
-}: BidInputs): GasPriceParameters {
+}: FeeOrderedBidInputs): GasPriceParameters {
     let [networkMaxFeePerGas, networkMaxPriorityFeePerGas] = [
         networkGasPrice.maxFeePerGas,
         networkGasPrice.maxPriorityFeePerGas
