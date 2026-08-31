@@ -9,7 +9,7 @@ import {
     getBundleGasPrice,
     getSequencerBehaviour,
     isBidNoLongerViable,
-    needsNetworkGasPrice,
+    isFeeOrdered,
     reportedNetworkGasPrice,
     resolveOrderingPolicy,
     unpricedFallback
@@ -41,7 +41,7 @@ const pricingFor = (
         networkBaseFee?: bigint
     } = {}
 ): BundlePricing =>
-    needsNetworkGasPrice(policy)
+    isFeeOrdered(policy)
         ? { policy, networkBaseFee, networkGasPrice }
         : { policy, networkBaseFee }
 
@@ -71,12 +71,12 @@ const effectiveTip = (
     return maxPriorityFeePerGas < headroom ? maxPriorityFeePerGas : headroom
 }
 
-describe("skipping the network gas price fetch", () => {
-    test("only fee-ordered policies need one", () => {
-        expect(needsNetworkGasPrice("fcfs")).toBe(false)
-        expect(needsNetworkGasPrice("timeboost")).toBe(false)
-        expect(needsNetworkGasPrice("pga")).toBe(true)
-        expect(needsNetworkGasPrice("priority-fee")).toBe(true)
+describe("sorting a policy into its family", () => {
+    test("only fee-ordered policies bid for position", () => {
+        expect(isFeeOrdered("fcfs")).toBe(false)
+        expect(isFeeOrdered("timeboost")).toBe(false)
+        expect(isFeeOrdered("pga")).toBe(true)
+        expect(isFeeOrdered("priority-fee")).toBe(true)
     })
 
     // The families are derived from the capability table, so they cannot drift
@@ -102,7 +102,7 @@ describe("skipping the network gas price fetch", () => {
     test.each(["fcfs", "timeboost", "pga", "priority-fee"] as const)(
         "%s: the predicate reads feesAffectOrdering",
         (policy) => {
-            expect(needsNetworkGasPrice(policy)).toBe(
+            expect(isFeeOrdered(policy)).toBe(
                 getSequencerBehaviour(policy).feesAffectOrdering
             )
         }

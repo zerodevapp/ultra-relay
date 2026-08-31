@@ -113,12 +113,15 @@ export type ArrivalOrderedPolicy = PoliciesWhereFeesOrder<false>
 
 // Consumers, so that a declared-but-unread capability is not mistaken for a
 // behaviour that is already handled:
-//   feesAffectOrdering          - read by `isBidNoLongerViable`, which decides
-//                                 the resubmission trigger in
-//                                 `potentiallyResubmitBundle`, and by
-//                                 `needsNetworkGasPrice`, which gates the gas
-//                                 price fetch on both the bundling and the
-//                                 re-pricing paths.
+//   feesAffectOrdering          - splits the policies into the two families
+//                                 above at the type level, and is read at
+//                                 runtime by `isFeeOrdered` to sort a config
+//                                 value into one. Everything downstream —
+//                                 which bid is built, whether a gas price is
+//                                 fetched, what `isBidNoLongerViable` compares
+//                                 against — follows from the resulting
+//                                 `BundlePricing` shape rather than reading
+//                                 this flag again.
 //   priorityFeeIsCharged        - implicit in the bid functions below.
 //   supportsReplaceByFee        - not yet consumed. Resubmission still bumps and
 //                                 resends the same nonce on every policy. Fixing
@@ -149,16 +152,15 @@ export function resolveOrderingPolicy(config: {
     return config.orderingPolicy ?? defaultOrderingPolicy(config.chainType)
 }
 
-// Is the network gas price worth an RPC call under this policy? Only where the
-// bid competes for position: elsewhere no bid, resubmission trigger, or gas
-// decision reads it, so fetching it buys nothing and costs a round trip on the
-// bundling path.
+// Does this policy's bid compete for position? The families are a type-level
+// split, so this is how a policy read from config at runtime is sorted into
+// one: narrowing here is what lets the matching `BundlePricing` be built
+// without a cast.
 //
-// This is the single point where the runtime capability table and the static
-// split between the two policy families are asserted to agree. Narrowing here
-// is what lets `BundlePricing` be built without a cast and read without a
-// guard, so the agreement is pinned by a test rather than trusted.
-export function needsNetworkGasPrice(
+// What follows from the answer is the caller's to decide — for both callers
+// today it is whether to spend a round trip on the network gas price, but that
+// is a consequence rather than the question.
+export function isFeeOrdered(
     policy: OrderingPolicy
 ): policy is FeeOrderedPolicy {
     return getSequencerBehaviour(policy).feesAffectOrdering
@@ -193,7 +195,7 @@ export function reportedNetworkGasPrice(
 // leave `isBidNoLongerViable` false and the bundle to the stuck-timeout check,
 // which is how a failed fetch has always been treated.
 export function unpricedFallback(policy: OrderingPolicy): BundlePricing {
-    if (needsNetworkGasPrice(policy)) {
+    if (isFeeOrdered(policy)) {
         return {
             policy,
             networkBaseFee: 0n,

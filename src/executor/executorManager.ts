@@ -28,7 +28,7 @@ import {
     type BundlePricing,
     getSequencerBehaviour,
     isBidNoLongerViable,
-    needsNetworkGasPrice,
+    isFeeOrdered,
     resolveOrderingPolicy,
     unpricedFallback
 } from "./orderingPolicy"
@@ -295,7 +295,7 @@ export class ExecutorManager {
         const baseFee = () =>
             timed(this.logger, `${step}.baseFee`, ctx, () => this.getBaseFee())
 
-        if (!needsNetworkGasPrice(policy)) {
+        if (!isFeeOrdered(policy)) {
             return { policy, networkBaseFee: await baseFee() }
         }
 
