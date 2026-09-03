@@ -705,7 +705,7 @@ export class ExecutorManager {
             maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
 
         const isStuck =
-            Date.now() - lastReplaced > this.config.resubmitStuckTimeout
+            Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
 
         if (!(isGasPriceTooLow || isStuck)) {
             return
