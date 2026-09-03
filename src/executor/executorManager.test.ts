@@ -168,29 +168,6 @@ describe("ExecutorManager stale block watchdog", () => {
         expect(getPending()).toHaveLength(0)
     })
 
-    // biome-ignore lint/suspicious/noSkippedTests: temporary e2e bisect probe
-    it.skip("stops watching once the last pending bundle is resolved", async () => {
-        const { executorManager, getBundleStatuses, emitBlock, unwatch } =
-            createHarness()
-
-        getBundleStatuses
-            .mockResolvedValueOnce([{ status: "not_found" }])
-            .mockResolvedValueOnce([includedStatus])
-
-        executorManager.startWatchingBlocks()
-
-        await emitBlock()
-        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT)
-
-        expect(unwatch).not.toHaveBeenCalled()
-
-        // Nothing pending and no block coming, so the watchdog must clean up
-        // or both it and the block watcher poll forever.
-        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT)
-
-        expect(unwatch).toHaveBeenCalled()
-    })
-
     it("stays idle while blocks keep arriving", async () => {
         const { executorManager, getBundleStatuses, emitBlock } =
             createHarness()
