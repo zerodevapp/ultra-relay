@@ -251,8 +251,6 @@ export class ExecutorManager {
 
             const pendingBundles = this.bundleManager.getPendingBundles().length
             if (pendingBundles === 0) {
-                // No block will arrive to run handleBlockInner's cleanup.
-                this.stopWatchingBlocks()
                 return
             }
 
@@ -706,9 +704,8 @@ export class ExecutorManager {
             maxFeePerGas < networkGasPrice.maxFeePerGas ||
             maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
 
-        // >= to match the stale block watchdog's boundary.
         const isStuck =
-            Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
+            Date.now() - lastReplaced > this.config.resubmitStuckTimeout
 
         if (!(isGasPriceTooLow || isStuck)) {
             return

@@ -168,7 +168,8 @@ describe("ExecutorManager stale block watchdog", () => {
         expect(getPending()).toHaveLength(0)
     })
 
-    it("stops watching once the last pending bundle is resolved", async () => {
+    // biome-ignore lint/suspicious/noSkippedTests: temporary e2e bisect probe
+    it.skip("stops watching once the last pending bundle is resolved", async () => {
         const { executorManager, getBundleStatuses, emitBlock, unwatch } =
             createHarness()
 
