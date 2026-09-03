@@ -231,21 +231,11 @@ export class ExecutorManager {
         })
     }
 
-    // handleBlock is the only path that resolves a submitted bundle: it reads
-    // receipts, applies resubmitStuckTimeout, and returns the executor wallet
-    // to the sender pool. watchBlocks only fires it on a NEW block, which
-    // deadlocks a chain that produces blocks only when it receives a
-    // transaction (Arbitrum Orbit and friends): the bundler stops submitting ->
-    // no blocks -> handleBlock never runs -> no wallet is ever freed -> every
-    // later bundle blocks forever in getWallet(). Nothing inside that loop can
-    // break it; in practice only an unrelated third-party transaction did.
-    //
-    // Receipt polling itself is correctly block-driven (a receipt cannot change
-    // without a new block, and each tick costs one lookup per pending bundle
-    // plus gas price reads), so the watcher stays and the interval below does
-    // no RPC work on a healthy chain. This only re-arms the *time*-based stuck
-    // check that the block gate otherwise makes unreachable — the same fix
-    // reconcileQuarantinedWallets already applies one layer down.
+    // handleBlock is the only path that frees an executor wallet, and
+    // watchBlocks only fires it on a new block. On a chain that produces blocks
+    // only when it receives a transaction, that deadlocks: no submissions -> no
+    // blocks -> no wallets freed. Re-arms the time-based stuck check the block
+    // gate makes unreachable; no RPC on a healthy chain.
     private startStaleBlockWatchdog(): void {
         if (this.staleBlockTimer) {
             return
@@ -261,6 +251,8 @@ export class ExecutorManager {
 
             const pendingBundles = this.bundleManager.getPendingBundles().length
             if (pendingBundles === 0) {
+                // No block will arrive to run handleBlockInner's cleanup.
+                this.stopWatchingBlocks()
                 return
             }
 
@@ -598,12 +590,8 @@ export class ExecutorManager {
             return
         }
 
-        // Held in try/finally rather than reset at the end of handleBlockInner:
-        // an unexpected throw in there (a store error in freeSubmittedBundle,
-        // say) would otherwise leave the flag set and make every later tick
-        // return early at the guard above — wedging bundle reconciliation for
-        // the lifetime of the process. Same guard shape as
-        // reconcileQuarantinedWallets.
+        // try/finally, else a throw in handleBlockInner leaves this set and
+        // every later tick bails at the guard above.
         this.currentlyHandlingBlock = true
 
         // startWatchingBlocks() registers its timers inside whichever flow
@@ -718,8 +706,9 @@ export class ExecutorManager {
             maxFeePerGas < networkGasPrice.maxFeePerGas ||
             maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
 
+        // >= to match the stale block watchdog's boundary.
         const isStuck =
-            Date.now() - lastReplaced > this.config.resubmitStuckTimeout
+            Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
 
         if (!(isGasPriceTooLow || isStuck)) {
             return

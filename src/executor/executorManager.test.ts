@@ -1,10 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { ExecutorManager } from "./executorManager"
 
-// Chains that only produce a block when they receive a transaction (Arbitrum
-// Orbit and friends) deadlock a purely block-driven reconciler: the bundler
-// stops submitting, so no block is produced, so handleBlock never runs, so no
-// executor wallet is ever freed. These cover the timer that breaks that loop.
+// Chains that only produce a block per transaction deadlock a block-driven
+// reconciler. These cover the timer that breaks that loop.
 
 const RESUBMIT_STUCK_TIMEOUT = 10_000
 const BLOCK_TIME = 1000
@@ -25,13 +23,38 @@ const createHarness = () => {
     let onBlock: ((block: unknown) => Promise<void>) | undefined
     const unwatch = vi.fn()
 
+    const submittedBundle = {
+        uid: "0xbundle",
+        transactionHash: "0xtx",
+        previousTransactionHashes: [],
+        // Matches networkGasPrice, so isGasPriceTooLow stays false.
+        transactionRequest: {
+            maxFeePerGas: 1n,
+            maxPriorityFeePerGas: 1n,
+            nonce: 0
+        },
+        bundle: {
+            entryPoint: "0xentrypoint",
+            version: "0.7",
+            userOps: [{ userOpHash: "0xuserop" }],
+            submissionAttempts: 1
+        },
+        executor: { address: "0xexecutor" },
+        lastReplaced: Date.now()
+    }
+
+    // Mutable: production drops the bundle in processIncludedBundle.
+    let pendingBundles: unknown[] = [submittedBundle]
+
     const getBundleStatuses = vi.fn().mockResolvedValue([])
+    const processIncludedBundle = vi.fn(() => {
+        pendingBundles = []
+    })
 
     const bundleManager = {
-        // One bundle pending for the whole test: handleBlock must keep
-        // reconciling it, and must not stop the watcher.
-        getPendingBundles: vi.fn().mockReturnValue([{ uid: "0xbundle" }]),
-        getBundleStatuses
+        getPendingBundles: vi.fn(() => pendingBundles),
+        getBundleStatuses,
+        processIncludedBundle
     }
 
     const config = {
@@ -50,13 +73,16 @@ const createHarness = () => {
             }) => {
                 onBlock = args.onBlock
                 return unwatch
-            }
+            },
+            // Only cost metrics reach this, and they swallow failures.
+            getTransactionReceipt: vi
+                .fn()
+                .mockRejectedValue(new Error("no receipt in test"))
         }
     }
 
     const executorManager = new ExecutorManager({
-        // biome-ignore lint/suspicious/noExplicitAny: narrow stubs, only the
-        // block-reconcile path is under test.
+        // Narrow stubs: only the block-reconcile path is under test.
         config: config as any,
         executor: {} as any,
         mempool: {} as any,
@@ -74,11 +100,21 @@ const createHarness = () => {
     return {
         executorManager,
         getBundleStatuses,
+        processIncludedBundle,
+        submittedBundle,
         unwatch,
+        getPending: () => pendingBundles,
         emitBlock: async () => {
             await onBlock?.({ number: 1n, baseFeePerGas: 1n })
         }
     }
+}
+
+const includedStatus = {
+    status: "included",
+    userOpReceipts: {},
+    transactionHash: "0xtx",
+    blockNumber: 2n
 }
 
 describe("ExecutorManager stale block watchdog", () => {
@@ -92,13 +128,66 @@ describe("ExecutorManager stale block watchdog", () => {
 
         executorManager.startWatchingBlocks()
 
-        // No block is ever emitted. Before the watchdog this was a permanent
-        // stall: pending bundles held their wallets forever.
+        // No block ever emitted. Was a permanent stall before the watchdog.
         expect(getBundleStatuses).not.toHaveBeenCalled()
 
         await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT + BLOCK_TIME)
 
         expect(getBundleStatuses).toHaveBeenCalled()
+    })
+
+    it("releases a bundle that lands while blocks are stalled", async () => {
+        const {
+            executorManager,
+            getBundleStatuses,
+            processIncludedBundle,
+            submittedBundle,
+            emitBlock,
+            getPending
+        } = createHarness()
+
+        // Not yet included, and this is the last block the chain produces.
+        getBundleStatuses
+            .mockResolvedValueOnce([{ status: "not_found" }])
+            .mockResolvedValueOnce([includedStatus])
+
+        executorManager.startWatchingBlocks()
+
+        await emitBlock()
+
+        expect(processIncludedBundle).not.toHaveBeenCalled()
+        expect(getPending()).toHaveLength(1)
+
+        // Only the watchdog can see the inclusion now.
+        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT)
+
+        expect(processIncludedBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ submittedBundle })
+        )
+        // Left the pending set -> wallet released.
+        expect(getPending()).toHaveLength(0)
+    })
+
+    it("stops watching once the last pending bundle is resolved", async () => {
+        const { executorManager, getBundleStatuses, emitBlock, unwatch } =
+            createHarness()
+
+        getBundleStatuses
+            .mockResolvedValueOnce([{ status: "not_found" }])
+            .mockResolvedValueOnce([includedStatus])
+
+        executorManager.startWatchingBlocks()
+
+        await emitBlock()
+        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT)
+
+        expect(unwatch).not.toHaveBeenCalled()
+
+        // Nothing pending and no block coming, so the watchdog must clean up
+        // or both it and the block watcher poll forever.
+        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT)
+
+        expect(unwatch).toHaveBeenCalled()
     })
 
     it("stays idle while blocks keep arriving", async () => {
@@ -107,8 +196,7 @@ describe("ExecutorManager stale block watchdog", () => {
 
         executorManager.startWatchingBlocks()
 
-        // A block every blockTime keeps lastReconcileAt fresh, so the watchdog
-        // must add no reconciles (and therefore no RPC) of its own.
+        // Fresh lastReconcileAt -> watchdog adds no reconciles of its own.
         for (let i = 0; i < RESUBMIT_STUCK_TIMEOUT / BLOCK_TIME + 2; i++) {
             await emitBlock()
             await vi.advanceTimersByTimeAsync(BLOCK_TIME)
@@ -127,8 +215,7 @@ describe("ExecutorManager stale block watchdog", () => {
 
         executorManager.startWatchingBlocks()
 
-        // A throw used to leave currentlyHandlingBlock set, so every later tick
-        // returned early at the guard and reconciliation never resumed.
+        // A throw used to leave currentlyHandlingBlock set forever.
         await emitBlock().catch(() => undefined)
         await emitBlock()
 
