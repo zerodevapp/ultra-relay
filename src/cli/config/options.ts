@@ -137,9 +137,9 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
     },
     "revalidation-tracer": {
         description:
-            "Re-run the JavaScript validation tracer when a mempool userOp is picked for a bundle even if its referenced code hashes are unchanged. Off re-checks with the plain simulation call instead.",
+            "Re-run the JavaScript validation tracer when a mempool userOp is picked for a bundle even if its referenced code hashes are unchanged. Production-safe default is on; off is benchmark-only.",
         type: "boolean",
-        default: false
+        default: true
     },
     "tracer-result-log-level": {
         description:

@@ -29,7 +29,10 @@ export const bundlerArgsSchema = z.object({
     "deterministic-deployer-address": addressSchema,
     "safe-mode": z.boolean(),
     "bundle-interval-scale-ms": z.number().min(0).default(10),
-    "revalidation-tracer": z.boolean().default(false),
+    // ERC-4337 requires the validation trace to be rerun before inclusion.
+    // Skipping it is benchmark-only because unchanged bytecode does not prove
+    // unchanged storage access, nonce, deposit, or validation environment.
+    "revalidation-tracer": z.boolean().default(true),
     "tracer-result-log-level": z
         .enum(["trace", "debug", "info", "warn", "error", "fatal"])
         .default("debug"),

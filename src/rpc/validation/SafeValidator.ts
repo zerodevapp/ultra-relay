@@ -208,10 +208,9 @@ export class SafeValidator
                 )
             }
             if (cachedStorageMap && !this.config.revalidationTracer) {
-                // Unchanged code cannot change the opcode/storage rules the
-                // admission trace established; only state (signature, nonce,
-                // deposit, validity window) can, and the plain simulation
-                // re-checks that without a second tracer run on the node.
+                // Explicit benchmark-only mode. Unchanged bytecode is not a
+                // proof that storage access or validation state is unchanged;
+                // production defaults to a fresh tracer run below.
                 const res = await super.getValidationResultV07({
                     userOp,
                     queuedUserOps: queuedUserOps as UserOperation07[],
