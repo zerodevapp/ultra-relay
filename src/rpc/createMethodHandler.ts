@@ -2,6 +2,7 @@ import type { ApiVersion } from "@alto/types"
 import type { ReadonlyDeep } from "type-fest"
 import type { z } from "zod"
 import type { RpcHandler } from "./rpcHandler"
+import { trace, SpanStatusCode } from "@opentelemetry/api"
 
 export type MethodHandler<T extends z.ZodType = z.ZodType> = {
     schema: T
@@ -50,12 +51,23 @@ export const createMethodHandler = <T extends z.ZodType>(methodConfig: {
         method: methodConfig.method,
         handler: (args) => {
             const frozenParams = freezeDeep(args.params)
-
-            // Call the handler with frozen params
-            return methodConfig.handler({
+            const invoke = () => methodConfig.handler({
                 rpcHandler: args.rpcHandler,
                 params: frozenParams,
                 apiVersion: args.apiVersion
+            })
+            if (process.env.PERF_TRACING !== "true") return invoke()
+            return trace.getTracer("ultra-relay-rpc").startActiveSpan(`rpc.${methodConfig.method}`, async (span) => {
+                try {
+                    const result = await invoke()
+                    if (methodConfig.method === "eth_sendUserOperation" && typeof result === "string") {
+                        span.setAttribute("profiler.userop", result.toLowerCase())
+                    }
+                    return result
+                } catch (error) {
+                    span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) })
+                    throw error
+                } finally { span.end() }
             })
         }
     }

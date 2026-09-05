@@ -368,6 +368,10 @@ export const setupServer = async ({
             await senderManager.markWalletProcessed(account)
         }
 
+        if (process.env.PERF_TRACING === "true") {
+            const { profileShutdown } = await import("../utils/profileShutdown.js")
+            await profileShutdown.flush?.()
+        }
         process.exit(0)
     }
 

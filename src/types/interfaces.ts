@@ -69,6 +69,7 @@ export interface InterfaceValidator {
         queuedUserOps: UserOperation[]
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
+        storageMap?: validation.StorageMap
     }): Promise<
         validation.ValidationResult & {
             storageMap: validation.StorageMap

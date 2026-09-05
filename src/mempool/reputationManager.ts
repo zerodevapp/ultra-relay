@@ -227,13 +227,12 @@ export class ReputationManager implements InterfaceReputationManager {
         this.maxMempoolUserOpsPerSender = 4n
         this.bundlerReputationParams = BundlerReputationParams
 
-        // Currently we don't have any args for blacklist and whitelist
-        // for (const address of blackList || []) {
-        //     this.blackList.add(address)
-        // }
-        // for (const address of whiteList || []) {
-        //     this.whitelist.add(address)
-        // }
+        // Operator-owned staked entities (e.g. a shared account factory) may be
+        // exempted from throttling; a throttle on such an entity locks out every
+        // wallet that depends on it. Off unless configured.
+        for (const address of config.reputationWhitelist ?? []) {
+            this.whitelist.add(getAddress(address))
+        }
         for (const entryPoint of config.entrypoints) {
             this.entries[entryPoint] = {}
         }
@@ -666,7 +665,7 @@ export class ReputationManager implements InterfaceReputationManager {
     }
 
     getStatus(entryPoint: Address, address: Address | null): ReputationStatus {
-        if (!address || this.whitelist.has(address)) {
+        if (!address || this.whitelist.has(getAddress(address))) {
             return ReputationStatuses.ok
         }
         if (this.blackList.has(address)) {
@@ -740,7 +739,7 @@ export class ReputationManager implements InterfaceReputationManager {
     }
 
     isWhiteListed(address: Address): boolean {
-        return this.whitelist.has(address)
+        return this.whitelist.has(getAddress(address))
     }
 
     checkStake(

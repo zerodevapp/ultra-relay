@@ -5,7 +5,7 @@ import {
     commaSeperatedAddressPattern,
     hexData32Schema
 } from "@alto/types"
-import { type Hex, parseGwei } from "viem"
+import { type Hex, parseGwei, getAddress } from "viem"
 import { type Account, privateKeyToAccount } from "viem/accounts"
 import { z } from "zod"
 
@@ -28,6 +28,20 @@ export const bundlerArgsSchema = z.object({
         }),
     "deterministic-deployer-address": addressSchema,
     "safe-mode": z.boolean(),
+    "bundle-interval-scale-ms": z.number().min(0).default(10),
+    "revalidation-tracer": z.boolean().default(false),
+    "tracer-result-log-level": z
+        .enum(["trace", "debug", "info", "warn", "error", "fatal"])
+        .default("debug"),
+    "validation-rpc-url": z.string().url().optional(),
+    "tracer-timeout": z
+        .string()
+        .regex(/^[0-9]+(ns|us|µs|ms|s|m|h)$/)
+        .optional(),
+    "reputation-whitelist": z
+        .string()
+        .transform((val) => val.split(",").map((a) => getAddress(a.trim())))
+        .optional(),
 
     "min-entity-stake": z.number().int().min(0),
     "min-entity-unstake-delay": z.number().int().min(0),

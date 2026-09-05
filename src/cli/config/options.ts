@@ -128,6 +128,42 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         description: "Time in milliseconds for preconfirmation (flashblocks)",
         type: "number",
         default: undefined
+    },
+    "bundle-interval-scale-ms": {
+        description:
+            "Milliseconds added to the auto-scaling bundle interval per userOp seen in the last minute (interval = min-bundle-interval + ops/min * this, capped at max-bundle-interval)",
+        type: "number",
+        default: 10
+    },
+    "revalidation-tracer": {
+        description:
+            "Re-run the JavaScript validation tracer when a mempool userOp is picked for a bundle even if its referenced code hashes are unchanged. Off re-checks with the plain simulation call instead.",
+        type: "boolean",
+        default: false
+    },
+    "tracer-result-log-level": {
+        description:
+            "Log level for the serialized validation tracer result (safe mode)",
+        type: "string",
+        default: "debug"
+    },
+    "validation-rpc-url": {
+        description:
+            "Optional RPC url used only for debug_traceCall validation tracing, so tracing load can run on a separate node",
+        type: "string",
+        require: false
+    },
+    "tracer-timeout": {
+        description:
+            "Timeout passed to debug_traceCall for JavaScript tracing (geth duration, e.g. 3s). Unset uses the node default.",
+        type: "string",
+        require: false
+    },
+    "reputation-whitelist": {
+        description:
+            "Comma-separated entity addresses (e.g. an operator-owned staked factory) exempt from reputation throttling in safe mode",
+        type: "string",
+        require: false
     }
 }
 

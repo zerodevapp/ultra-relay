@@ -79,7 +79,7 @@ export const createRedisSenderManager = async ({
 
             while (!walletAddress) {
                 walletAddress = await redisQueue.pop()
-                await delay(100)
+                if (!walletAddress) await delay(100)
             }
 
             const wallet = wallets.find((w) => w.address === walletAddress)

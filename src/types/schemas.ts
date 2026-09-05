@@ -809,6 +809,9 @@ export const userOpInfoSchema = z.object({
     // transition logs to debug so retries don't repeat the info lines.
     reentered: z.boolean().optional(),
     referencedContracts: referencedCodeHashesSchema.optional(),
+    // Storage slots touched during the admission-time trace, reused at bundle
+    // time when the referenced code is unchanged instead of tracing again.
+    storageMap: z.record(z.string(), z.any()).optional(),
     submissionAttempts: z.number()
 })
 

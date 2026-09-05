@@ -26,6 +26,7 @@ import { entryPoint07Abi } from "viem/account-abstraction"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import { type BundleStatus, getBundleStatus } from "./getBundleStatus"
+import { profileIncludedUserOp } from "../utils/profileLifecycle"
 
 export class BundleManager {
     private reputationManager: InterfaceReputationManager
@@ -279,6 +280,7 @@ export class BundleManager {
         const { userOpHash, userOp, submissionAttempts, addedToMempool } =
             userOpInfo
         const { receivedAt, processingAt, submittedAt, reentered } = userOpInfo
+        profileIncludedUserOp(userOpInfo, transactionHash, blockReceivedTimestamp)
 
         const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
         // totalMs spans the op's whole life (receivedAt survives resubmission);

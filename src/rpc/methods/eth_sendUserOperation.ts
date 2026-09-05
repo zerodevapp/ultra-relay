@@ -287,6 +287,7 @@ export async function addToMempoolIfValid({
         entryPoint,
         {
             referencedContracts: validationResult.referencedContracts,
+            storageMap: validationResult.storageMap,
             receivedAt
         }
     )

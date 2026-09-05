@@ -2,6 +2,7 @@ import type { Logger, Metrics } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import Queue, { type Queue as QueueType } from "bull"
 import Redis from "ioredis"
+import { trace, SpanStatusCode } from "@opentelemetry/api"
 import { type Hex, toHex } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { OpEventType } from "../types/schemas"
@@ -265,11 +266,25 @@ export class EventManager {
             return
         }
 
-        asyncCallWithTimeout(
-            this.redisEventManagerQueue.add(entry, {
+        const enqueue = () => this.redisEventManagerQueue!.add(entry, {
                 removeOnComplete: true,
                 removeOnFail: true
-            }),
+            })
+        const pending = process.env.PERF_TRACING === "true"
+            ? trace.getTracer("ultra-relay-events").startActiveSpan("status.enqueue", {
+                attributes: { "profiler.userop": entry.userOperationHash.toLowerCase(), "messaging.event_type": eventType }
+            }, async span => {
+                try {
+                    const job = await enqueue()
+                    span.setAttribute("messaging.message.id", String(job.id))
+                    return job
+                } catch (error) {
+                    span.setStatus({ code: SpanStatusCode.ERROR })
+                    throw error
+                } finally { span.end() }
+            }) : enqueue()
+        asyncCallWithTimeout(
+            pending,
             500 // 500ms timeout
         )
             .then(() => {

@@ -25,6 +25,7 @@ import type { Metrics } from "@alto/utils"
 import {
     getAddressFromInitCodeOrPaymasterAndData,
     getAuthorizationStateOverrides,
+    isVersion06,
     isVersion08,
     jsonStringifyWithBigint,
     toPackedUserOp
@@ -32,9 +33,12 @@ import {
 import {
     type ExecutionRevertedError,
     type Hex,
+    type PublicClient,
+    createPublicClient,
     decodeErrorResult,
     encodeDeployData,
     encodeFunctionData,
+    http,
     zeroAddress
 } from "viem"
 import type { AltoConfig } from "../../createConfig"
@@ -44,6 +48,7 @@ import {
     bundlerCollectorTracer
 } from "./BundlerCollectorTracerV07"
 import { tracerResultParserV06 } from "./TracerResultParserV06"
+import { bundlerCollectorTracer as bundlerCollectorTracerV06 } from "./BundlerCollectorTracerV06"
 import { tracerResultParserV07 } from "./TracerResultParserV07"
 import { UnsafeValidator } from "./UnsafeValidator"
 import { debug_traceCall } from "./tracer"
@@ -52,11 +57,15 @@ export class SafeValidator
     extends UnsafeValidator
     implements InterfaceValidator
 {
-    private senderManager: SenderManager
+    // Tracing may run against a dedicated node so its CPU cost never competes
+    // with the node that serves estimation, receipts and bundle submission.
+    private traceClient: PublicClient
 
+    // The sender manager is accepted for constructor compatibility; validation
+    // no longer borrows executor wallets.
     constructor({
         config,
-        senderManager,
+        senderManager: _senderManager,
         metrics,
         gasPriceManager
     }: {
@@ -70,7 +79,38 @@ export class SafeValidator
             metrics,
             gasPriceManager
         })
-        this.senderManager = senderManager
+        this.traceClient = config.validationRpcUrl
+            ? createPublicClient({
+                  chain: config.publicClient.chain,
+                  transport: http(config.validationRpcUrl, { timeout: 20_000 })
+              })
+            : config.publicClient
+    }
+
+    // A dedicated validation node may lag the sequencer by a block; a userOp
+    // that depends on very recent state (fresh deployment, nonce) can fail
+    // there and pass on the primary node. Retry once on the primary before
+    // rejecting, so the dedicated node only ever removes load, never accuracy.
+    private async withPrimaryFallback<T>(
+        onTraceClient: () => Promise<T>,
+        onClient: (client: PublicClient) => Promise<T>
+    ): Promise<T> {
+        if (this.traceClient === this.config.publicClient) return onTraceClient()
+        try {
+            return await onTraceClient()
+        } catch (error) {
+            this.logger.warn(
+                { error: error instanceof Error ? error.message : String(error) },
+                "validation failed on the validation node; retrying on the primary node"
+            )
+            return onClient(this.config.publicClient)
+        }
+    }
+
+    private traceOptions() {
+        return this.config.tracerTimeout
+            ? { timeout: this.config.tracerTimeout }
+            : {}
     }
 
     async validateUserOp(args: {
@@ -78,20 +118,30 @@ export class SafeValidator
         queuedUserOps: UserOperation[]
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
+        storageMap?: StorageMap
     }): Promise<
         ValidationResult & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        const { userOp, queuedUserOps, entryPoint, referencedContracts } = args
+        const { userOp, queuedUserOps, entryPoint, referencedContracts, storageMap } =
+            args
         try {
-            const validationResult = await this.getValidationResult({
-                userOp,
-                queuedUserOps,
-                entryPoint,
-                codeHashes: referencedContracts
-            })
+            const validationResult = isVersion06(userOp)
+                ? await this.getValidationResultV06({
+                      userOp: userOp as UserOperation06,
+                      entryPoint,
+                      codeHashes: referencedContracts,
+                      storageMap
+                  })
+                : await this.getValidationResultV07({
+                      userOp: userOp as UserOperation07,
+                      queuedUserOps: queuedUserOps as UserOperation07[],
+                      entryPoint,
+                      codeHashes: referencedContracts,
+                      storageMap
+                  })
 
             this.metrics.userOperationsValidationSuccess.inc()
 
@@ -109,13 +159,13 @@ export class SafeValidator
             args: [addresses]
         })
 
-        const wallet = await this.senderManager.getWallet()
-
+        // The deploy simulation only needs some sender; borrowing an executor
+        // wallet here made every validation wait behind in-flight bundles.
         let hash = ""
 
         try {
             await this.config.publicClient.call({
-                account: wallet,
+                account: this.config.utilityWalletAddress,
                 data: deployData
             })
         } catch (e) {
@@ -123,8 +173,6 @@ export class SafeValidator
             // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
             hash = (error.walk() as any).data
         }
-
-        this.senderManager.markWalletProcessed(wallet)
 
         return {
             hash,
@@ -137,13 +185,20 @@ export class SafeValidator
         queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
+        storageMap?: StorageMap
     }): Promise<
         ValidationResult07 & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        const { userOp, queuedUserOps, entryPoint, codeHashes } = args
+        const {
+            userOp,
+            queuedUserOps,
+            entryPoint,
+            codeHashes,
+            storageMap: cachedStorageMap
+        } = args
         if (codeHashes && codeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(codeHashes.addresses)
             if (hash !== codeHashes.hash) {
@@ -152,12 +207,36 @@ export class SafeValidator
                     ValidationErrors.OpcodeValidation
                 )
             }
+            if (cachedStorageMap && !this.config.revalidationTracer) {
+                // Unchanged code cannot change the opcode/storage rules the
+                // admission trace established; only state (signature, nonce,
+                // deposit, validity window) can, and the plain simulation
+                // re-checks that without a second tracer run on the node.
+                const res = await super.getValidationResultV07({
+                    userOp,
+                    queuedUserOps: queuedUserOps as UserOperation07[],
+                    entryPoint
+                })
+                return {
+                    ...res,
+                    referencedContracts: codeHashes,
+                    storageMap: cachedStorageMap
+                }
+            }
         }
 
-        const [res, tracerResult] = await this.getValidationResultWithTracerV07(
-            userOp,
-            queuedUserOps as UserOperation07[],
-            entryPoint
+        const [res, tracerResult] = await this.withPrimaryFallback(() =>
+            this.getValidationResultWithTracerV07(
+                userOp,
+                queuedUserOps as UserOperation07[],
+                entryPoint
+            ), (client) =>
+            this.getValidationResultWithTracerV07(
+                userOp,
+                queuedUserOps as UserOperation07[],
+                entryPoint,
+                client
+            )
         )
 
         const [contractAddresses, storageMap] = tracerResultParserV07(
@@ -202,13 +281,15 @@ export class SafeValidator
         userOp: UserOperation06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
+        storageMap?: StorageMap
     }): Promise<
         ValidationResult06 & {
             referencedContracts?: ReferencedCodeHashes
             storageMap: StorageMap
         }
     > {
-        const { userOp, entryPoint, codeHashes } = args
+        const { userOp, entryPoint, codeHashes, storageMap: cachedStorageMap } =
+            args
         if (codeHashes && codeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(codeHashes.addresses)
             if (hash !== codeHashes.hash) {
@@ -217,11 +298,23 @@ export class SafeValidator
                     ValidationErrors.OpcodeValidation
                 )
             }
+            if (cachedStorageMap && !this.config.revalidationTracer) {
+                const res = await super.getValidationResultV06({
+                    userOp,
+                    entryPoint
+                })
+                return {
+                    ...res,
+                    referencedContracts: codeHashes,
+                    storageMap: cachedStorageMap
+                }
+            }
         }
 
-        const [res, tracerResult] = await this.getValidationResultWithTracerV06(
-            userOp,
-            entryPoint
+        const [res, tracerResult] = await this.withPrimaryFallback(
+            () => this.getValidationResultWithTracerV06(userOp, entryPoint),
+            (client) =>
+                this.getValidationResultWithTracerV06(userOp, entryPoint, client)
         )
 
         const [contractAddresses, storageMap] = tracerResultParserV06(
@@ -280,14 +373,15 @@ export class SafeValidator
 
     async getValidationResultWithTracerV06(
         userOp: UserOperation06,
-        entryPoint: Address
+        entryPoint: Address,
+        traceClient: PublicClient = this.traceClient
     ): Promise<[ValidationResult06, BundlerTracerResult]> {
         const stateOverrides = getAuthorizationStateOverrides({
             userOps: [userOp]
         })
 
         const tracerResult = await debug_traceCall(
-            this.config.publicClient,
+            traceClient,
             {
                 from: zeroAddress,
                 to: entryPoint,
@@ -298,8 +392,9 @@ export class SafeValidator
                 })
             },
             {
-                tracer: bundlerCollectorTracer,
-                stateOverrides
+                tracer: bundlerCollectorTracerV06,
+                stateOverrides,
+                ...this.traceOptions()
             }
         )
 
@@ -428,7 +523,8 @@ export class SafeValidator
     async getValidationResultWithTracerV07(
         userOp: UserOperation07,
         queuedUserOps: UserOperation07[],
-        entryPoint: Address
+        entryPoint: Address,
+        traceClient: PublicClient = this.traceClient
     ): Promise<[ValidationResult07, BundlerTracerResult]> {
         const packedUserOp = toPackedUserOp(userOp)
         const packedQueuedUserOps = queuedUserOps.map((uop) =>
@@ -465,7 +561,7 @@ export class SafeValidator
         })
 
         const tracerResult = await debug_traceCall(
-            this.config.publicClient,
+            traceClient,
             {
                 from: zeroAddress,
                 to: pimlicoSimulationsAddress,
@@ -473,11 +569,14 @@ export class SafeValidator
             },
             {
                 tracer: bundlerCollectorTracer,
-                stateOverrides
+                stateOverrides,
+                ...this.traceOptions()
             }
         )
 
-        this.logger.info(
+        // Serializing the full trace on the hot path is expensive; keep it off
+        // unless an operator raises the level.
+        this.logger[this.config.tracerResultLogLevel](
             `tracerResult: ${jsonStringifyWithBigint(tracerResult)}`
         )
 

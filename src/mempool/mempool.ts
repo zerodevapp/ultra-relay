@@ -27,7 +27,8 @@ import {
     isVersion08,
     jsonStringifyWithBigint,
     minBigInt,
-    scaleBigIntByPercent
+    scaleBigIntByPercent,
+    timed
 } from "@alto/utils"
 import { type Hex, getAddress, getContract, size } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
@@ -339,10 +340,12 @@ export class Mempool {
         entryPoint: Address,
         {
             referencedContracts,
+            storageMap,
             receivedAt,
             reentry
         }: {
             referencedContracts?: ReferencedCodeHashes
+            storageMap?: StorageMap
             receivedAt?: number
             reentry?: boolean
         } = {}
@@ -446,6 +449,7 @@ export class Mempool {
                 userOp,
                 userOpHash,
                 referencedContracts,
+                storageMap,
                 receivedAt,
                 addedToMempool: Date.now(),
                 submissionAttempts: 0,
@@ -507,7 +511,8 @@ export class Mempool {
             }
         }
 
-        const { userOp, userOpHash, referencedContracts } = userOpInfo
+        const { userOp, userOpHash, referencedContracts, storageMap: cachedStorageMap } =
+            userOpInfo
 
         const isUserOpV06 = isVersion06(userOp)
 
@@ -637,12 +642,19 @@ export class Mempool {
                 })
             }
 
-            validationResult = await this.validator.validateUserOp({
-                userOp,
-                queuedUserOps,
-                entryPoint,
-                referencedContracts
-            })
+            validationResult = await timed(
+                this.logger,
+                "shouldSkip.validate",
+                { userOpHash, cachedStorageMap: Boolean(cachedStorageMap) },
+                () =>
+                    this.validator.validateUserOp({
+                        userOp,
+                        queuedUserOps,
+                        entryPoint,
+                        referencedContracts,
+                        storageMap: cachedStorageMap
+                    })
+            )
         } catch (e) {
             this.logger.error(
                 {

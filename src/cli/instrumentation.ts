@@ -1,4 +1,5 @@
 import module from "node:module"
+import { profileShutdown } from "../utils/profileShutdown.js"
 import { type Attributes, type Context, SpanKind } from "@opentelemetry/api"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto"
 import { FastifyInstrumentation } from "@opentelemetry/instrumentation-fastify"
@@ -70,4 +71,5 @@ const sdk = new NodeSDK({
 })
 
 sdk.start()
+if (process.env.PERF_TRACING === "true") profileShutdown.flush = () => sdk.shutdown()
 await waitForAllMessagesAcknowledged()

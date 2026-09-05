@@ -17,7 +17,7 @@ import Fastify, {
     type FastifyRequest
 } from "fastify"
 import type { Registry } from "prom-client"
-import { toHex } from "viem"
+import { BaseError, toHex } from "viem"
 import type * as WebSocket from "ws"
 import { fromZodError } from "zod-validation-error"
 import type { AltoConfig } from "../createConfig"
@@ -374,6 +374,45 @@ export class Server {
                     .status(200)
                     .send(rpcError)
                 this.fastify.log.info(rpcError, "error reply")
+            } else if (err instanceof BaseError) {
+                // A node or transport failure while serving the request is not a
+                // client fault. Reply with a coded JSON-RPC error so wallets can
+                // retry, instead of an HTTP 500 carrying viem's short message
+                // ("Missing or invalid parameters" for a node-side -32602).
+                const upstream = err.walk(
+                    (e) => typeof (e as { code?: unknown }).code === "number"
+                ) as { code?: number } | null
+                // Classify on the short message and details only; the full
+                // message embeds the request body, which may itself contain
+                // the word "timeout" (e.g. tracer options).
+                const timeout =
+                    err.name === "TimeoutError" ||
+                    /timeout|timed out/i.test(
+                        `${err.shortMessage} ${(err as { details?: string }).details ?? ""}`
+                    )
+                const rpcError = {
+                    jsonrpc: "2.0",
+                    id: requestId,
+                    error: {
+                        code: -32000,
+                        message: timeout
+                            ? `Upstream node timed out while serving the request; retry. ${err.shortMessage}`
+                            : `Upstream node error while serving the request; retry. ${err.shortMessage}`,
+                        data: {
+                            retryable: true,
+                            kind: timeout ? "upstream_timeout" : "upstream_error",
+                            upstreamCode: upstream?.code
+                        }
+                    }
+                }
+                await reply
+                    .setRpcStatus(RpcStatus.ServerError)
+                    .status(200)
+                    .send(rpcError)
+                this.fastify.log.error(
+                    { err, rpcError },
+                    "error reply (upstream)"
+                )
             } else if (err instanceof Error) {
                 sentry.captureException(err)
                 const rpcError = {

@@ -28,7 +28,6 @@ import type { Executor } from "./executor"
 import type { SenderManager } from "./senderManager"
 import { getUserOpHashes } from "./utils"
 
-const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
 
 // While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
@@ -146,7 +145,12 @@ export class ExecutorManager {
                 (timestamp) => now - timestamp < RPM_WINDOW
             )
 
-            const bundles = await this.mempool.getBundles()
+            const bundles = await timed(
+                this.logger,
+                "getBundles",
+                {},
+                () => this.mempool.getBundles()
+            )
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
@@ -166,7 +170,8 @@ export class ExecutorManager {
 
             // Calculate next interval with linear scaling
             const nextInterval: number = Math.min(
-                this.config.minBundleInterval + rpm * SCALE_FACTOR, // Linear scaling
+                this.config.minBundleInterval +
+                    rpm * this.config.bundleIntervalScaleMs, // Linear scaling
                 this.config.maxBundleInterval // Cap at configured max interval
             )
 
@@ -251,7 +256,12 @@ export class ExecutorManager {
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await this.senderManager.getWallet()
+                const wallet = await timed(
+                    this.logger,
+                    "getWallet.wait",
+                    { bundleSize: userOps.length },
+                    () => this.senderManager.getWallet()
+                )
                 let bundleSubmitted = false
                 try {
                     const bundleCtx = {
