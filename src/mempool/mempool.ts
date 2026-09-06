@@ -824,6 +824,7 @@ export class Mempool {
         // Get EntryPoint version
         const bundles: UserOperationBundle[] = []
         const seenOps = new Set()
+        const deferred: UserOpInfo[] = []
         let breakLoop = false
 
         // Process operations until no more are available or we hit maxBundleCount
@@ -884,8 +885,12 @@ export class Mempool {
 
                 seenOps.add(userOpInfo.userOpHash)
 
+                // An operation in infrastructure backoff must not return to the
+                // head of the queue: with distinct fees it would be popped again
+                // immediately, trip the reentry guard and end the tick for every
+                // other operation. Hold it aside and restore it after the tick.
                 if ((userOpInfo.retryAfter ?? 0) > Date.now()) {
-                    await this.store.addOutstanding({ entryPoint, userOpInfo })
+                    deferred.push(userOpInfo)
                     continue
                 }
 
@@ -1002,6 +1007,10 @@ export class Mempool {
             if (currentBundle.userOps.length > 0) {
                 bundles.push(currentBundle)
             }
+        }
+
+        for (const userOpInfo of deferred) {
+            await this.store.addOutstanding({ entryPoint, userOpInfo })
         }
 
         return bundles

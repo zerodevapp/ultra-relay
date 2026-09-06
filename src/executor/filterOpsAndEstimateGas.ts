@@ -29,10 +29,10 @@ import {
 import { entryPoint07Abi } from "viem/account-abstraction"
 import { formatAbiItemWithArgs } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
-import { classifyOperationFailure } from "../utils/operationFailure"
 import { pimlicoSimulationsAbi } from "../types/contracts/PimlicoSimulations"
 import { getEip7702DelegationOverrides } from "../utils/eip7702"
 import { getFilterOpsStateOverride } from "../utils/entryPointOverrides"
+import { classifyOperationFailure } from "../utils/operationFailure"
 import {
     calculateAA95GasFloor,
     encodeHandleOpsCalldata,
@@ -462,6 +462,9 @@ export async function filterOpsAndEstimateGas({
     } catch (err) {
         const failure = classifyOperationFailure(err)
         logger.error(failure, "Encountered unhandled error during filterOps")
+        // Operator-side telemetry keeps the raw error; clients only see the
+        // classified reason.
+        sentry.captureException(err)
         const rejectedUserOps = userOps.map((userOp) => ({
             ...userOp,
             reason: failure.reason

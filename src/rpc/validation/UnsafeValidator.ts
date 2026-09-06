@@ -27,7 +27,7 @@ import * as sentry from "@sentry/node"
 import type { StateOverride } from "viem"
 import {
     BaseError,
-    ContractFunctionExecutionError,
+    ContractFunctionRevertedError,
     type Hex,
     decodeAbiParameters,
     getContract,
@@ -115,20 +115,22 @@ export class UnsafeValidator implements InterfaceValidator {
                 throw err
             } catch {
                 if (errorResult instanceof BaseError) {
-                    const revertError = errorResult.walk(
-                        (err) => err instanceof ContractFunctionExecutionError
-                    )
-                    // BaseError includes transport/timeouts. Without an actual
-                    // decoded revert, preserve it as infrastructure failure.
-                    if (!(revertError instanceof ContractFunctionExecutionError) ||
-                        typeof (revertError.cause as { reason?: unknown } | undefined)?.reason !== "string") {
+                    // A revert is a deterministic verdict on the operation,
+                    // even when the ABI cannot name it. Anything else inside a
+                    // BaseError (transport, timeout, node error) is an
+                    // infrastructure failure and must stay one.
+                    const reverted = errorResult.walk(
+                        (err) => err instanceof ContractFunctionRevertedError
+                    ) as ContractFunctionRevertedError | null
+                    if (!reverted) {
                         throw errorResult
                     }
+                    const reason =
+                        reverted.reason ??
+                        reverted.data?.errorName ??
+                        reverted.shortMessage
                     throw new RpcError(
-                        `UserOperation reverted during simulation with reason: ${
-                            // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
-                            (revertError?.cause as any)?.reason
-                        }`,
+                        `UserOperation reverted during simulation with reason: ${reason}`,
                         ValidationErrors.SimulateValidation
                     )
                 }
