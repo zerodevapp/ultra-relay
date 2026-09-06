@@ -29,6 +29,7 @@ import {
 import { entryPoint07Abi } from "viem/account-abstraction"
 import { formatAbiItemWithArgs } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
+import { classifyOperationFailure } from "../utils/operationFailure"
 import { pimlicoSimulationsAbi } from "../types/contracts/PimlicoSimulations"
 import { getEip7702DelegationOverrides } from "../utils/eip7702"
 import { getFilterOpsStateOverride } from "../utils/entryPointOverrides"
@@ -49,6 +50,7 @@ export type FilterOpsResult =
       }
     | {
           status: "unhandled_error"
+          retryable: boolean
           rejectedUserOps: RejectedUserOp[]
       }
     | {
@@ -458,14 +460,15 @@ export async function filterOpsAndEstimateGas({
             )
         }
     } catch (err) {
-        logger.error({ err }, "Encountered unhandled error during filterOps")
-        sentry.captureException(err)
+        const failure = classifyOperationFailure(err)
+        logger.error(failure, "Encountered unhandled error during filterOps")
         const rejectedUserOps = userOps.map((userOp) => ({
             ...userOp,
-            reason: "filterOps simulation error"
+            reason: failure.reason
         }))
         return {
             status: "unhandled_error",
+            retryable: failure.retryable,
             rejectedUserOps
         }
     }

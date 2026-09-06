@@ -413,6 +413,7 @@ export const userOperationReceiptSchema = z.object({
 export type UserOperationReceipt = z.infer<typeof userOperationReceiptSchema>
 
 export const userOperationStatusSchema = z.object({
+    reason: z.string().max(500).optional(),
     status: z.enum([
         "not_found",
         "not_submitted",
@@ -808,6 +809,8 @@ export const userOpInfoSchema = z.object({
     // Set when a userOp re-enters the mempool after a failed cycle; demotes its
     // transition logs to debug so retries don't repeat the info lines.
     reentered: z.boolean().optional(),
+    infrastructureRetries: z.number().int().min(0).max(3).optional(),
+    retryAfter: z.number().optional(),
     referencedContracts: referencedCodeHashesSchema.optional(),
     // Storage slots touched during the admission-time trace, reused at bundle
     // time when the referenced code is unchanged instead of tracing again.

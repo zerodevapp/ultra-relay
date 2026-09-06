@@ -55,6 +55,8 @@ export class ExecutorManager {
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
+    private bundlingTickRunning = false
+    private bundlingTimer: NodeJS.Timeout | undefined
 
     // Executor wallets rotated away from a stuck bundle whose cancel did not
     // confirm. Held out of the sender pool (markWalletProcessed deferred) until
@@ -135,6 +137,11 @@ export class ExecutorManager {
     }
 
     async autoScalingBundling() {
+        if (this.bundlingTickRunning || this.bundlingMode !== "auto") return
+        clearTimeout(this.bundlingTimer)
+        this.bundlingTickRunning = true
+        let nextInterval = this.config.maxBundleInterval
+        try {
         // The re-arming setTimeout below inherits whatever context the
         // caller had (e.g. the debug_bundler_setBundlingMode RPC flow) and
         // would keep it forever. A fresh literal here keeps every tick, and
@@ -169,16 +176,21 @@ export class ExecutorManager {
             const rpm = this.opsCount.length
 
             // Calculate next interval with linear scaling
-            const nextInterval: number = Math.min(
+            nextInterval = Math.min(
                 this.config.minBundleInterval +
                     rpm * this.config.bundleIntervalScaleMs, // Linear scaling
                 this.config.maxBundleInterval // Cap at configured max interval
             )
 
-            if (this.bundlingMode === "auto") {
-                setTimeout(this.autoScalingBundling.bind(this), nextInterval)
-            }
         })
+        } catch {
+            this.logger.error("Bundling tick failed; next tick will retry")
+        } finally {
+            this.bundlingTickRunning = false
+            if (this.bundlingMode === "auto") {
+                this.bundlingTimer = setTimeout(() => { void this.autoScalingBundling() }, nextInterval)
+            }
+        }
     }
 
     startWatchingBlocks(): void {

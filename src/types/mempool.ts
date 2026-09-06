@@ -48,6 +48,7 @@ export type BundleResult =
           success: false
           reason:
               | "filterops_failed"
+              | "filterops_infrastructure"
               | "insufficient_funds"
               | "generic_error"
               | "oversized_bundle"

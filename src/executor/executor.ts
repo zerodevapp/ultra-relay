@@ -454,9 +454,9 @@ export class Executor {
             )
             return {
                 success: false,
-                reason: "filterops_failed",
-                rejectedUserOps: filterOpsResult.rejectedUserOps,
-                recoverableOps: []
+                reason: filterOpsResult.retryable ? "filterops_infrastructure" : "filterops_failed",
+                rejectedUserOps: filterOpsResult.retryable ? [] : filterOpsResult.rejectedUserOps,
+                recoverableOps: filterOpsResult.retryable ? userOps : []
             }
         }
 

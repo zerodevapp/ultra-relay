@@ -25,7 +25,6 @@ import {
     isVersion06,
     isVersion07,
     isVersion08,
-    jsonStringifyWithBigint,
     minBigInt,
     scaleBigIntByPercent,
     timed
@@ -36,6 +35,7 @@ import type { AltoConfig } from "../createConfig"
 import { bundleByteThreshold, getBundleCaps } from "../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../executor/utils"
 import type { Monitor } from "./monitoring"
+import { classifyOperationFailure, publicOperationReason, scheduleInfrastructureRetry } from "../utils/operationFailure"
 import {
     type InterfaceReputationManager,
     ReputationStatuses
@@ -126,6 +126,10 @@ export class Mempool {
         await Promise.all(
             userOps.map(async (userOpInfo) => {
                 const { userOpHash, userOp } = userOpInfo
+                if (reason === "filterops_infrastructure" && !scheduleInfrastructureRetry(userOpInfo)) {
+                    await this.dropUserOps(entryPoint, [{ ...userOpInfo, reason: "Bundle simulation infrastructure retries exhausted" }])
+                    return
+                }
                 this.logger.warn(
                     {
                         userOpHash,
@@ -144,7 +148,12 @@ export class Mempool {
                     entryPoint,
                     {
                         receivedAt: userOpInfo.receivedAt,
-                        reentry: true
+                        reentry: true,
+                        infrastructureRetries: userOpInfo.infrastructureRetries,
+                        retryAfter: userOpInfo.retryAfter,
+                        submissionAttempts: userOpInfo.submissionAttempts,
+                        referencedContracts: userOpInfo.referencedContracts,
+                        storageMap: userOpInfo.storageMap
                     }
                 )
 
@@ -157,7 +166,7 @@ export class Mempool {
                         ...userOpInfo,
                         reason: failureReason
                     }
-                    this.dropUserOps(entryPoint, [rejectedUserOp])
+                    await this.dropUserOps(entryPoint, [rejectedUserOp])
                 }
             })
         )
@@ -168,7 +177,8 @@ export class Mempool {
     async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {
         await Promise.all(
             rejectedUserOps.map(async (rejectedUserOp) => {
-                const { userOp, reason, userOpHash } = rejectedUserOp
+                const { userOpHash } = rejectedUserOp
+                const reason = publicOperationReason(rejectedUserOp.reason)
                 await this.store.removeProcessing({ entryPoint, userOpHash })
                 await this.store.removeSubmitted({ entryPoint, userOpHash })
                 this.eventManager.emitDropped(
@@ -178,11 +188,11 @@ export class Mempool {
                 )
                 await this.monitor.setUserOpStatus(userOpHash, {
                     status: "rejected",
+                    reason,
                     transactionHash: null
                 })
                 this.logger.warn(
                     {
-                        userOperation: jsonStringifyWithBigint(userOp),
                         userOpHash,
                         reason
                     },
@@ -342,12 +352,18 @@ export class Mempool {
             referencedContracts,
             storageMap,
             receivedAt,
-            reentry
+            reentry,
+            infrastructureRetries,
+            retryAfter,
+            submissionAttempts = 0
         }: {
             referencedContracts?: ReferencedCodeHashes
             storageMap?: StorageMap
             receivedAt?: number
             reentry?: boolean
+            infrastructureRetries?: number
+            retryAfter?: number
+            submissionAttempts?: number
         } = {}
     ): Promise<[boolean, string]> {
         const userOpHash = await getUserOpHash({
@@ -438,10 +454,13 @@ export class Mempool {
             )
         }
 
-        await this.reputationManager.increaseUserOpSeenStatus(
-            userOp,
-            entryPoint
-        )
+        if (reentry) {
+            // Processing removed this operation from entity occupancy. Restore
+            // occupancy without counting an infrastructure retry as a new sighting.
+            this.reputationManager.increaseUserOpCount(userOp)
+        } else {
+            await this.reputationManager.increaseUserOpSeenStatus(userOp, entryPoint)
+        }
 
         await this.store.addOutstanding({
             entryPoint,
@@ -452,7 +471,9 @@ export class Mempool {
                 storageMap,
                 receivedAt,
                 addedToMempool: Date.now(),
-                submissionAttempts: 0,
+                submissionAttempts,
+                infrastructureRetries,
+                retryAfter,
                 ...(reentry ? { reentered: true } : {})
             }
         })
@@ -656,21 +677,26 @@ export class Mempool {
                     })
             )
         } catch (e) {
-            this.logger.error(
-                {
-                    userOpHash,
-                    error: JSON.stringify(e)
-                },
-                "2nd Validation error"
-            )
-            this.store.removeOutstanding({ entryPoint, userOpHash })
-            this.reputationManager.decreaseUserOpSeenStatus(
-                userOp,
-                entryPoint,
-                e instanceof RpcError ? e.message : JSON.stringify(e)
-            )
+            const failure = classifyOperationFailure(e)
+            this.logger.warn({ userOpHash, ...failure }, "Bundle-time validation failed")
+            const retry = failure.retryable && scheduleInfrastructureRetry(userOpInfo)
+            if (!failure.retryable) {
+                try {
+                    await this.reputationManager.decreaseUserOpSeenStatus(userOp, entryPoint, failure.reason)
+                } catch {
+                    // A reputation backend outage must not suppress the terminal
+                    // operation status after deterministic validation failure.
+                    this.logger.error({ userOpHash }, "Failed to update rejection reputation")
+                }
+            }
+            if (!retry) {
+                this.reputationManager.decreaseUserOpCount(userOp)
+                await this.dropUserOps(entryPoint, [{ ...userOpInfo,
+                    reason: failure.retryable ? `${failure.reason}; infrastructure retries exhausted` : failure.reason }])
+            }
             return {
                 skip: true,
+                removeOutstanding: !retry,
                 paymasterDeposit,
                 stakedEntityCount,
                 knownEntities,
@@ -857,6 +883,11 @@ export class Mempool {
                 }
 
                 seenOps.add(userOpInfo.userOpHash)
+
+                if ((userOpInfo.retryAfter ?? 0) > Date.now()) {
+                    await this.store.addOutstanding({ entryPoint, userOpInfo })
+                    continue
+                }
 
                 const { userOp } = userOpInfo
 
