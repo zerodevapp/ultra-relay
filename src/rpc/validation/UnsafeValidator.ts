@@ -118,6 +118,12 @@ export class UnsafeValidator implements InterfaceValidator {
                     const revertError = errorResult.walk(
                         (err) => err instanceof ContractFunctionExecutionError
                     )
+                    // BaseError includes transport/timeouts. Without an actual
+                    // decoded revert, preserve it as infrastructure failure.
+                    if (!(revertError instanceof ContractFunctionExecutionError) ||
+                        typeof (revertError.cause as { reason?: unknown } | undefined)?.reason !== "string") {
+                        throw errorResult
+                    }
                     throw new RpcError(
                         `UserOperation reverted during simulation with reason: ${
                             // biome-ignore lint/suspicious/noExplicitAny: it's a generic type

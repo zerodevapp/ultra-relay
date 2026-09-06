@@ -171,8 +171,14 @@ export class SafeValidator
         } catch (e) {
             const error = e as ExecutionRevertedError
             // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
-            hash = (error.walk() as any).data
+            const data = typeof error.walk === "function" ? (error.walk() as any).data : undefined
+            // A node timeout is not a code-hash mismatch. Only the helper's
+            // expected 32-byte revert data is a successful hash lookup.
+            if (typeof data !== "string" || !/^0x[0-9a-f]{64}$/i.test(data)) throw e
+            hash = data
         }
+
+        if (!hash) throw new Error("Code-hash helper did not return its expected revert data")
 
         return {
             hash,
@@ -199,6 +205,14 @@ export class SafeValidator
             codeHashes,
             storageMap: cachedStorageMap
         } = args
+        const traceValidation = () => this.withPrimaryFallback(() =>
+            this.getValidationResultWithTracerV07(userOp, queuedUserOps as UserOperation07[], entryPoint),
+            client => this.getValidationResultWithTracerV07(userOp, queuedUserOps as UserOperation07[], entryPoint, client)
+        )
+        const pendingTrace = codeHashes?.addresses.length && !(cachedStorageMap && !this.config.revalidationTracer)
+            ? traceValidation() : undefined
+        // Attach immediately: the trace may fail while the hash RPC is pending.
+        void pendingTrace?.catch(() => undefined)
         if (codeHashes && codeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(codeHashes.addresses)
             if (hash !== codeHashes.hash) {
@@ -224,19 +238,7 @@ export class SafeValidator
             }
         }
 
-        const [res, tracerResult] = await this.withPrimaryFallback(() =>
-            this.getValidationResultWithTracerV07(
-                userOp,
-                queuedUserOps as UserOperation07[],
-                entryPoint
-            ), (client) =>
-            this.getValidationResultWithTracerV07(
-                userOp,
-                queuedUserOps as UserOperation07[],
-                entryPoint,
-                client
-            )
-        )
+        const [res, tracerResult] = await (pendingTrace ?? traceValidation())
 
         const [contractAddresses, storageMap] = tracerResultParserV07(
             userOp,
@@ -289,6 +291,13 @@ export class SafeValidator
     > {
         const { userOp, entryPoint, codeHashes, storageMap: cachedStorageMap } =
             args
+        const traceValidation = () => this.withPrimaryFallback(
+            () => this.getValidationResultWithTracerV06(userOp, entryPoint),
+            client => this.getValidationResultWithTracerV06(userOp, entryPoint, client)
+        )
+        const pendingTrace = codeHashes?.addresses.length && !(cachedStorageMap && !this.config.revalidationTracer)
+            ? traceValidation() : undefined
+        void pendingTrace?.catch(() => undefined)
         if (codeHashes && codeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(codeHashes.addresses)
             if (hash !== codeHashes.hash) {
@@ -310,11 +319,7 @@ export class SafeValidator
             }
         }
 
-        const [res, tracerResult] = await this.withPrimaryFallback(
-            () => this.getValidationResultWithTracerV06(userOp, entryPoint),
-            (client) =>
-                this.getValidationResultWithTracerV06(userOp, entryPoint, client)
-        )
+        const [res, tracerResult] = await (pendingTrace ?? traceValidation())
 
         const [contractAddresses, storageMap] = tracerResultParserV06(
             userOp,
@@ -575,9 +580,11 @@ export class SafeValidator
 
         // Serializing the full trace on the hot path is expensive; keep it off
         // unless an operator raises the level.
-        this.logger[this.config.tracerResultLogLevel](
-            `tracerResult: ${jsonStringifyWithBigint(tracerResult)}`
-        )
+        if (this.logger.isLevelEnabled(this.config.tracerResultLogLevel)) {
+            this.logger[this.config.tracerResultLogLevel](
+                `tracerResult: ${jsonStringifyWithBigint(tracerResult)}`
+            )
+        }
 
         const lastResult = tracerResult.calls.slice(-1)[0]
         if (lastResult.type !== "REVERT") {
