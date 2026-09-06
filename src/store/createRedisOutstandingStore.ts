@@ -427,6 +427,16 @@ class RedisOutstandingQueue implements OutstandingStore {
         return true
     }
 
+    // Positions in Redis are score-derived (fee for the ready queue, nonce
+    // for the per-slot set), so re-adding in original order restores the
+    // exact ordering pop() removed. Not atomic across operations: like pop(),
+    // a concurrent add may interleave.
+    async restore(userOpInfos: UserOpInfo[]): Promise<void> {
+        for (const userOpInfo of userOpInfos) {
+            await this.add(userOpInfo)
+        }
+    }
+
     async pop(): Promise<UserOpInfo | undefined> {
         // Pop highest gas price operation
         const pendingOpsKey = await this.readyOpsQueue.popMax()

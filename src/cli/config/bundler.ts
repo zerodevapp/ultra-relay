@@ -5,7 +5,7 @@ import {
     commaSeperatedAddressPattern,
     hexData32Schema
 } from "@alto/types"
-import { type Hex, parseGwei, getAddress } from "viem"
+import { type Hex, getAddress, parseGwei } from "viem"
 import { type Account, privateKeyToAccount } from "viem/accounts"
 import { z } from "zod"
 
@@ -29,6 +29,10 @@ export const bundlerArgsSchema = z.object({
     "deterministic-deployer-address": addressSchema,
     "safe-mode": z.boolean(),
     "bundle-interval-scale-ms": z.number().min(0).default(10),
+    // Bundle-time revalidation traces run at most this many at once per
+    // bundler process. 1 keeps the serial loop; higher values overlap the
+    // waiting on debug_traceCall without changing any validation decision.
+    "bundle-validation-concurrency": z.number().int().min(1).max(64).default(1),
     // ERC-4337 requires the validation trace to be rerun before inclusion.
     // Skipping it is benchmark-only because unchanged bytecode does not prove
     // unchanged storage access, nonce, deposit, or validation environment.

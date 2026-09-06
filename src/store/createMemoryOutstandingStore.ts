@@ -175,6 +175,51 @@ export class MemoryOutstanding implements OutstandingStore {
         return Promise.resolve(userOpInfo)
     }
 
+    // Undo pop() for operations that were taken out speculatively and never
+    // processed. Iterating in reverse re-inserts each at the head, so a
+    // batch [A, B, C] comes back as A, B, C ahead of everything popped later
+    // or added meanwhile; the stable fee sort then puts each back where the
+    // queue order would have placed it.
+    async restore(userOpInfos: UserOpInfo[]): Promise<void> {
+        for (const userOpInfo of [...userOpInfos].reverse()) {
+            const { userOp, userOpHash } = userOpInfo
+            const pendingOpsSlot = senderNonceSlot(userOp)
+            const backlogOps = this.pendingOps.get(pendingOpsSlot) ?? []
+
+            // A replacement for the same sender and nonce may have arrived
+            // while this operation was in flight. Never resurrect the old one.
+            const replaced = backlogOps.some(
+                (info) =>
+                    info.userOp.nonce === userOp.nonce &&
+                    info.userOpHash !== userOpHash
+            )
+            if (replaced) {
+                this.logger.info(
+                    { userOpHash },
+                    "not restoring userOp replaced while it was being validated"
+                )
+                continue
+            }
+
+            // pop() promoted the next operation of this slot into the
+            // priority queue; that promotion is undone here.
+            this.priorityQueue = this.priorityQueue.filter(
+                (info) => senderNonceSlot(info.userOp) !== pendingOpsSlot
+            )
+            backlogOps.unshift(userOpInfo)
+            backlogOps.sort((a, b) => {
+                const [, aNonceSeq] = getNonceKeyAndSequence(a.userOp.nonce)
+                const [, bNonceSeq] = getNonceKeyAndSequence(b.userOp.nonce)
+                return Number(aNonceSeq - bNonceSeq)
+            })
+            this.pendingOps.set(pendingOpsSlot, backlogOps)
+            this.priorityQueue.unshift(backlogOps[0])
+        }
+        this.priorityQueue.sort((a, b) =>
+            Number(a.userOp.maxFeePerGas - b.userOp.maxFeePerGas)
+        )
+    }
+
     async add(userOpInfo: UserOpInfo): Promise<void> {
         const { userOp, userOpHash } = userOpInfo
         const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)

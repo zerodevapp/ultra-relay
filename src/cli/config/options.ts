@@ -135,6 +135,12 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         type: "number",
         default: 10
     },
+    "bundle-validation-concurrency": {
+        description:
+            "Maximum bundle-time revalidation traces in flight per bundler process (shared across entrypoints). 1 preserves the serial loop.",
+        type: "number",
+        default: 1
+    },
     "revalidation-tracer": {
         description:
             "Re-run the JavaScript validation tracer when a mempool userOp is picked for a bundle even if its referenced code hashes are unchanged. Production-safe default is on; off is benchmark-only.",

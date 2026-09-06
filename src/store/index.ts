@@ -48,6 +48,12 @@ export type MempoolStore = {
 
     // Methods for state handling.
     addOutstanding: (args: EntryPointUserOpInfoParam) => Promise<void>
+    // Puts operations popped speculatively during bundling back at their
+    // original queue positions. Distinct from addOutstanding, which appends.
+    restoreOutstanding: (args: {
+        entryPoint: Address
+        userOpInfos: UserOpInfo[]
+    }) => Promise<void>
     addProcessing: (args: EntryPointUserOpInfoParam) => Promise<void>
     addSubmitted: (args: EntryPointUserOpInfoParam) => Promise<void>
 
@@ -101,6 +107,8 @@ export type OutstandingStore = BaseStore & {
     getQueuedUserOps: (userOp: UserOperation) => Promise<UserOperation[]>
     peek: () => Promise<UserOpInfo | undefined>
     pop: () => Promise<UserOpInfo | undefined>
+    // Reverse of pop for operations that were never processed, in pop order.
+    restore: (userOpInfos: UserOpInfo[]) => Promise<void>
 }
 
 export { createMempoolStore } from "./createMempoolStore"

@@ -111,4 +111,60 @@ describe("RedisOutstandingQueue.remove", () => {
         expect(await redis.zrange(pendingOpsKey, 0, -1)).toEqual([])
         expect(await redis.hexists(userOpHashLookupKey, userOpHash)).toBe(0)
     })
+
+    it("restore reproduces the state sequential adds would leave", async () => {
+        // ioredis-mock has no zmpop, so pop() cannot run here; the memory store
+        // test covers pop inversion. In Redis every position is score-derived,
+        // so restoring in original order must equal adding in that order.
+        const redis = new Redis(redisEndpoint)
+        const senderA = "0x1111111111111111111111111111111111111111" as Address
+        const senderB = "0x2222222222222222222222222222222222222222" as Address
+        const ops = [
+            makeUserOpInfo({ userOpHash: `0x${"a1".repeat(32)}` as HexData32 }),
+            makeUserOpInfo({
+                userOpHash: `0x${"a2".repeat(32)}` as HexData32,
+                nonce: 1n
+            }),
+            makeUserOpInfo({ userOpHash: `0x${"b1".repeat(32)}` as HexData32 })
+        ]
+        ops[0].userOp = { ...ops[0].userOp, sender: senderA, maxFeePerGas: 3n }
+        ops[1].userOp = { ...ops[1].userOp, sender: senderA, maxFeePerGas: 3n }
+        ops[2].userOp = { ...ops[2].userOp, sender: senderB, maxFeePerGas: 2n }
+
+        const snapshot = async () => {
+            const keys = (await redis.keys("*")).sort()
+            const state: Record<string, unknown> = {}
+            for (const key of keys) {
+                const type = await redis.type(key)
+                state[key] =
+                    type === "zset"
+                        ? await redis.zrange(key, 0, -1, "WITHSCORES")
+                        : type === "hash"
+                          ? await redis.hgetall(key)
+                          : await redis.get(key)
+            }
+            return state
+        }
+
+        await redis.flushall()
+        const added = createRedisOutstandingQueue({
+            config,
+            entryPoint,
+            redisEndpoint
+        })
+        for (const op of ops) await added.add(op)
+        const viaAdd = await snapshot()
+
+        await redis.flushall()
+        const restored = createRedisOutstandingQueue({
+            config,
+            entryPoint,
+            redisEndpoint
+        })
+        await restored.restore(ops)
+        const viaRestore = await snapshot()
+
+        expect(Object.keys(viaRestore).length).toBeGreaterThan(0)
+        expect(viaRestore).toEqual(viaAdd)
+    })
 })

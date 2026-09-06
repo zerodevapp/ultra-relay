@@ -242,6 +242,32 @@ export const createMempoolStore = ({
                 )
             }
         },
+        restoreOutstanding: async ({
+            entryPoint,
+            userOpInfos
+        }: {
+            entryPoint: Address
+            userOpInfos: UserOpInfo[]
+        }) => {
+            if (userOpInfos.length === 0) {
+                return
+            }
+            const { outstanding } = getStoreHandlers(entryPoint)
+            const start = performance.now()
+            try {
+                await outstanding.restore(userOpInfos)
+            } catch (err) {
+                logger.error({ err }, "Failed to restore outstanding mempool")
+                sentry.captureException(err)
+            }
+            const storeMs = Math.round(performance.now() - start)
+            if (storeMs > 100) {
+                logger.warn(
+                    { store: "outstanding", op: "restore", storeMs },
+                    `slow mempool store write: outstanding restore took ${storeMs}ms`
+                )
+            }
+        },
         addProcessing: ({
             entryPoint,
             userOpInfo
