@@ -46,3 +46,34 @@ it("code-hash transport failures remain infrastructure failures, not invalid has
     }
     await expect(validator.getCodeHashes([])).rejects.toBe(error)
 })
+
+it("accepts the helper's selector-prefixed 32-byte revert payload as the hash", async () => {
+    const payload = `0x091cd005${"ab".repeat(32)}`
+    const helperAddress = `0x${"11".repeat(20)}`
+    const revert = Object.assign(new Error("execution reverted"), {
+        walk: () => ({ data: payload })
+    })
+    const validator = Object.create(SafeValidator.prototype) as any
+    validator.config = {
+        publicClient: { call: vi.fn().mockRejectedValue(revert) },
+        utilityWalletAddress: "0x"
+    }
+    await expect(validator.getCodeHashes([helperAddress])).resolves.toEqual({
+        hash: payload,
+        addresses: [helperAddress]
+    })
+    const bare = Object.assign(new Error("execution reverted"), {
+        walk: () => ({ data: `0x${"ab".repeat(32)}` })
+    })
+    validator.config.publicClient.call = vi.fn().mockRejectedValue(bare)
+    await expect(
+        validator.getCodeHashes([helperAddress])
+    ).resolves.toMatchObject({
+        hash: `0x${"ab".repeat(32)}`
+    })
+    const empty = Object.assign(new Error("execution reverted"), {
+        walk: () => ({ data: "0x" })
+    })
+    validator.config.publicClient.call = vi.fn().mockRejectedValue(empty)
+    await expect(validator.getCodeHashes([helperAddress])).rejects.toBe(empty)
+})

@@ -95,12 +95,16 @@ export class SafeValidator
         onTraceClient: () => Promise<T>,
         onClient: (client: PublicClient) => Promise<T>
     ): Promise<T> {
-        if (this.traceClient === this.config.publicClient) return onTraceClient()
+        if (this.traceClient === this.config.publicClient)
+            return onTraceClient()
         try {
             return await onTraceClient()
         } catch (error) {
             this.logger.warn(
-                { error: error instanceof Error ? error.message : String(error) },
+                {
+                    error:
+                        error instanceof Error ? error.message : String(error)
+                },
                 "validation failed on the validation node; retrying on the primary node"
             )
             return onClient(this.config.publicClient)
@@ -125,8 +129,13 @@ export class SafeValidator
             referencedContracts?: ReferencedCodeHashes
         }
     > {
-        const { userOp, queuedUserOps, entryPoint, referencedContracts, storageMap } =
-            args
+        const {
+            userOp,
+            queuedUserOps,
+            entryPoint,
+            referencedContracts,
+            storageMap
+        } = args
         try {
             const validationResult = isVersion06(userOp)
                 ? await this.getValidationResultV06({
@@ -171,14 +180,27 @@ export class SafeValidator
         } catch (e) {
             const error = e as ExecutionRevertedError
             // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
-            const data = typeof error.walk === "function" ? (error.walk() as any).data : undefined
-            // A node timeout is not a code-hash mismatch. Only the helper's
-            // expected 32-byte revert data is a successful hash lookup.
-            if (typeof data !== "string" || !/^0x[0-9a-f]{64}$/i.test(data)) throw e
+            const data =
+                typeof error.walk === "function"
+                    ? (error.walk() as any).data
+                    : undefined
+            // The helper reverts with its 4-byte selector followed by the
+            // 32-byte hash; the whole revert payload has always been used as
+            // the comparison key. Anything else (a timeout, a transport error,
+            // an empty revert) is not a hash lookup and must stay an error.
+            if (
+                typeof data !== "string" ||
+                !/^0x(?:[0-9a-f]{8})?[0-9a-f]{64}$/i.test(data)
+            ) {
+                throw e
+            }
             hash = data
         }
 
-        if (!hash) throw new Error("Code-hash helper did not return its expected revert data")
+        if (!hash)
+            throw new Error(
+                "Code-hash helper did not return its expected revert data"
+            )
 
         return {
             hash,
@@ -205,12 +227,27 @@ export class SafeValidator
             codeHashes,
             storageMap: cachedStorageMap
         } = args
-        const traceValidation = () => this.withPrimaryFallback(() =>
-            this.getValidationResultWithTracerV07(userOp, queuedUserOps as UserOperation07[], entryPoint),
-            client => this.getValidationResultWithTracerV07(userOp, queuedUserOps as UserOperation07[], entryPoint, client)
-        )
-        const pendingTrace = codeHashes?.addresses.length && !(cachedStorageMap && !this.config.revalidationTracer)
-            ? traceValidation() : undefined
+        const traceValidation = () =>
+            this.withPrimaryFallback(
+                () =>
+                    this.getValidationResultWithTracerV07(
+                        userOp,
+                        queuedUserOps as UserOperation07[],
+                        entryPoint
+                    ),
+                (client) =>
+                    this.getValidationResultWithTracerV07(
+                        userOp,
+                        queuedUserOps as UserOperation07[],
+                        entryPoint,
+                        client
+                    )
+            )
+        const pendingTrace =
+            codeHashes?.addresses.length &&
+            !(cachedStorageMap && !this.config.revalidationTracer)
+                ? traceValidation()
+                : undefined
         // Attach immediately: the trace may fail while the hash RPC is pending.
         void pendingTrace?.catch(() => undefined)
         if (codeHashes && codeHashes.addresses.length > 0) {
@@ -289,14 +326,27 @@ export class SafeValidator
             storageMap: StorageMap
         }
     > {
-        const { userOp, entryPoint, codeHashes, storageMap: cachedStorageMap } =
-            args
-        const traceValidation = () => this.withPrimaryFallback(
-            () => this.getValidationResultWithTracerV06(userOp, entryPoint),
-            client => this.getValidationResultWithTracerV06(userOp, entryPoint, client)
-        )
-        const pendingTrace = codeHashes?.addresses.length && !(cachedStorageMap && !this.config.revalidationTracer)
-            ? traceValidation() : undefined
+        const {
+            userOp,
+            entryPoint,
+            codeHashes,
+            storageMap: cachedStorageMap
+        } = args
+        const traceValidation = () =>
+            this.withPrimaryFallback(
+                () => this.getValidationResultWithTracerV06(userOp, entryPoint),
+                (client) =>
+                    this.getValidationResultWithTracerV06(
+                        userOp,
+                        entryPoint,
+                        client
+                    )
+            )
+        const pendingTrace =
+            codeHashes?.addresses.length &&
+            !(cachedStorageMap && !this.config.revalidationTracer)
+                ? traceValidation()
+                : undefined
         void pendingTrace?.catch(() => undefined)
         if (codeHashes && codeHashes.addresses.length > 0) {
             const { hash } = await this.getCodeHashes(codeHashes.addresses)

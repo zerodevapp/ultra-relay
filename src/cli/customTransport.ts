@@ -74,6 +74,12 @@ const FAILED_OP_SELECTOR = toFunctionSelector(
     )
 )
 
+// The code-hash helper reports its result through a revert; that revert is
+// the expected path of every safe-mode validation, not an upstream failure.
+const CODE_HASHES_RESULT_SELECTOR = toFunctionSelector(
+    "CodeHashesResult(bytes32)"
+)
+
 // custom selector for when code overrides are used.
 const CALLPHASE_REVERTED_SELECTOR = toFunctionSelector(
     formatAbiItem(
@@ -196,7 +202,8 @@ export function customTransport(
                                     EXECUTION_RESULT_SELECTOR,
                                     VALIDATION_RESULT_SELECTOR,
                                     FAILED_OP_SELECTOR,
-                                    CALLPHASE_REVERTED_SELECTOR
+                                    CALLPHASE_REVERTED_SELECTOR,
+                                    CODE_HASHES_RESULT_SELECTOR
                                 ].includes(errorSelector as Hex)
                             ) {
                                 loggerFn = logger.info.bind(logger)
