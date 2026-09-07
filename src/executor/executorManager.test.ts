@@ -51,9 +51,7 @@ const createHarness = (bundles: unknown[] = [createBundle()]) => {
     const getBundleStatuses = vi.fn().mockResolvedValue([])
     const processIncludedBundle = vi.fn(
         ({ submittedBundle }: { submittedBundle: unknown }) => {
-            pendingBundles = pendingBundles.filter(
-                (b) => b !== submittedBundle
-            )
+            pendingBundles = pendingBundles.filter((b) => b !== submittedBundle)
         }
     )
 
