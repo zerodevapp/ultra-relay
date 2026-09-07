@@ -251,9 +251,10 @@ export class ExecutorManager {
 
             const pendingBundles = this.bundleManager.getPendingBundles().length
             if (pendingBundles === 0) {
-                // Deliberately not stopWatchingBlocks(): re-arming a fresh
-                // watcher can miss the block the next submission triggers, so
-                // that bundle never reconciles and its wallet never frees.
+                // Nothing to reconcile: drop the watcher and this timer.
+                // Submission re-arms both, and a missed submission block is
+                // caught by the fresh watchdog.
+                this.stopWatchingBlocks()
                 return
             }
 
