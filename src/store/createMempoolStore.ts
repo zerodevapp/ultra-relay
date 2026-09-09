@@ -259,6 +259,7 @@ export const createMempoolStore = ({
             } catch (err) {
                 logger.error({ err }, "Failed to restore outstanding mempool")
                 sentry.captureException(err)
+                throw err
             }
             const storeMs = Math.round(performance.now() - start)
             if (storeMs > 100) {
@@ -268,19 +269,18 @@ export const createMempoolStore = ({
                 )
             }
         },
-        addProcessing: ({
+        addProcessing: async ({
             entryPoint,
             userOpInfo
         }: EntryPointUserOpInfoParam) => {
             try {
                 const { processing } = getStoreHandlers(entryPoint)
                 logAddOperation(userOpInfo, "processing")
-                processing.add(userOpInfo)
-                return Promise.resolve()
+                await processing.add(userOpInfo)
             } catch (err) {
                 logger.error({ err }, "Failed to add to processing mempool")
                 sentry.captureException(err)
-                return Promise.resolve()
+                throw err
             }
         },
         addSubmitted: ({

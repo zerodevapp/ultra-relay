@@ -42,6 +42,7 @@ import {
     scheduleInfrastructureRetry
 } from "../utils/operationFailure"
 import type { Monitor } from "./monitoring"
+import { BundleQueue } from "./bundleQueue"
 import {
     type InterfaceReputationManager,
     ReputationStatuses
@@ -538,7 +539,7 @@ export class Mempool {
 
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: <explanation>
     // The three phases of the bundle-time check. shouldSkip composes them for
-    // the serial loop; processConcurrent runs phase two for several candidates
+    // direct callers; process runs phase two for several candidates
     // at once and replays phases one and three strictly in pop order, so every
     // decision and accumulator effect is the one the serial loop would make.
 
@@ -857,23 +858,23 @@ export class Mempool {
         })
     }
 
-    // Concurrent variant of process(): pops up to `bundleValidationConcurrency`
+    // One ordered builder for every concurrency, including C=1. Pops up to
+    // `bundleValidationConcurrency`
     // candidates, starts their traces together under one semaphore, then
     // replays the decisions in pop order against the live accumulator. Any
     // candidate the replay does not consume goes back to its queue position.
-    private async processConcurrent({
+    async process({
         maxGasLimit,
         entryPoint,
         minOpsPerBundle,
-        maxBundleCount,
-        concurrency
+        maxBundleCount
     }: {
         maxGasLimit: bigint
         entryPoint: Address
         minOpsPerBundle: number
         maxBundleCount?: number
-        concurrency: number
     }): Promise<UserOperationBundle[]> {
+        const concurrency = this.config.bundleValidationConcurrency ?? 1
         const firstOp = await this.store.peekOutstanding(entryPoint)
         if (!firstOp) {
             return []
@@ -884,6 +885,7 @@ export class Mempool {
         const deferred: UserOpInfo[] = []
         let breakLoop = false
         const stats = { popped: 0, traced: 0, discarded: 0, batches: 0 }
+        const queue = new BundleQueue(this.store, entryPoint)
 
         let version: EntryPointVersion
         if (isVersion08(firstOp.userOp, entryPoint)) {
@@ -916,251 +918,270 @@ export class Mempool {
             )
         })
 
-        while (await this.store.peekOutstanding(entryPoint)) {
-            if (maxBundleCount && bundles.length >= maxBundleCount) {
-                break
-            }
-            if (breakLoop) {
-                break
-            }
+        try {
+            while (await this.store.peekOutstanding(entryPoint)) {
+                if (maxBundleCount && bundles.length >= maxBundleCount) {
+                    break
+                }
+                if (breakLoop) {
+                    break
+                }
 
-            const currentBundle: UserOperationBundle = {
-                entryPoint,
-                version,
-                userOps: [],
-                submissionAttempts: 0
-            }
-            let gasUsed = 0n
-            let eip7702Overhead = 0n
-            let accumulator: BundleAccumulator = {
-                paymasterDeposit: {},
-                stakedEntityCount: {},
-                senders: new Set<string>(),
-                knownEntities: await this.getKnownEntities(entryPoint),
-                storageMap: {}
-            }
-            let bundleClosed = false
+                const currentBundle: UserOperationBundle = {
+                    entryPoint,
+                    version,
+                    userOps: [],
+                    submissionAttempts: 0
+                }
+                // Preserve the already-committed prefix if a later queue/read operation fails.
+                bundles.push(currentBundle)
+                let gasUsed = 0n
+                let eip7702Overhead = 0n
+                let accumulator: BundleAccumulator = {
+                    paymasterDeposit: {},
+                    stakedEntityCount: {},
+                    senders: new Set<string>(),
+                    knownEntities: await this.getKnownEntities(entryPoint),
+                    storageMap: {}
+                }
+                let bundleClosed = false
 
-            while (
-                !bundleClosed &&
-                !breakLoop &&
-                (await this.store.peekOutstanding(entryPoint))
-            ) {
-                // Phase A: sequential pops, speculative traces.
-                const batch: Candidate[] = []
-                let speculativeGas = gasUsed
-                let speculativeOverhead = eip7702Overhead
-                const speculativeOps = currentBundle.userOps.map(
-                    (info) => info.userOp
-                )
                 while (
-                    batch.length < concurrency &&
+                    !bundleClosed &&
+                    !breakLoop &&
                     (await this.store.peekOutstanding(entryPoint))
                 ) {
-                    const userOpInfo =
-                        await this.store.popOutstanding(entryPoint)
-                    if (!userOpInfo) {
-                        break
-                    }
-                    stats.popped++
-
-                    if (seenOps.has(userOpInfo.userOpHash)) {
-                        // Serial re-adds this op and ends the tick when it
-                        // reaches it. Decide that in phase B, after every
-                        // earlier candidate, exactly where serial would.
-                        batch.push({ userOpInfo, reentered: true })
-                        break
-                    }
-                    seenOps.add(userOpInfo.userOpHash)
-
-                    if ((userOpInfo.retryAfter ?? 0) > Date.now()) {
-                        deferred.push(userOpInfo)
-                        continue
-                    }
-
-                    const candidate: Candidate = {
-                        userOpInfo,
-                        reentered: false
-                    }
-                    if (this.config.safeMode) {
-                        // Inputs captured at pop time, as the serial loop sees them.
-                        if (isVersion06(userOpInfo.userOp)) {
-                            candidate.queuedUserOps = []
-                        } else {
-                            try {
-                                candidate.queuedUserOps =
-                                    await this.getQueuedOutstandingUserOps({
-                                        userOp: userOpInfo.userOp,
-                                        entryPoint
-                                    })
-                            } catch (error) {
-                                candidate.outcome = Promise.resolve({
-                                    ok: false,
-                                    error
-                                })
-                            }
-                        }
-                        // The hint can only turn from proceed into skip as the
-                        // accumulator grows, never the other way, so a skip here
-                        // is final and a proceed may still be overruled.
-                        const hint = this.preValidationSkip({
-                            userOpInfo,
-                            stakedEntityCount: accumulator.stakedEntityCount,
-                            senders: accumulator.senders,
-                            entryPoint
-                        })
-                        if (!hint.skip && !candidate.outcome) {
-                            stats.traced++
-                            candidate.outcome =
-                                this.validationSemaphore.runExclusive(() =>
-                                    this.runValidation({
-                                        userOpInfo,
-                                        queuedUserOps: candidate.queuedUserOps,
-                                        entryPoint
-                                    })
-                                )
-                        }
-                    }
-                    batch.push(candidate)
-
-                    speculativeGas += calculateAA95GasFloor({
-                        userOps: [userOpInfo.userOp],
-                        beneficiary
-                    })
-                    if (userOpInfo.userOp.eip7702Auth) {
-                        speculativeOverhead += 40_000n
-                    }
-                    speculativeOps.push(userOpInfo.userOp)
-                    const speculative = projection(
-                        speculativeOps,
-                        speculativeGas,
-                        speculativeOverhead
+                    // Phase A: sequential pops, speculative traces.
+                    const batch: Candidate[] = []
+                    let speculativeGas = gasUsed
+                    let speculativeOverhead = eip7702Overhead
+                    const speculativeOps = currentBundle.userOps.map(
+                        (info) => info.userOp
                     )
-                    if (
-                        speculative.projectedGas > gasCeiling ||
-                        speculative.projectedBytes > byteThreshold
+                    while (
+                        batch.length < concurrency &&
+                        (await this.store.peekOutstanding(entryPoint))
                     ) {
-                        break
-                    }
-                }
-                stats.batches++
+                        const userOpInfo = await queue.pop()
+                        if (!userOpInfo) {
+                            break
+                        }
+                        stats.popped++
 
-                // Phase B: serial replay in pop order.
-                for (let index = 0; index < batch.length; index++) {
-                    const candidate = batch[index]
-                    const { userOpInfo } = candidate
-                    const leftovers = batch.slice(index + 1)
+                        if (seenOps.has(userOpInfo.userOpHash)) {
+                            // Serial re-adds this op and ends the tick when it
+                            // reaches it. Decide that in phase B, after every
+                            // earlier candidate, exactly where serial would.
+                            batch.push({ userOpInfo, reentered: true })
+                            break
+                        }
+                        seenOps.add(userOpInfo.userOpHash)
 
-                    if (candidate.reentered) {
-                        breakLoop = true
-                        userOpInfo.reentered = true
-                        await this.store.addOutstanding({
-                            entryPoint,
-                            userOpInfo
-                        })
-                        break
-                    }
-
-                    const decision = await this.decideCandidate({
-                        candidate,
-                        accumulator,
-                        entryPoint
-                    })
-
-                    if (decision.skip) {
-                        if (decision.removeOutstanding) {
+                        if ((userOpInfo.retryAfter ?? 0) > Date.now()) {
+                            deferred.push(userOpInfo)
                             continue
                         }
-                        await this.restoreLeftovers({
-                            entryPoint,
-                            leftovers,
-                            seenOps,
-                            stats
-                        })
-                        userOpInfo.reentered = true
-                        await this.store.addOutstanding({
-                            entryPoint,
-                            userOpInfo
-                        })
-                        break
-                    }
 
-                    const { userOp } = userOpInfo
-                    const nextGasUsed =
-                        gasUsed +
-                        calculateAA95GasFloor({
-                            userOps: [userOp],
+                        const candidate: Candidate = {
+                            userOpInfo,
+                            reentered: false
+                        }
+                        if (this.config.safeMode) {
+                            // Inputs captured at pop time, as the serial loop sees them.
+                            if (isVersion06(userOpInfo.userOp)) {
+                                candidate.queuedUserOps = []
+                            } else {
+                                try {
+                                    candidate.queuedUserOps =
+                                        await this.getQueuedOutstandingUserOps({
+                                            userOp: userOpInfo.userOp,
+                                            entryPoint
+                                        })
+                                } catch (error) {
+                                    candidate.outcome = Promise.resolve({
+                                        ok: false,
+                                        error
+                                    })
+                                }
+                            }
+                            // The hint can only turn from proceed into skip as the
+                            // accumulator grows, never the other way, so a skip here
+                            // is final and a proceed may still be overruled.
+                            const hint = this.preValidationSkip({
+                                userOpInfo,
+                                stakedEntityCount:
+                                    accumulator.stakedEntityCount,
+                                senders: accumulator.senders,
+                                entryPoint
+                            })
+                            if (!hint.skip && !candidate.outcome) {
+                                stats.traced++
+                                candidate.outcome =
+                                    this.validationSemaphore.runExclusive(() =>
+                                        this.runValidation({
+                                            userOpInfo,
+                                            queuedUserOps:
+                                                candidate.queuedUserOps,
+                                            entryPoint
+                                        })
+                                    )
+                            }
+                        }
+                        batch.push(candidate)
+
+                        speculativeGas += calculateAA95GasFloor({
+                            userOps: [userOpInfo.userOp],
                             beneficiary
                         })
-                    const nextOverhead =
-                        eip7702Overhead + (userOp.eip7702Auth ? 40_000n : 0n)
-                    const { projectedGas, projectedBytes } = projection(
-                        [
-                            ...currentBundle.userOps.map((info) => info.userOp),
-                            userOp
-                        ],
-                        nextGasUsed,
-                        nextOverhead
-                    )
-                    const exceedsGas = projectedGas > gasCeiling
-                    const exceedsBytes = projectedBytes > byteThreshold
-
-                    if (
-                        (exceedsGas || exceedsBytes) &&
-                        currentBundle.userOps.length >= minOpsPerBundle
-                    ) {
-                        this.logger.debug(
-                            {
-                                event: "userOpSkipped",
-                                reason: exceedsBytes
-                                    ? "Bundle byte size limit exceeded"
-                                    : "Bundle gas limit exceeded",
-                                userOpHash: userOpInfo.userOpHash,
-                                projectedGas: projectedGas.toString(),
-                                gasCeiling: gasCeiling.toString(),
-                                projectedBytes,
-                                byteThreshold
-                            },
-                            `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
+                        if (userOpInfo.userOp.eip7702Auth) {
+                            speculativeOverhead += 40_000n
+                        }
+                        speculativeOps.push(userOpInfo.userOp)
+                        const speculative = projection(
+                            speculativeOps,
+                            speculativeGas,
+                            speculativeOverhead
                         )
-                        await this.restoreLeftovers({
-                            entryPoint,
-                            leftovers,
-                            seenOps,
-                            stats
-                        })
-                        userOpInfo.reentered = true
-                        await this.store.addOutstanding({
-                            entryPoint,
-                            userOpInfo
-                        })
-                        bundleClosed = true
-                        break
+                        if (
+                            speculative.projectedGas > gasCeiling ||
+                            speculative.projectedBytes > byteThreshold
+                        ) {
+                            break
+                        }
                     }
+                    stats.batches++
 
-                    gasUsed = nextGasUsed
-                    eip7702Overhead = nextOverhead
-                    accumulator = {
-                        paymasterDeposit: decision.paymasterDeposit,
-                        stakedEntityCount: decision.stakedEntityCount,
-                        knownEntities: decision.knownEntities,
-                        senders: decision.senders,
-                        storageMap: decision.storageMap
+                    // Phase B: serial replay in pop order.
+                    for (let index = 0; index < batch.length; index++) {
+                        const candidate = batch[index]
+                        const { userOpInfo } = candidate
+                        const leftovers = batch.slice(index + 1)
+
+                        if (candidate.reentered) {
+                            breakLoop = true
+                            userOpInfo.reentered = true
+                            await queue.readd(userOpInfo)
+                            break
+                        }
+
+                        const decision = await this.decideCandidate({
+                            candidate,
+                            accumulator,
+                            entryPoint
+                        })
+
+                        if (decision.skip) {
+                            if (decision.removeOutstanding) {
+                                queue.release(userOpInfo)
+                                continue
+                            }
+                            await this.restoreLeftovers({
+                                entryPoint,
+                                leftovers,
+                                seenOps,
+                                stats
+                            })
+                            for (const item of leftovers)
+                                queue.release(item.userOpInfo)
+                            userOpInfo.reentered = true
+                            await queue.readd(userOpInfo)
+                            break
+                        }
+
+                        const { userOp } = userOpInfo
+                        const nextGasUsed =
+                            gasUsed +
+                            calculateAA95GasFloor({
+                                userOps: [userOp],
+                                beneficiary
+                            })
+                        const nextOverhead =
+                            eip7702Overhead +
+                            (userOp.eip7702Auth ? 40_000n : 0n)
+                        const { projectedGas, projectedBytes } = projection(
+                            [
+                                ...currentBundle.userOps.map(
+                                    (info) => info.userOp
+                                ),
+                                userOp
+                            ],
+                            nextGasUsed,
+                            nextOverhead
+                        )
+                        const exceedsGas = projectedGas > gasCeiling
+                        const exceedsBytes = projectedBytes > byteThreshold
+
+                        if (
+                            (exceedsGas || exceedsBytes) &&
+                            currentBundle.userOps.length >= minOpsPerBundle
+                        ) {
+                            this.logger.debug(
+                                {
+                                    event: "userOpSkipped",
+                                    reason: exceedsBytes
+                                        ? "Bundle byte size limit exceeded"
+                                        : "Bundle gas limit exceeded",
+                                    userOpHash: userOpInfo.userOpHash,
+                                    projectedGas: projectedGas.toString(),
+                                    gasCeiling: gasCeiling.toString(),
+                                    projectedBytes,
+                                    byteThreshold
+                                },
+                                `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
+                            )
+                            await this.restoreLeftovers({
+                                entryPoint,
+                                leftovers,
+                                seenOps,
+                                stats
+                            })
+                            for (const item of leftovers)
+                                queue.release(item.userOpInfo)
+                            userOpInfo.reentered = true
+                            await queue.readd(userOpInfo)
+                            bundleClosed = true
+                            break
+                        }
+
+                        gasUsed = nextGasUsed
+                        eip7702Overhead = nextOverhead
+                        accumulator = {
+                            paymasterDeposit: decision.paymasterDeposit,
+                            stakedEntityCount: decision.stakedEntityCount,
+                            knownEntities: decision.knownEntities,
+                            senders: decision.senders,
+                            storageMap: decision.storageMap
+                        }
+                        this.reputationManager.decreaseUserOpCount(userOp)
+                        userOpInfo.processingAt = Date.now()
+                        try {
+                            await this.store.addProcessing({
+                                entryPoint,
+                                userOpInfo
+                            })
+                        } catch (error) {
+                            this.reputationManager.increaseUserOpCount(userOp)
+                            throw error
+                        }
+                        currentBundle.userOps.push(userOpInfo)
+                        queue.release(userOpInfo)
                     }
-                    this.reputationManager.decreaseUserOpCount(userOp)
-                    userOpInfo.processingAt = Date.now()
-                    this.store.addProcessing({ entryPoint, userOpInfo })
-                    currentBundle.userOps.push(userOpInfo)
                 }
             }
 
-            if (currentBundle.userOps.length > 0) {
-                bundles.push(currentBundle)
+            for (const userOpInfo of deferred) {
+                await queue.readd(userOpInfo)
             }
-        }
-
-        for (const userOpInfo of deferred) {
-            await this.store.addOutstanding({ entryPoint, userOpInfo })
+        } catch (error) {
+            // Submit the completed prefix; uncommitted candidates are restored below.
+            // This does not claim atomic recovery from a Redis write with unknown outcome.
+            this.logger.error(
+                { err: error, entryPoint },
+                "Bundle construction interrupted; restoring uncommitted operations"
+            )
+            trace.getActiveSpan()?.setAttribute("validation.interrupted", true)
+        } finally {
+            await queue.close()
         }
 
         this.logger.debug(
@@ -1172,7 +1193,7 @@ export class Mempool {
             "validation.discarded": stats.discarded
         })
 
-        return bundles
+        return bundles.filter((bundle) => bundle.userOps.length > 0)
     }
 
     // Phase one and three for one candidate against the live accumulator. The
@@ -1266,230 +1287,6 @@ export class Mempool {
 
         const bundlesNested = await Promise.all(bundlePromises)
         const bundles = bundlesNested.flat()
-
-        return bundles
-    }
-
-    // Returns a bundle of userOperations in array format.
-    async process({
-        maxGasLimit,
-        entryPoint,
-        minOpsPerBundle,
-        maxBundleCount
-    }: {
-        maxGasLimit: bigint
-        entryPoint: Address
-        minOpsPerBundle: number
-        maxBundleCount?: number
-    }): Promise<UserOperationBundle[]> {
-        const concurrency = this.config.bundleValidationConcurrency ?? 1
-        if (concurrency > 1) {
-            return this.processConcurrent({
-                maxGasLimit,
-                entryPoint,
-                minOpsPerBundle,
-                maxBundleCount,
-                concurrency
-            })
-        }
-
-        // Check if there are any operations in the store
-        const firstOp = await this.store.peekOutstanding(entryPoint)
-        if (!firstOp) {
-            return []
-        }
-
-        // Get EntryPoint version
-        const bundles: UserOperationBundle[] = []
-        const seenOps = new Set()
-        const deferred: UserOpInfo[] = []
-        let breakLoop = false
-
-        // Process operations until no more are available or we hit maxBundleCount
-        while (await this.store.peekOutstanding(entryPoint)) {
-            // If maxBundles is set and we reached the limit, break
-            if (maxBundleCount && bundles.length >= maxBundleCount) {
-                break
-            }
-
-            // Derive version
-            let version: EntryPointVersion
-            if (isVersion08(firstOp.userOp, entryPoint)) {
-                version = "0.8"
-            } else if (isVersion07(firstOp.userOp)) {
-                version = "0.7"
-            } else {
-                version = "0.6"
-            }
-
-            // Setup for next bundle
-            const currentBundle: UserOperationBundle = {
-                entryPoint,
-                version,
-                userOps: [],
-                submissionAttempts: 0
-            }
-            let gasUsed = 0n
-            let eip7702Overhead = 0n
-            const caps = getBundleCaps(this.config)
-            const gasCeiling = minBigInt(maxGasLimit, caps.gasCap)
-            const byteThreshold = bundleByteThreshold(caps.byteCap)
-            let paymasterDeposit: { [paymaster: string]: bigint } = {}
-            let stakedEntityCount: { [addr: string]: number } = {}
-            let senders = new Set<string>()
-            let knownEntities = await this.getKnownEntities(entryPoint)
-            let storageMap: StorageMap = {}
-
-            if (breakLoop) {
-                break
-            }
-
-            // Keep adding ops to current bundle
-            while (await this.store.peekOutstanding(entryPoint)) {
-                const userOpInfo = await this.store.popOutstanding(entryPoint)
-                if (!userOpInfo) {
-                    break
-                }
-
-                if (seenOps.has(userOpInfo.userOpHash)) {
-                    breakLoop = true
-                    userOpInfo.reentered = true
-                    await this.store.addOutstanding({
-                        entryPoint,
-                        userOpInfo
-                    })
-                    break
-                }
-
-                seenOps.add(userOpInfo.userOpHash)
-
-                // An operation in infrastructure backoff must not return to the
-                // head of the queue: with distinct fees it would be popped again
-                // immediately, trip the reentry guard and end the tick for every
-                // other operation. Hold it aside and restore it after the tick.
-                if ((userOpInfo.retryAfter ?? 0) > Date.now()) {
-                    deferred.push(userOpInfo)
-                    continue
-                }
-
-                const { userOp } = userOpInfo
-
-                // Check if we should skip this operation
-                const skipResult = await this.shouldSkip({
-                    userOpInfo,
-                    paymasterDeposit,
-                    stakedEntityCount,
-                    knownEntities,
-                    senders,
-                    storageMap,
-                    entryPoint
-                })
-
-                if (skipResult.skip) {
-                    // Re-add to outstanding
-                    if (!skipResult.removeOutstanding) {
-                        userOpInfo.reentered = true
-                        await this.store.addOutstanding({
-                            entryPoint,
-                            userOpInfo
-                        })
-                    }
-                    continue
-                }
-
-                const beneficiary =
-                    this.config.utilityPrivateKey?.address ||
-                    privateKeyToAddress(generatePrivateKey())
-
-                gasUsed += calculateAA95GasFloor({
-                    userOps: [userOp],
-                    beneficiary
-                })
-                if (userOp.eip7702Auth) {
-                    eip7702Overhead += 40_000n
-                }
-
-                // Project the ACTUAL submitted tx gas (executor scales the floor
-                // by 105%), not the raw floor, so the budget matches what the
-                // node sees against the per-tx gas cap.
-                const projectedGas = scaleBigIntByPercent(
-                    gasUsed + eip7702Overhead,
-                    105n
-                )
-
-                // Project the serialized tx byte size if this op is added.
-                // O(n^2): re-serializes the growing candidate bundle per op.
-                // Bounded by bundle size (gas cap keeps n small) and runs once
-                // per bundling tick; switch to a running per-op size delta if
-                // packing latency ever shows up in profiles.
-                const candidateUserOps = [
-                    ...currentBundle.userOps.map((info) => info.userOp),
-                    userOp
-                ]
-                const projectedBytes = size(
-                    getSerializedHandleOpsTx({
-                        userOps: candidateUserOps,
-                        entryPoint,
-                        chainId: this.config.chainId,
-                        removeZeros: false
-                    })
-                )
-
-                const exceedsGas = projectedGas > gasCeiling
-                const exceedsBytes = projectedBytes > byteThreshold
-
-                // Only break once we have at least minOpsPerBundle ops; a lone
-                // over-cap op is handled at ingress (rejected on proven-cap
-                // chains) or by the executor (dropped on a ground-truth node
-                // rejection) rather than black-holed here.
-                if (
-                    (exceedsGas || exceedsBytes) &&
-                    currentBundle.userOps.length >= minOpsPerBundle
-                ) {
-                    this.logger.debug(
-                        {
-                            event: "userOpSkipped",
-                            reason: exceedsBytes
-                                ? "Bundle byte size limit exceeded"
-                                : "Bundle gas limit exceeded",
-                            userOpHash: userOpInfo.userOpHash,
-                            projectedGas: projectedGas.toString(),
-                            gasCeiling: gasCeiling.toString(),
-                            projectedBytes,
-                            byteThreshold
-                        },
-                        `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
-                    )
-
-                    // Put the operation back in the store
-                    userOpInfo.reentered = true
-                    await this.store.addOutstanding({ entryPoint, userOpInfo })
-                    break
-                }
-
-                // Update state based on skip result
-                paymasterDeposit = skipResult.paymasterDeposit
-                stakedEntityCount = skipResult.stakedEntityCount
-                knownEntities = skipResult.knownEntities
-                senders = skipResult.senders
-                storageMap = skipResult.storageMap
-
-                this.reputationManager.decreaseUserOpCount(userOp)
-                userOpInfo.processingAt = Date.now()
-                this.store.addProcessing({ entryPoint, userOpInfo })
-
-                // Add op to current bundle
-                currentBundle.userOps.push(userOpInfo)
-            }
-
-            if (currentBundle.userOps.length > 0) {
-                bundles.push(currentBundle)
-            }
-        }
-
-        for (const userOpInfo of deferred) {
-            await this.store.addOutstanding({ entryPoint, userOpInfo })
-        }
 
         return bundles
     }

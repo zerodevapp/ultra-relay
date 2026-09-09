@@ -1,15 +1,16 @@
 import type { StorageMap, UserOpInfo, UserOperation } from "@alto/types"
 import { RpcError, ValidationErrors } from "@alto/types"
 import { type Address, type Hex, getAddress } from "viem"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { AltoConfig } from "../createConfig"
 import { MemoryOutstanding } from "../store/createMemoryOutstandingStore"
 import { Mempool } from "./mempool"
+import { serialProcess } from "./fixtures/serialProcess"
 import { ReputationStatuses } from "./reputationManager"
 
 // Differential test: the concurrent bundling path must make exactly the
 // decisions the untouched serial loop makes, for the same initial queue.
-// Serial (C=1) is the reference; C=4 and C=8 are the candidates.
+// The frozen serial loop is the reference; C=1, C=4 and C=8 are candidates.
 
 const entryPoints = [
     `0x${"22".repeat(20)}`,
@@ -112,12 +113,14 @@ function fixture({
     specs,
     concurrency,
     entryPointsUsed = [entryPoints[0]],
-    gasCap = 20_000_000n
+    gasCap = 20_000_000n,
+    oracle = false
 }: {
     specs: OpSpec[]
     concurrency: number
     entryPointsUsed?: Address[]
     gasCap?: bigint
+    oracle?: boolean
 }): Fixture {
     const config = buildConfig(concurrency, entryPointsUsed, gasCap)
     const stores = new Map<Address, MemoryOutstanding>()
@@ -221,6 +224,9 @@ function fixture({
         },
         decreaseUserOpCount: (userOp: UserOperation) => {
             log.push(`count-:${userOp.sender}`)
+        },
+        increaseUserOpCount: (userOp: UserOperation) => {
+            log.push(`count+:${userOp.sender}`)
         }
     }
 
@@ -245,6 +251,16 @@ function fixture({
     ;(
         mempool as unknown as { validationSemaphore: unknown }
     ).validationSemaphore = new (require("async-mutex").Semaphore)(concurrency)
+
+    if (oracle)
+        mempool.process = serialProcess.bind({
+            config,
+            store: mempool.store,
+            logger: silentLogger,
+            reputationManager,
+            shouldSkip: mempool.shouldSkip.bind(mempool),
+            getKnownEntities: mempool.getKnownEntities.bind(mempool)
+        })
 
     return {
         mempool,
@@ -272,9 +288,10 @@ async function run(
     specs: OpSpec[],
     concurrency: number,
     entryPointsUsed?: Address[],
-    gasCap?: bigint
+    gasCap?: bigint,
+    oracle = false
 ) {
-    const f = fixture({ specs, concurrency, entryPointsUsed, gasCap })
+    const f = fixture({ specs, concurrency, entryPointsUsed, gasCap, oracle })
     const eps = entryPointsUsed ?? [entryPoints[0]]
     for (const [i, spec] of specs.entries()) {
         const target = f.stores.get(eps[i % eps.length])
@@ -413,16 +430,75 @@ const scenarios: Record<string, Scenario> = {
 }
 
 describe("concurrent bundle-time revalidation equals the serial loop", () => {
+    for (const concurrency of [1, 4, 8]) {
+        it(`restores uncommitted candidates after a deposit read throws, C=${concurrency}`, async () => {
+            const specs = [
+                { id: 1 },
+                { id: 2, paymaster: RICH_PAYMASTER },
+                { id: 3 },
+                { id: 4 }
+            ]
+            const f = fixture({ specs, concurrency })
+            const state = f.mempool as unknown as { config: AltoConfig }
+            state.config.publicClient.readContract = vi
+                .fn()
+                .mockRejectedValue(new Error("deposit RPC unavailable"))
+            const store = f.stores.get(entryPoints[0])!
+            for (const spec of specs) await store.add(makeOp(spec))
+            const bundles = await f.mempool.getBundles()
+            expect(
+                bundles.map((b) => b.userOps.map((o) => o.userOpHash))
+            ).toEqual([[hashOf(1)]])
+            expect((await f.drain())[entryPoints[0]]).toEqual([
+                hashOf(2),
+                hashOf(3),
+                hashOf(4)
+            ])
+            expect(f.log.filter((l) => l.startsWith("processing:"))).toEqual([
+                `processing:${hashOf(1)}`
+            ])
+        })
+
+        it(`restores candidates when a processing write fails before committing, C=${concurrency}`, async () => {
+            const specs = [{ id: 1 }, { id: 2 }, { id: 3 }]
+            const f = fixture({ specs, concurrency })
+            const add = f.mempool.store.addProcessing
+            vi.spyOn(f.mempool.store, "addProcessing").mockImplementation(
+                (args) => {
+                    if (args.userOpInfo.userOpHash === hashOf(2))
+                        return Promise.reject(new Error("write unavailable"))
+                    return add(args)
+                }
+            )
+            const store = f.stores.get(entryPoints[0])!
+            for (const spec of specs) await store.add(makeOp(spec))
+            const bundles = await f.mempool.getBundles()
+            expect(
+                bundles.map((b) => b.userOps.map((o) => o.userOpHash))
+            ).toEqual([[hashOf(1)]])
+            expect((await f.drain())[entryPoints[0]]).toEqual([
+                hashOf(2),
+                hashOf(3)
+            ])
+            expect(f.log.filter((l) => l.startsWith("count"))).toEqual([
+                `count-:${sender(1)}`,
+                `count-:${sender(2)}`,
+                `count+:${sender(2)}`
+            ])
+        })
+    }
+
     for (const [name, scenario] of Object.entries(scenarios)) {
         for (const distinct of [false, true]) {
-            for (const concurrency of [4, 8]) {
+            for (const concurrency of [1, 4, 8]) {
                 it(`${name} (${distinct ? "distinct" : "equal"} fees, C=${concurrency})`, async () => {
                     const feeSpecs = withFees(scenario.specs, distinct)
                     const serial = await run(
                         feeSpecs,
                         1,
                         undefined,
-                        scenario.gasCap
+                        scenario.gasCap,
+                        true
                     )
                     if (!distinct) scenario.expectSerial(serial)
                     const candidate = await run(
