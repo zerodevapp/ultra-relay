@@ -70,21 +70,47 @@ const getUserOpValidationResult = async (
         storageMap: validation.StorageMap
         referencedContracts?: ReferencedCodeHashes
     }
+    // Set only when the trace provably ran at one block: the uncached block
+    // number was identical immediately before and immediately after it. Left
+    // undefined when a block was mined across the trace, so the bundle-time
+    // cache never reuses a result whose block is uncertain.
+    validatedAtBlock?: bigint
 }> => {
-    const queuedUserOps: UserOperation[] =
-        await rpcHandler.mempool.getQueuedOutstandingUserOps({
+    const cache = rpcHandler.mempool.revalidationCache
+    const readBlock = () =>
+        rpcHandler.config.publicClient.getBlockNumber({ cacheTime: 0 })
+
+    const [queuedUserOps, blockBefore] = await Promise.all([
+        rpcHandler.mempool.getQueuedOutstandingUserOps({
             userOp,
             entryPoint
-        })
+        }),
+        // Free: runs against the node while the queue snapshot is fetched.
+        cache ? readBlock().catch(() => undefined) : undefined
+    ])
     const validationResult = await rpcHandler.validator.validateUserOp({
         userOp,
         queuedUserOps,
         entryPoint
     })
+    // One sequential read on the admission path (~4 ms locally) buys a proven
+    // block for a trace that costs ~86 ms to repeat at bundle time.
+    const blockAfter =
+        cache && blockBefore !== undefined
+            ? await readBlock().catch(() => undefined)
+            : undefined
+    const validatedAtBlock =
+        blockBefore !== undefined && blockBefore === blockAfter
+            ? blockAfter
+            : undefined
+    if (cache && validatedAtBlock === undefined) {
+        cache.recordUnbracketed()
+    }
 
     return {
         queuedUserOps,
-        validationResult
+        validationResult,
+        validatedAtBlock
     }
 }
 
@@ -178,7 +204,7 @@ export async function addToMempoolIfValid({
     // individually so the slowest can be identified from logs (wall-clock
     // latency = slowest step, not the sum).
     const [
-        { queuedUserOps, validationResult },
+        { queuedUserOps, validationResult, validatedAtBlock },
         currentNonceSeq,
         [pvgSuccess, pvgErrorReason],
         [preMempoolSuccess, preMempoolError],
@@ -299,6 +325,15 @@ export async function addToMempoolIfValid({
             getAAError(mempoolAddError)
         )
         throw new RpcError(mempoolAddError, ValidationErrors.InvalidFields)
+    }
+
+    // Only after the op is really outstanding, and only with a proven block.
+    if (validatedAtBlock !== undefined) {
+        rpcHandler.mempool.revalidationCache?.set(
+            userOpHash,
+            validatedAtBlock,
+            validationResult
+        )
     }
 
     return { result: "added", userOpHash }

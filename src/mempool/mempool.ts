@@ -43,6 +43,7 @@ import {
 } from "../utils/operationFailure"
 import type { Monitor } from "./monitoring"
 import { BundleQueue } from "./bundleQueue"
+import { RevalidationCache } from "./revalidationCache"
 import {
     type InterfaceReputationManager,
     ReputationStatuses
@@ -87,6 +88,11 @@ export class Mempool {
     private validator: InterfaceValidator
     private eventManager: EventManager
     private validationSemaphore: Semaphore
+    // Present only when revalidation-cache is on. Holds admission-time results
+    // for same-block reuse at bundle time; see revalidationCache.ts.
+    public readonly revalidationCache?: RevalidationCache<
+        ValidationResult & { storageMap: StorageMap }
+    >
 
     constructor({
         config,
@@ -122,6 +128,11 @@ export class Mempool {
         this.validationSemaphore = new Semaphore(
             Math.max(1, config.bundleValidationConcurrency ?? 1)
         )
+        if (config.revalidationCache) {
+            this.revalidationCache = new RevalidationCache(
+                config.revalidationCacheSize
+            )
+        }
     }
 
     // === Methods for handling changing userOp state === //
@@ -663,6 +674,18 @@ export class Mempool {
             storageMap: cachedStorageMap
         } = userOpInfo
         try {
+            const reused = this.revalidationCache?.take(userOpHash)
+            if (reused) {
+                // Still emitted so per-op validation coverage and the stage
+                // breakdown keep accounting for every bundled op.
+                await timed(
+                    this.logger,
+                    "shouldSkip.validate",
+                    { userOpHash, revalidationReused: true },
+                    async () => undefined
+                )
+                return { ok: true, result: reused }
+            }
             let queued = queuedUserOps ?? []
             if (queuedUserOps === undefined && !isVersion06(userOp)) {
                 queued = await this.getQueuedOutstandingUserOps({
@@ -1274,6 +1297,25 @@ export class Mempool {
     public async getBundles(
         maxBundleCount?: number
     ): Promise<UserOperationBundle[]> {
+        if (this.revalidationCache) {
+            // One uncached read per tick, shared by every entrypoint and
+            // candidate: a reused result must have been traced at this block.
+            try {
+                this.revalidationCache.observeBlock(
+                    await this.config.publicClient.getBlockNumber({
+                        cacheTime: 0
+                    })
+                )
+            } catch (error) {
+                // A failed read must never widen reuse: leave the observed
+                // block untouched so every take() this tick reports stale.
+                this.revalidationCache.observeBlock(-1n)
+                this.logger.warn(
+                    { error: String(error) },
+                    "revalidation cache: block read failed, tracing every op this tick"
+                )
+            }
+        }
         const bundlePromises = this.config.entrypoints.map(
             async (entryPoint) => {
                 return await this.process({

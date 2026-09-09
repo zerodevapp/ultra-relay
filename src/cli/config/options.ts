@@ -141,6 +141,18 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         type: "number",
         default: 1
     },
+    "revalidation-cache": {
+        description:
+            "Reuse the admission-time validation trace when a mempool userOp is picked for a bundle in the same block the bundling tick observed. Not a substitute for per-op revalidation; off by default.",
+        type: "boolean",
+        default: false
+    },
+    "revalidation-cache-size": {
+        description:
+            "Maximum admission-time validation results held for same-block bundle-time reuse",
+        type: "number",
+        default: 10000
+    },
     "revalidation-tracer": {
         description:
             "Re-run the JavaScript validation tracer when a mempool userOp is picked for a bundle even if its referenced code hashes are unchanged. Production-safe default is on; off is benchmark-only.",

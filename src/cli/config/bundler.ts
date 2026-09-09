@@ -36,6 +36,12 @@ export const bundlerArgsSchema = z.object({
     // ERC-4337 requires the validation trace to be rerun before inclusion.
     // Skipping it is benchmark-only because unchanged bytecode does not prove
     // unchanged storage access, nonce, deposit, or validation environment.
+    // Reuse the admission-time validation result at bundle time when the
+    // admission trace provably ran at the block the bundling tick observed.
+    // Not equivalent to per-op revalidation: same-block reuse only. Off by
+    // default; see mempool/revalidationCache.ts for the staleness argument.
+    "revalidation-cache": z.boolean().default(false),
+    "revalidation-cache-size": z.number().int().min(1).max(1_000_000).default(10_000),
     "revalidation-tracer": z.boolean().default(true),
     "tracer-result-log-level": z
         .enum(["trace", "debug", "info", "warn", "error", "fatal"])
