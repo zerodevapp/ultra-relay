@@ -59,6 +59,7 @@
     ],
     "exclude": [
         "./**/*.test.ts",
+        "./mempool/fixtures/*",
         "./lib/*",
         "./node_modules/*",
         "./esm/*"
