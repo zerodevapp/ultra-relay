@@ -11,6 +11,7 @@ import type {
     Store,
     StoreType
 } from "."
+import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import { createMemoryOutstandingQueue } from "./createMemoryOutstandingStore"
 import { createRedisOutstandingQueue } from "./createRedisOutstandingStore"
@@ -72,9 +73,10 @@ export const createMempoolStore = ({
             })
 
             // Log the Redis keys being used
-            const outstandingKey = `${config.chainId}:outstanding:pending-queue:${entryPoint}`
-            const processingKey = `${config.chainId}:processing:*:${entryPoint}`
-            const submittedKey = `${config.chainId}:submitted:*:${entryPoint}`
+            const storePrefix = getRedisStorePrefix(config)
+            const outstandingKey = `${storePrefix}:outstanding:pending-queue:${entryPoint}`
+            const processingKey = `${storePrefix}:processing:*:${entryPoint}`
+            const submittedKey = `${storePrefix}:submitted:*:${entryPoint}`
 
             logger.info(
                 {
