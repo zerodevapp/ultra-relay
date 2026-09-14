@@ -59,8 +59,7 @@ const wallets = [
     { address: "0x1111111111111111111111111111111111111111" },
     { address: "0x2222222222222222222222222222222222222222" }
 ]
-const warn = vi.fn()
-const logger = { info() {}, warn, error() {}, debug() {}, trace() {} }
+const logger = { info() {}, warn() {}, error() {}, debug() {}, trace() {} }
 const config = {
     chainId: 42161,
     redisKeyPrefix: "test",
@@ -80,7 +79,6 @@ describe("createRedisSenderManager.getWallet", () => {
         calls.rpop = 0
         calls.llen = 0
         state.failLlen = false
-        warn.mockClear()
         // Only fake setTimeout: if getWallet awaited delay() on a successful
         // pop, the promise below could never settle and the test would hang.
         vi.useFakeTimers({ toFake: ["setTimeout"] })
@@ -134,14 +132,15 @@ describe("createRedisSenderManager.getWallet", () => {
             redisEndpoint
         })
         state.failLlen = true
+        const unhandled = vi.fn()
+        process.on("unhandledRejection", unhandled)
 
         const wallet = await manager.getWallet()
         await flush()
+        await new Promise((r) => setImmediate(r))
+        process.off("unhandledRejection", unhandled)
 
         expect(wallets.map((w) => w.address)).toContain(wallet.address)
-        expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ err: expect.any(Error) }),
-            "failed to read wallet pool size"
-        )
+        expect(unhandled).not.toHaveBeenCalled()
     })
 })

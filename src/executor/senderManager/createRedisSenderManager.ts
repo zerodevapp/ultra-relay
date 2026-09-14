@@ -100,15 +100,15 @@ export const createRedisSenderManager = async ({
                 "got wallet from sender manager"
             )
 
-            // Metrics only; don't hold the bundle for the round-trip.
+            // Metrics only; don't hold the bundle for the round-trip, and a
+            // failed read isn't worth surfacing (pop on the same connection
+            // just succeeded).
             redisQueue
                 .llen()
                 .then((len) => {
                     metrics.walletsAvailable.set(len)
                 })
-                .catch((err) => {
-                    logger.warn({ err }, "failed to read wallet pool size")
-                })
+                .catch(() => {})
 
             return wallet
         },
