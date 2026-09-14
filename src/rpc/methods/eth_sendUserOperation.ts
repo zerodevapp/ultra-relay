@@ -21,7 +21,7 @@ import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
-import { validatePvg } from "./validate-pvg"
+import { validatePvg } from "../validation/validate-pvg"
 
 const getUserOpValidationResult = async (
     rpcHandler: RpcHandler,
