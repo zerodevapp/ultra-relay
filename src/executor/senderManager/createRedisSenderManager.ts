@@ -79,7 +79,11 @@ export const createRedisSenderManager = async ({
 
             while (!walletAddress) {
                 walletAddress = await redisQueue.pop()
-                await delay(100)
+                // Only back off when the pool is empty; a successful pop must
+                // return immediately, it sits on the bundling critical path.
+                if (!walletAddress) {
+                    await delay(100)
+                }
             }
 
             const wallet = wallets.find((w) => w.address === walletAddress)
@@ -96,9 +100,15 @@ export const createRedisSenderManager = async ({
                 "got wallet from sender manager"
             )
 
-            await redisQueue.llen().then((len) => {
-                metrics.walletsAvailable.set(len)
-            })
+            // Metrics only; don't hold the bundle for the round-trip.
+            redisQueue
+                .llen()
+                .then((len) => {
+                    metrics.walletsAvailable.set(len)
+                })
+                .catch((err) => {
+                    logger.warn({ err }, "failed to read wallet pool size")
+                })
 
             return wallet
         },
