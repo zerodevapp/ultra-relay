@@ -276,7 +276,7 @@ describe.each([
                 privateKey
             })
 
-            await client.sendUserOperation({
+            const deploymentHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -287,6 +287,14 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
+
+            // Submission does not imply inclusion. Preparing the next operations
+            // too early can attach stale factory data and fail with AA10.
+            const deploymentReceipt = await client.waitForUserOperationReceipt({
+                hash: deploymentHash
+            })
+            expect(deploymentReceipt.success).toBe(true)
+            expect(await client.account.isDeployed()).toBe(true)
 
             const opHashes = await Promise.all(
                 nonceKeys.map((nonceKey) =>
@@ -372,7 +380,7 @@ describe.each([
                 privateKey
             })
 
-            await client.sendUserOperation({
+            const deploymentHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -383,6 +391,12 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
+
+            const deploymentReceipt = await client.waitForUserOperationReceipt({
+                hash: deploymentHash
+            })
+            expect(deploymentReceipt.success).toBe(true)
+            expect(await client.account.isDeployed()).toBe(true)
 
             const nonceKey = 100n
             const nonceValueDiffs = [0n, 1n, 2n]
