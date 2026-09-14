@@ -626,7 +626,7 @@ describe.each([
             const receipt =
                 await smartAccountClient.waitForUserOperationReceipt({ hash })
 
-            expect(receipt.success)
+            expect(receipt.success).toBe(true)
         })
 
         test("Should AA25 throw when sending userOp with nonce + 1", async () => {

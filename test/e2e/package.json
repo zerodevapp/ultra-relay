@@ -5,7 +5,9 @@
     "private": true,
     "scripts": {
         "test": "vitest dev -c ./vitest.config.ts",
-        "test:ci": "CI=true && vitest -c ./vitest.config.ts"
+        "test:ci": "vitest run -c ./vitest.config.ts",
+        "test:boosted": "vitest run -c ./vitest.config.ts tests/boosted-accounting.test.ts tests/boost_sendUserOperation.test.ts",
+        "test:boosted:strict": "E2E_REQUIRE_PVG_ENFORCEMENT=1 vitest run -c ./vitest.config.ts tests/boosted-accounting.test.ts"
     },
     "dependencies": {
         "@pimlico/alto": "workspace:./src/",
