@@ -10,8 +10,6 @@ import {
 import type * as validation from "@alto/types"
 import {
     addLogContext,
-    calcExecutionPvgComponent,
-    calcL2PvgComponent,
     getAAError,
     getSerializedHandleOpsTx,
     scaleBigIntByPercent,
@@ -23,42 +21,7 @@ import { calculateAA95GasFloor } from "../../executor/utils"
 import { getNonceKeyAndSequence, getUserOpHash } from "../../utils/userop"
 import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
-
-const validatePvg = async (
-    apiVersion: ApiVersion,
-    rpcHandler: RpcHandler,
-    userOp: UserOperation,
-    entryPoint: Address,
-    boost = false
-): Promise<[boolean, string]> => {
-    // PVG validation is skipped for v1
-    if (apiVersion === "v1" || boost) {
-        return [true, ""]
-    }
-
-    const executionGasComponent = calcExecutionPvgComponent({
-        userOp,
-        supportsEip7623: rpcHandler.config.supportsEip7623,
-        config: rpcHandler.config
-    })
-    const l2GasComponent = await calcL2PvgComponent({
-        config: rpcHandler.config,
-        userOp,
-        entryPoint,
-        gasPriceManager: rpcHandler.gasPriceManager,
-        validate: true
-    })
-    const requiredPvg = executionGasComponent + l2GasComponent
-
-    if (requiredPvg > userOp.preVerificationGas) {
-        return [
-            false,
-            `preVerificationGas is not enough, required: ${requiredPvg}, got: ${userOp.preVerificationGas}`
-        ]
-    }
-
-    return [true, ""]
-}
+import { validatePvg } from "./validate-pvg"
 
 const getUserOpValidationResult = async (
     rpcHandler: RpcHandler,

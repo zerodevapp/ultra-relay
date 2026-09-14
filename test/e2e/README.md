@@ -64,10 +64,10 @@ EntryPoint versions:
 pnpm --filter e2e run test:boosted:strict
 ```
 
-**This command is expected to fail against the current production code.** It does
-not enable enforcement or modify the bundler configuration. Use it to qualify a
-separate enforcement change; update the default characterization when admission
-behavior intentionally changes.
+This command explicitly enables `ALTO_ENFORCE_BOOST_PVG=true` in the isolated
+local bundler process. Normal tests leave enforcement disabled and continue to
+characterize compatibility behavior. CI runs both modes; neither command changes
+any deployed service configuration.
 
 ### Scope
 
