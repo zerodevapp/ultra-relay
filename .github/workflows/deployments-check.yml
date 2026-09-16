@@ -1,0 +1,42 @@
+name: Check deployment values
+
+# Validates deployments/*.values.yaml and the scripts behind deploy-pr.yml.
+# Runs on PRs that touch them and again on main: deploy PRs are opened with
+# the built-in token, and GitHub creates no workflow runs at all for events
+# that token triggers, so a deploy PR gets no PR run and the push run on main
+# is the guaranteed check. Closing and reopening such a PR re-triggers
+# pull_request as the person doing it, giving a pre-merge run.
+on:
+  pull_request:
+    paths:
+      - 'deployments/**'
+      - 'scripts/deployments/**'
+      - '.github/workflows/deployments-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deployments/**'
+      - 'scripts/deployments/**'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Validate values files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure PyYAML
+        # Preinstalled on GitHub's Ubuntu runners; a bare pip install would hit
+        # PEP 668 (externally managed environment), so fail with a clear message.
+        run: python3 -c "import yaml" || { echo "::error::PyYAML is not available on this runner"; exit 1; }
+
+      - name: Test the deployment scripts
+        run: scripts/deployments/test.sh
+
+      - name: Validate deployments/*.values.yaml
+        run: python3 scripts/deployments/check.py deployments

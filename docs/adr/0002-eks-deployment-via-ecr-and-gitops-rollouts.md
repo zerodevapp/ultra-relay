@@ -68,9 +68,15 @@ when it depends on infrastructure we could not inspect and must be confirmed
 by SRE before first rollout.
 
 1. **[SRE]** ECR lives in the management account `352956043285`, region
-   us-east-2, repository `offchain-labs/ultra-relay`. Account chosen because
-   every other ZeroDev image lives there; region chosen by the team. An EKS
-   cluster exists (or will) in us-east-2 with ArgoCD attached.
+   us-west-2, repository `offchain-labs/ultra-relay` — confirmed by SRE, the
+   same registry and region every other ZeroDev image uses; the cluster pulls
+   cross-region and cross-account exactly like the us-east-1 clusters do. The
+   target cluster is `zerodev-prod-ue2-v1` (us-east-2, AWS account
+   `518033442333`, the same account as `zerodev-prod-ue1-v1`), added by SRE to
+   the ArgoCD config repo for this migration. The repository
+   uses immutable tags; the build workflow skips the build when the tag
+   already exists, so a re-run can never replace the image behind an existing
+   release.
 2. **[SRE]** IAM role `ultra-relay-gha` does not exist yet. It must trust
    GitHub OIDC for `repo:zerodevapp/ultra-relay:*` — this repository is in
    the `zerodevapp` org, not `OffchainLabs`, so copying another service's
@@ -78,24 +84,39 @@ by SRE before first rollout.
    `ecr:DescribeImages` for the deploy-time existence check. Until it exists
    the first push-to-main build fails at the AWS login step; harmless, re-run.
 3. **[SRE]** The `generic-application` chart accepts the value keys we use.
-   Its source (`OffchainLabs/sre-helm-charts`) and the ArgoCD wiring repo
-   (`OffchainLabs/zerodev-helm-charts`) are not readable by this team's
-   GitHub accounts, so the values files are modelled on three working
-   examples (arbitrum-indexer, doorway-kms, breakglass) and are **not rendered
-   in CI**. Add a `helm template` check once SRE shares the chart location.
+   Partially verified: the `application:` half of the merged values renders
+   with the upstream Stakater `application` chart (9.3.1) into a Deployment,
+   Service, ConfigMap and ServiceMonitor carrying the expected names, mount,
+   probes, rolling-update pin and NLB annotations. Wrapper-only keys
+   (`labels`, `configMapChecksum`) and the `external-secret` half could not
+   be rendered: the wrapper's source (`OffchainLabs/sre-helm-charts`) and the
+   internal chart museum are reachable only over Tailscale. Ask SRE for a
+   full `helm template` before the first sync; the values files are **not
+   rendered in CI**.
 4. **[SRE]** The cluster runs the AWS Load Balancer Controller (internal NLB),
    External Secrets Operator (Secrets Manager sync, with an IRSA role allowed
-   to read `ultra-relay/*`), Prometheus Operator (ServiceMonitor CRD — if it
-   is absent the ArgoCD sync fails until the block is disabled), and a log
-   agent shipping stdout to Grafana.
+   to read `ultra-relay/*`), Prometheus Operator (ServiceMonitor CRD — the
+   chart skips the ServiceMonitor when the CRD is absent, verified in the
+   upstream template, so a missing operator costs metrics, not the sync), the
+   Reloader
+   controller (restarts the pod when the synced Secret changes;
+   `configMapChecksum` is implemented by the chart itself and covers
+   ConfigMap edits without it), and a log agent shipping stdout to Grafana.
 5. **[SRE]** VPC peering exists between Render (Virginia) and the us-east-2
    VPC in both directions: the caller → internal NLB, and the pod → the Redis
    events queue that stays hosted in Render. Cross-region latency is accepted.
    Security groups admit Render's peered CIDR on the NLB listener.
-6. **[SRE]** ArgoCD registration is done by SRE, ideally an ApplicationSet with
-   a git file generator over `deployments/*.values.yaml` (adding an instance
-   then needs no SRE ticket). Fallback: one entry per instance in SRE's config
-   repo. Namespace `ultra-relay`. Our repo layout is identical either way.
+6. **[verified]** ArgoCD registration is one component entry per relay instance
+   in `charts/zerodev/config/<cluster>/config.yaml` of
+   `OffchainLabs/zerodev-helm-charts` (its app-of-apps chart; an
+   ApplicationSet over `config/*/config.yaml`). Each component is a
+   multi-source Application: `generic-application` from the internal chart
+   museum plus this repo as the `values` ref, exactly how `kms-breakglass`
+   points at `breakglass/deployments/`. Adding an instance therefore needs one
+   SRE PR; there is no file-generator auto-discovery. Namespace
+   `ultra-relay`; Application name `zerodev-prod-ue2-v1-ultra-relay-<instance>`.
+   The values stay in this repo by decision; only the entry lives in the
+   charts repo (`charts/zerodev/config/zerodev-prod-ue2-v1/config.yaml`).
 7. **[verified]** `main` has no branch protection or rulesets. Merging any
    change under `deployments/` is therefore a production change with no
    required review. Enabling required review on main is recommended and is
@@ -104,9 +125,12 @@ by SRE before first rollout.
    workflows use `ubuntu-latest` while this repo stays in `zerodevapp`.
 9. The deploy-PR workflow uses the built-in `GITHUB_TOKEN`, which requires
    the repository setting "Allow GitHub Actions to create and approve pull
-   requests". PRs opened with that token do not trigger `pull_request`
-   workflows, so PR CI does not run on deploy PRs — accepted because they
-   change only `tag:` lines and the image is verified in ECR first. Upgrade
+   requests". PRs opened with that token get no `pull_request` workflow runs
+   at all (GitHub does not create runs for events the built-in token
+   triggers), so PR CI does not run on deploy PRs; the check re-runs on main
+   after merge, and closing and reopening the PR triggers a pre-merge run —
+   accepted because deploy PRs change only `tag:` lines and the image is
+   verified in ECR first. Upgrade
    path: the org-owned deploy-PR GitHub App doorway-kms uses, needed only if
    required checks are ever added to main.
 10. **[verified]** The CLI registers a config file option and reads `ALTO_*`
@@ -160,8 +184,15 @@ by SRE before first rollout.
 - Nothing deploys automatically. After merging a code PR someone must run the
   deploy-PR workflow and merge its PR. Prod keeps running whatever tag is in
   the values file, including a branch image, until then.
+- Re-running the deploy-PR workflow while its PR is open stops and points at
+  the PR instead of force-pushing over manual edits. Re-running a main build
+  whose image already exists skips the build and keeps the existing release.
+  "Latest" for rollouts means the highest-numbered release, not GitHub's
+  latest flag.
 - Until the shared Redis mempool ships, each rollout has a window where two
   processes hold the same executor keys.
 - **Upgrade triggers:** many instances → shared internal gateway; required
   checks on main → GitHub App token for deploy PRs; chart location shared by
   SRE → `helm template` render check in CI.
+
+See also: `deployments/README.md` for the operator-facing flow.
