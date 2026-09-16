@@ -42,29 +42,31 @@ application:
           }
 
 # Secrets Manager secret "ultra-relay/ultra-relay-arbitrum-ostium" is a JSON
-# object with the five keys below; each becomes one env var in Kubernetes
-# Secret "ultra-relay-arbitrum-ostium-secrets" (envFrom in common).
+# object with the five property keys below; each becomes one key (the
+# upper-cased property name) in Kubernetes Secret
+# "ultra-relay-arbitrum-ostium-secrets". common.values.yaml maps those keys
+# to the ALTO_* env vars the CLI reads.
 external-secret:
   externalSecrets:
     ultra-relay-arbitrum-ostium-secrets:
       data:
-        - secretKey: ALTO_EXECUTOR_PRIVATE_KEYS
+        - secretKey: EXECUTOR_PRIVATE_KEYS
           remoteRef:
             key: ultra-relay/ultra-relay-arbitrum-ostium
             property: executor-private-keys
-        - secretKey: ALTO_UTILITY_PRIVATE_KEY
+        - secretKey: UTILITY_PRIVATE_KEY
           remoteRef:
             key: ultra-relay/ultra-relay-arbitrum-ostium
             property: utility-private-key
-        - secretKey: ALTO_RPC_URL
+        - secretKey: RPC_URL
           remoteRef:
             key: ultra-relay/ultra-relay-arbitrum-ostium
             property: rpc-url
-        - secretKey: ALTO_REDIS_EVENTS_QUEUE_ENDPOINT
+        - secretKey: REDIS_EVENTS_QUEUE_ENDPOINT
           remoteRef:
             key: ultra-relay/ultra-relay-arbitrum-ostium
             property: redis-events-queue-endpoint
-        - secretKey: ALTO_REDIS_EVENTS_QUEUE_NAME
+        - secretKey: REDIS_EVENTS_QUEUE_NAME
           remoteRef:
             key: ultra-relay/ultra-relay-arbitrum-ostium
             property: redis-events-queue-name

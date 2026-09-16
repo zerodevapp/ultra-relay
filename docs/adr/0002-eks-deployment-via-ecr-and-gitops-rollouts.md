@@ -41,9 +41,12 @@ ever leaving main.
   values file, rendered into a ConfigMap, mounted as a file and loaded via
   `ALTO_CONFIG`. The five secret keys (`executor-private-keys`,
   `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint`,
-  `redis-events-queue-name`) are absent from the file and arrive as `ALTO_*`
-  env vars from a Kubernetes Secret that External Secrets Operator syncs from
-  AWS Secrets Manager `ultra-relay/<instance>`. yargs precedence is
+  `redis-events-queue-name`) are absent from the file. External Secrets
+  Operator syncs them from AWS Secrets Manager `ultra-relay/<instance>` into
+  a Kubernetes Secret whose keys are the upper-cased property names
+  (`RPC_URL`, ...); the shared values map each key to the `ALTO_*` env var
+  the CLI reads, with the Secret name templated from `applicationName`. yargs
+  precedence is
   CLI > env > config file, so env-supplied secrets can never be overridden by
   the file.
 - **Exposure.** No public ingress. Each instance gets a Kubernetes Service of

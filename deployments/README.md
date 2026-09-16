@@ -94,10 +94,13 @@ because the PR is open.
 - Non-secret settings live in `config.json` inside the values file. The
   container reads it via `ALTO_CONFIG=/config/config.json`. A config edit
   re-rolls the pod through the chart's ConfigMap checksum.
-- Secret settings arrive as `ALTO_*` env vars from Kubernetes Secret
-  `<instance>-secrets`, which External Secrets Operator syncs from Secrets
-  Manager `ultra-relay/<instance>`. Env vars take precedence over the config
-  file, and CI rejects a config file that contains a secret key. A rotated
+- Secret settings live in Kubernetes Secret `<instance>-secrets`, which
+  External Secrets Operator syncs from Secrets Manager
+  `ultra-relay/<instance>`. Its keys are the upper-cased property names
+  (`RPC_URL`, `EXECUTOR_PRIVATE_KEYS`, ...); `common.values.yaml` maps each
+  one to the `ALTO_*` env var the CLI reads. Env vars take precedence over
+  the config file, and CI rejects a config file that contains a secret key.
+  A rotated
   secret restarts the pod only if the Reloader controller runs on the
   cluster (SRE prerequisite); otherwise restart the pod by hand.
 

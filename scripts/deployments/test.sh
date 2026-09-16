@@ -17,11 +17,11 @@ expect_fail() { # expect_fail <message> <cmd...>
 # for the externalSecrets.<name>.data list.
 data_block() {
   local key="$1" pair
-  for pair in ALTO_EXECUTOR_PRIVATE_KEYS:executor-private-keys \
-              ALTO_UTILITY_PRIVATE_KEY:utility-private-key \
-              ALTO_RPC_URL:rpc-url \
-              ALTO_REDIS_EVENTS_QUEUE_ENDPOINT:redis-events-queue-endpoint \
-              ALTO_REDIS_EVENTS_QUEUE_NAME:redis-events-queue-name; do
+  for pair in EXECUTOR_PRIVATE_KEYS:executor-private-keys \
+              UTILITY_PRIVATE_KEY:utility-private-key \
+              RPC_URL:rpc-url \
+              REDIS_EVENTS_QUEUE_ENDPOINT:redis-events-queue-endpoint \
+              REDIS_EVENTS_QUEUE_NAME:redis-events-queue-name; do
     printf '        - secretKey: %s\n          remoteRef:\n            key: %s\n            property: %s\n' \
       "${pair%%:*}" "$key" "${pair#*:}"
   done

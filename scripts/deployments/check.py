@@ -40,12 +40,14 @@ NAME_RE = re.compile(r"^ultra-relay-[a-z0-9]+(-[a-z0-9]+)*$")
 # "tag:" and disagree with the line-based grep in bump-tag.sh. Group 1 is the
 # line's value without a trailing comment.
 TAG_LINE_RE = re.compile(r"^[ \t]+tag:[ \t]*([^#\n]*?)[ \t]*(?:#[^\n]*)?$", re.M)
+# Kubernetes Secret key (upper-cased property name) -> Secrets Manager property.
+# common.values.yaml maps each Secret key to the ALTO_* env var the CLI reads.
 REQUIRED_MAPPINGS = {
-    "ALTO_EXECUTOR_PRIVATE_KEYS": "executor-private-keys",
-    "ALTO_UTILITY_PRIVATE_KEY": "utility-private-key",
-    "ALTO_RPC_URL": "rpc-url",
-    "ALTO_REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
-    "ALTO_REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
+    "EXECUTOR_PRIVATE_KEYS": "executor-private-keys",
+    "UTILITY_PRIVATE_KEY": "utility-private-key",
+    "RPC_URL": "rpc-url",
+    "REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
+    "REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
 }
 SECRET_KEYS = set(REQUIRED_MAPPINGS.values())
 SUFFIX = ".values.yaml"

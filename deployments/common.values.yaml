@@ -52,14 +52,35 @@ application:
       # Keep Node's heap below the 4Gi memory limit so an OOM is a clean crash.
       NODE_OPTIONS:
         value: --max-old-space-size=3072
-
-    # Secret env vars (ALTO_EXECUTOR_PRIVATE_KEYS, ...) come from the Kubernetes
-    # Secret "<applicationName>-secrets", created by the ExternalSecret in the
-    # instance file.
-    envFrom:
-      secrets:
-        type: secret
-        nameSuffix: secrets
+      # Secrets. Kubernetes Secret "<applicationName>-secrets" (created by the
+      # ExternalSecret in the instance file) holds the upper-cased property
+      # names; the CLI needs the ALTO_ prefix, so each key is mapped here. The
+      # Secret name is templated from applicationName, so this block is shared.
+      ALTO_EXECUTOR_PRIVATE_KEYS:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: EXECUTOR_PRIVATE_KEYS
+      ALTO_UTILITY_PRIVATE_KEY:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: UTILITY_PRIVATE_KEY
+      ALTO_RPC_URL:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: RPC_URL
+      ALTO_REDIS_EVENTS_QUEUE_ENDPOINT:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: REDIS_EVENTS_QUEUE_ENDPOINT
+      ALTO_REDIS_EVENTS_QUEUE_NAME:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: REDIS_EVENTS_QUEUE_NAME
 
     # Volume "config" is declared per instance (its ConfigMap name carries the
     # instance name); the mount is the same for all.
