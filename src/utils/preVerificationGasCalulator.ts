@@ -259,30 +259,19 @@ function getEip7623transactionGasCost({
     return stipendGasCost + maxBigInt(standardCost, floorCost)
 }
 
-// during validation, collect only the gas known to be paid: the actual validation and 10% of execution gas.
+// Only credit gas that cannot be avoided by leaving declared limits unused.
 function getUserOpGasUsed({
     userOp,
     config
 }: { userOp: UserOperation; config: AltoConfig }): bigint {
     // Extract all multipliers from config
-    const {
-        v6CallGasLimitMultiplier,
-        v6VerificationGasLimitMultiplier,
-        v7CallGasLimitMultiplier,
-        v7PaymasterPostOpGasLimitMultiplier
-    } = config
+    const { v7CallGasLimitMultiplier, v7PaymasterPostOpGasLimitMultiplier } =
+        config
 
     if (isVersion06(userOp)) {
-        const realCallGasLimit = unscaleBigIntByPercent(
-            userOp.callGasLimit,
-            BigInt(v6CallGasLimitMultiplier)
-        )
-        const realVerificationGasLimit = unscaleBigIntByPercent(
-            userOp.verificationGasLimit,
-            BigInt(v6VerificationGasLimitMultiplier)
-        )
-
-        return (realCallGasLimit + realVerificationGasLimit) / 10n
+        // v0.6 has no unused-gas penalty. Declared limits are not a lower
+        // bound on execution, so padding them must not reduce the calldata floor.
+        return 0n
     }
 
     if (isVersion07(userOp)) {

@@ -45,4 +45,4 @@ jobs:
         run: pnpm --filter e2e run test:boosted:strict
 
       - name: Validate PVG rollout modes
-        run: pnpm --filter @pimlico/alto run test:unit rpc/validation/validate-pvg.test.ts
+        run: pnpm --filter @pimlico/alto run test:unit rpc/validation/validate-pvg.test.ts utils/preVerificationGasCalulator.test.ts

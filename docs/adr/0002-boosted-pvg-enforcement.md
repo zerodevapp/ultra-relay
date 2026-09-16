@@ -7,15 +7,17 @@ that minimum for boosted operations without modifying signed fields or receipts.
 
 ## Modes
 
-Both options default to false; default admission behavior and RPC workload are
-unchanged.
+Both options default to false; they add no admission checks or RPC workload
+until enabled. The separate v0.6/EIP-7623 calculator correction described below
+can still affect estimation and existing non-boosted v2 validation.
 
 - `--observe-boost-pvg` / `ALTO_OBSERVE_BOOST_PVG=true`: sample the required PVG
   and log `declaredPvg`, `requiredPvg`, `wouldReject`, sender, EntryPoint and API
   version. Admission does not wait for the asynchronous fee calculation and
   calculation failures are logged rather than rejecting the request.
 - `--enforce-boost-pvg` / `ALTO_ENFORCE_BOOST_PVG=true`: reject insufficient PVG
-  using the existing invalid-fields response and required/received values.
+  using the existing simulate-validation response (`-32500`) and
+  required/received values.
   Calculation errors do not fall back to accepting an unchecked operation.
   Enforcement takes precedence when both options are set.
 
@@ -45,6 +47,28 @@ No default-on cutover is part of this change. Enabling enforcement rejects
 existing insufficient-PVG submissions; it does not repair queued operations.
 The computed minimum is an admission guard, not a guarantee that estimates cover
 every later fee movement, rollup fee component or separately mined failed bundle.
+
+### Known limitations
+
+On OP Stack chains the existing validation calculator reads a minimum L1-fee
+cache whose writer currently has no callers. An empty cache defaults to 1 wei,
+which normally converts to zero overhead gas. Estimation queries the L1-fee
+oracle directly, but observation/enforcement reuse the incomplete validation
+floor. Do not interpret `wouldReject=false` as evidence of sufficient L1 overhead
+or qualify Base/Optimism cost coverage from these logs. Fixing this pre-existing
+calculator issue is separate from enabling the default-off rollout controls.
+
+The new controls apply to zero-fee boosted operations. Tiny nonzero-fee operations
+remain subject to existing fee policy: the gas-price floor is checked only for
+non-boosted API v2 requests with safe mode disabled. Non-boosted v1 skips PVG
+validation, while non-boosted v2 still checks it. Fleet exposure/configuration
+and any fee-policy changes require separate review.
+
+With EIP-7623 enabled, v0.6 now receives no execution-gas credit inferred from
+declared limits: it has no unused-gas penalty. This prevents padded limits from
+lowering the calldata floor, but can conservatively increase estimated/required
+PVG for calldata-heavy v0.6 operations even when boosted enforcement is disabled.
+The EIP-7623-disabled calculation is unchanged.
 
 ## Verification
 
