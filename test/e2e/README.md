@@ -60,6 +60,12 @@ The opt-in strict gate instead requires insufficient-PVG operations to be
 rejected, across both submission methods, API v1/v2, account types and supported
 EntryPoint versions:
 
+These are request-surface combinations, not four independent admission paths.
+Every operation in this gate has zero fees and enters the shared boosted path;
+the current implementation bypasses PVG validation for all of them. The gate
+checks that future boosted enforcement is reachable through each endpoint/API
+combination. It does not test non-boosted fee/PVG policy or prove L1-fee coverage.
+
 ```sh
 pnpm --filter e2e run test:boosted:strict
 ```
