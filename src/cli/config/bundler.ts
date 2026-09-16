@@ -245,6 +245,8 @@ export const debugArgsSchema = z.object({
     "min-bundle-interval": z.number().int().min(1).default(100),
     "max-bundle-interval": z.number().int().min(1).default(1000),
     "enable-debug-endpoints": z.boolean(),
+    "enforce-boost-pvg": z.boolean().default(false),
+    "observe-boost-pvg": z.boolean().default(false),
     "expiration-check": z.boolean(),
     "dangerous-skip-user-operation-validation": z.boolean(),
     "deploy-simulations-contract": z.boolean()

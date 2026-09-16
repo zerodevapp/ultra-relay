@@ -134,6 +134,10 @@ export default async function setup({ provide }: GlobalSetupContext) {
             readyMessage: "Server listening at",
             env: {
                 ...envConfig,
+                ALTO_ENFORCE_BOOST_PVG:
+                    process.env.E2E_REQUIRE_PVG_ENFORCEMENT === "1"
+                        ? "true"
+                        : "false",
                 ALTO_RPC_URL: anvilRpc,
                 ALTO_PORT: String(altoPort)
             }

@@ -747,6 +747,18 @@ export const debugOptions: CliCommandOptions<IDebugArgsInput> = {
         require: true,
         default: false
     },
+    "enforce-boost-pvg": {
+        description:
+            "Enforce minimum preVerificationGas for boosted user operations on all API versions",
+        type: "boolean",
+        default: false
+    },
+    "observe-boost-pvg": {
+        description:
+            "Sample boosted preVerificationGas checks without rejecting operations when enforcement is disabled",
+        type: "boolean",
+        default: false
+    },
     "expiration-check": {
         description: "Should the node make expiration checks",
         type: "boolean",
