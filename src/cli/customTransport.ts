@@ -147,6 +147,12 @@ const MAX_DEPTH = 4
 const MAX_OBJECT_KEYS = 24
 const MAX_ARRAY_ITEMS = 8
 
+// Revert payloads get a far larger cap than the success path. They are what an
+// operator decodes when an upstream revert is unexpected, a custom error with
+// arguments is worthless as a bare selector, and the error path is not where
+// the log volume is.
+const MAX_ERROR_HEX_CHARS = 1024
+
 // Hex is classified by the 0x prefix alone. Scanning every character of a
 // 57 KB result to confirm it is really hex would make the reducer cost scale
 // with the payload it exists to shrink.
@@ -266,13 +272,38 @@ function pickFields(
     return picked
 }
 
-// The four methods below dominate the log volume, so they get explicit
-// reducers instead of the generic walk. Everything else falls through.
+// The custom tracer the bundler passes to debug_traceCall returns five arrays
+// and nothing else worth logging. A trace tree is the largest and deepest
+// response in the system, so it is summarised by size rather than left to the
+// generic walk. Diagnosing a safe-mode validation failure needs the whole
+// tree, which is what the debug log level is for.
+const TRACE_ARRAY_FIELDS = [
+    "callsFromEntryPoint",
+    "keccak",
+    "calls",
+    "logs",
+    "debug"
+]
+
+// The methods below dominate the log volume or the response size, so they get
+// explicit reducers instead of the generic walk. Everything else falls
+// through.
 function reduceResultByMethod(
     method: string,
     source: Record<string, unknown>
 ): Record<string, unknown> | undefined {
     switch (method) {
+        case "debug_traceCall": {
+            const reduced: Record<string, unknown> = {}
+            for (const field of TRACE_ARRAY_FIELDS) {
+                if (Array.isArray(source[field])) {
+                    reduced[`${field}Count`] = (
+                        source[field] as unknown[]
+                    ).length
+                }
+            }
+            return reduced
+        }
         case "eth_getTransactionReceipt": {
             const reduced = pickFields(source, RECEIPT_FIELDS)
             if (Array.isArray(source.logs)) {
@@ -301,16 +332,16 @@ function reduceResultByMethod(
 }
 
 function reduceErrorData(data: unknown): unknown {
-    if (typeof data === "string") {
-        if (!isHexLike(data)) {
-            return truncateText(data)
-        }
-        const bytes = hexByteLength(data)
-        return data.length >= 10
-            ? { selector: data.slice(0, 10), bytes }
-            : { bytes }
+    if (typeof data !== "string") {
+        return reduceValue(data, 0)
     }
-    return reduceValue(data, 0)
+    if (!isHexLike(data)) {
+        return truncateText(data)
+    }
+    if (data.length <= MAX_ERROR_HEX_CHARS) {
+        return data
+    }
+    return { selector: data.slice(0, 10), bytes: hexByteLength(data) }
 }
 
 export function reduceLoggedValue(value: unknown): unknown {

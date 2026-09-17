@@ -372,21 +372,85 @@ describe("reduceLoggedResult", () => {
 
     it("falls back to the generic reducer for other methods", () => {
         expect(
-            reduceLoggedResult("debug_traceCall", {
-                gas: "0x5208",
-                output: hex(3000),
-                calls: [{ input: hex(3000) }]
+            reduceLoggedResult("eth_feeHistory", {
+                oldestBlock: "0x5208",
+                blob: hex(3000),
+                reward: [[hex(3000)]]
             })
         ).toEqual({
-            gas: "0x5208",
-            output: "0xabababab…(3000 bytes)",
-            calls: [{ input: "0xabababab…(3000 bytes)" }]
+            oldestBlock: "0x5208",
+            blob: "0xabababab…(3000 bytes)",
+            reward: [["0xabababab…(3000 bytes)"]]
+        })
+    })
+
+    describe("debug_traceCall", () => {
+        // Shape of BundlerTracerResult, the custom tracer the bundler passes.
+        const trace = {
+            callsFromEntryPoint: [
+                { opcodes: { CALL: 3 }, access: {}, contractSize: {} },
+                { opcodes: { SSTORE: 9 }, access: {}, contractSize: {} }
+            ],
+            keccak: Array.from({ length: 40 }, () => hex(64)),
+            calls: Array.from({ length: 120 }, () => ({
+                type: "RETURN",
+                gasUsed: 21000,
+                data: hex(400)
+            })),
+            logs: Array.from({ length: 12 }, () => ({
+                topics: [hex(32)],
+                data: hex(200)
+            })),
+            debug: []
+        }
+
+        it("summarises every array by size", () => {
+            expect(reduceLoggedResult("debug_traceCall", trace)).toEqual({
+                callsFromEntryPointCount: 2,
+                keccakCount: 40,
+                callsCount: 120,
+                logsCount: 12,
+                debugCount: 0
+            })
+        })
+
+        it("bounds the largest response in the system", () => {
+            const reduced = reduceLoggedResult("debug_traceCall", trace)
+            expect(JSON.stringify(reduced).length).toBeLessThan(150)
+        })
+
+        it("omits arrays the tracer did not return", () => {
+            expect(
+                reduceLoggedResult("debug_traceCall", { keccak: [] })
+            ).toEqual({ keccakCount: 0 })
+        })
+
+        it("does not mutate the trace", () => {
+            const before = structuredClone(trace)
+            reduceLoggedResult("debug_traceCall", trace)
+            expect(trace).toEqual(before)
         })
     })
 })
 
 describe("reduceLoggedError", () => {
-    it("summarises hex data as a selector plus a byte count", () => {
+    it("keeps a revert payload whole up to 1024 characters", () => {
+        const data = `0x8b7ac980${"0".repeat(1014)}`
+        expect(data).toHaveLength(1024)
+        expect(
+            reduceLoggedError({
+                code: 3,
+                message: "execution reverted",
+                data
+            })
+        ).toEqual({
+            code: 3,
+            message: "execution reverted",
+            data
+        })
+    })
+
+    it("summarises a revert payload past 1024 characters", () => {
         expect(
             reduceLoggedError({
                 code: 3,
@@ -400,17 +464,17 @@ describe("reduceLoggedError", () => {
         })
     })
 
-    it("reports bytes only when the hex data is too short for a selector", () => {
+    it("keeps hex data too short to carry a selector", () => {
         expect(
             reduceLoggedError({ code: 3, message: "reverted", data: "0x1234" })
         ).toEqual({
             code: 3,
             message: "reverted",
-            data: { bytes: 2 }
+            data: "0x1234"
         })
         expect(
             (reduceLoggedError({ data: "0x" }) as Record<string, unknown>).data
-        ).toEqual({ bytes: 0 })
+        ).toBe("0x")
     })
 
     it("cuts non-hex string data at 200 characters", () => {
