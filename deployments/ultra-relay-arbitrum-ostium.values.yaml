@@ -73,7 +73,7 @@ external-secret:
         #     property: redis-events-queue-name
   serviceAccount:
     annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium
+      eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium-ue2
   secretStore:
     provider:
       aws:
