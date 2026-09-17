@@ -1,0 +1,81 @@
+# Relay instance: ultra-relay-arbitrum-ostium (Arbitrum One, dedicated to
+# Ostium). Layered on common.values.yaml. Filename stem == applicationName
+# (scripts/deployments/check.py enforces it).
+application:
+  applicationName: ultra-relay-arbitrum-ostium
+
+  deployment:
+    image:
+      # Rewritten by deploy-pr.yml; never hand-edit. Placeholder until the
+      # first rollout — the pod cannot start until then.
+      tag: main-0000000
+
+    volumes:
+      config:
+        configMap:
+          name: ultra-relay-arbitrum-ostium-config
+
+  # Non-secret runtime config, identical in shape to the Render config file.
+  # Secret keys (executor-private-keys, utility-private-key, rpc-url,
+  # redis-events-queue-endpoint, redis-events-queue-name) are NOT here — they
+  # arrive as ALTO_* env vars from the Secret below. Editing this block
+  # re-rolls the pod on the next sync.
+  configMap:
+    enabled: true
+    files:
+      config:
+        config.json: |
+          {
+            "entrypoints": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789,0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            "network-name": "arbitrum",
+            "chain-type": "arbitrum",
+            "min-executor-balance": "100000000000000000",
+            "balance-override": true,
+            "safe-mode": false,
+            "max-block-range": 500,
+            "json": true,
+            "refilling-wallets": false,
+            "gas-price-bump": "110",
+            "enforce-unique-senders-per-bundle": false,
+            "max-bundle-interval": 200,
+            "max-gas-per-bundle": "27000000"
+          }
+
+# Secrets Manager secret "ultra-relay/ultra-relay-arbitrum-ostium" is a JSON
+# object with the five property keys below; each becomes one key (the
+# upper-cased property name) in Kubernetes Secret
+# "ultra-relay-arbitrum-ostium-secrets". common.values.yaml maps those keys
+# to the ALTO_* env vars the CLI reads.
+external-secret:
+  enabled: true
+  externalSecrets:
+    ultra-relay-arbitrum-ostium-secrets:
+      data:
+        - secretKey: EXECUTOR_PRIVATE_KEYS
+          remoteRef:
+            key: k8s__ultra-relay_arbitrum-ostium
+            property: executor-private-keys
+        - secretKey: UTILITY_PRIVATE_KEY
+          remoteRef:
+            key: k8s__ultra-relay_arbitrum-ostium
+            property: utility-private-key
+        - secretKey: RPC_URL
+          remoteRef:
+            key: k8s__ultra-relay_arbitrum-ostium
+            property: rpc-url
+        # - secretKey: REDIS_EVENTS_QUEUE_ENDPOINT
+        #   remoteRef:
+        #     key: k8s__ultra-relay_arbitrum-ostium
+        #     property: redis-events-queue-endpoint
+        # - secretKey: REDIS_EVENTS_QUEUE_NAME
+        #   remoteRef:
+        #     key: k8s__ultra-relay_arbitrum-ostium
+        #     property: redis-events-queue-name
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium
+  secretStore:
+    provider:
+      aws:
+        enabled: true
+        region: us-east-1

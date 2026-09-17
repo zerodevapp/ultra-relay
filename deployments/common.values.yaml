@@ -1,0 +1,172 @@
+# Shared by every relay instance (one running ultra-relay process serving one
+# chain — see CONTEXT.md). ArgoCD renders this file first, then
+# <instance>.values.yaml on top, so an instance file overrides anything here.
+#
+# The image *tag* is deliberately NOT in this file: it lives in each instance
+# file so a rollout can move one instance before the others
+# (scripts/deployments/bump-tag.sh rewrites that line; deploy-pr.yml drives it).
+#
+# Chart: SRE's generic-application (Stakater application subchart under
+# `application`, External Secrets subchart under `external-secret`).
+application:
+  labels:
+    app: ultra-relay
+
+  deployment:
+    replicas: 1
+    strategy:
+      # New pod starts before the old one stops — pinned explicitly so a single
+      # replica never drops to zero ready pods on a rollout, whatever the chart's
+      # defaults are. Two processes briefly share the same executor keys and can
+      # collide on nonces — accepted until the shared Redis mempool lands (ADR
+      # 0002).
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
+
+    # Re-roll the pod on config/secret changes. configMapChecksum is implemented
+    # by the generic-application chart (a checksum of configMap.files in the pod
+    # template), so a config.json edit re-rolls the pod on its own.
+    # reloadOnChange needs the Reloader controller on the cluster; that is what
+    # restarts the pod when the synced Secret changes — SRE prerequisite
+    # (deployments/README.md).
+    reloadOnChange: true
+    configMapChecksum: true
+
+    image:
+      repository: 352956043285.dkr.ecr.us-west-2.amazonaws.com/offchain-labs/ultra-relay
+      pullPolicy: IfNotPresent
+
+    ports:
+      - containerPort: 3000
+        name: http
+        protocol: TCP
+
+    env:
+      # The CLI reads ALTO_* env vars; ALTO_CONFIG points at the mounted
+      # config.json (env vars win over the file, so secrets from the Secret
+      # below can never be overridden by it).
+      ALTO_CONFIG:
+        value: /config/config.json
+      # Keep Node's heap below the 4Gi memory limit so an OOM is a clean crash.
+      NODE_OPTIONS:
+        value: --max-old-space-size=3072
+      # Secrets. Kubernetes Secret "<applicationName>-secrets" (created by the
+      # ExternalSecret in the instance file) holds the upper-cased property
+      # names; the CLI needs the ALTO_ prefix, so each key is mapped here. The
+      # Secret name is templated from applicationName, so this block is shared.
+      ALTO_EXECUTOR_PRIVATE_KEYS:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: EXECUTOR_PRIVATE_KEYS
+      ALTO_UTILITY_PRIVATE_KEY:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: UTILITY_PRIVATE_KEY
+      ALTO_RPC_URL:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: RPC_URL
+      ALTO_REDIS_EVENTS_QUEUE_ENDPOINT:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: REDIS_EVENTS_QUEUE_ENDPOINT
+      ALTO_REDIS_EVENTS_QUEUE_NAME:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: REDIS_EVENTS_QUEUE_NAME
+
+    # Volume "config" is declared per instance (its ConfigMap name carries the
+    # instance name); the mount is the same for all.
+    volumeMounts:
+      config:
+        mountPath: /config/config.json
+        subPath: config.json
+
+    # /health returns 200 as soon as the HTTP listener is up and reflects only
+    # that the process is alive — a failing RPC provider cannot trigger a
+    # restart loop.
+    # /health shares the bundler's event loop, so timeouts are 5s: a busy loop
+    # must not read as dead.
+    startupProbe:
+      enabled: true
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 24
+    livenessProbe:
+      enabled: true
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 6
+    readinessProbe:
+      enabled: true
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        # No CPU limit on purpose: it only throttles a latency-sensitive process.
+        memory: 4Gi
+
+    containerSecurityContext:
+      # The image runs as root (node:alpine default, `pnpm start` entrypoint).
+      readOnlyRootFilesystem: false
+      runAsNonRoot: false
+
+  # Internal-only exposure: an internal AWS Network Load Balancer, reached from
+  # Render over VPC peering by its own DNS name. No Ingress, no public hostname.
+  service:
+    enabled: true
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    ports:
+      - port: 80
+        name: http
+        protocol: TCP
+        targetPort: 3000
+
+  # Prometheus scrapes /metrics on the same port (ultra_relay_* metrics).
+  serviceMonitor:
+    enabled: true
+    endpoints:
+      - interval: 30s
+        path: /metrics
+        port: http
+
+# External Secrets Operator: syncs AWS Secrets Manager "ultra-relay/<instance>"
+# into Kubernetes Secret "<instance>-secrets" (mapping per instance file).
+external-secret:
+  enabled: true
+  serviceAccount:
+    annotations:
+      # IRSA role in the zerodev-prod-ue2-v1 cluster account (518033442333)
+      # allowed to read Secrets Manager secrets named ultra-relay/*. SRE creates
+      # it; adjust the role name here if they pick a different one.
+      eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay
+  secretStore:
+    provider:
+      aws:
+        enabled: true
+        region: us-east-2
