@@ -47,26 +47,35 @@ application:
 # "ultra-relay-arbitrum-ostium-secrets". common.values.yaml maps those keys
 # to the ALTO_* env vars the CLI reads.
 external-secret:
+  enabled: true
   externalSecrets:
     ultra-relay-arbitrum-ostium-secrets:
       data:
         - secretKey: EXECUTOR_PRIVATE_KEYS
           remoteRef:
-            key: ultra-relay/ultra-relay-arbitrum-ostium
+            key: k8s__ultra-relay_arbitrum-ostium
             property: executor-private-keys
         - secretKey: UTILITY_PRIVATE_KEY
           remoteRef:
-            key: ultra-relay/ultra-relay-arbitrum-ostium
+            key: k8s__ultra-relay_arbitrum-ostium
             property: utility-private-key
         - secretKey: RPC_URL
           remoteRef:
-            key: ultra-relay/ultra-relay-arbitrum-ostium
+            key: k8s__ultra-relay_arbitrum-ostium
             property: rpc-url
         - secretKey: REDIS_EVENTS_QUEUE_ENDPOINT
           remoteRef:
-            key: ultra-relay/ultra-relay-arbitrum-ostium
+            key: k8s__ultra-relay_arbitrum-ostium
             property: redis-events-queue-endpoint
         - secretKey: REDIS_EVENTS_QUEUE_NAME
           remoteRef:
-            key: ultra-relay/ultra-relay-arbitrum-ostium
+            key: k8s__ultra-relay_arbitrum-ostium
             property: redis-events-queue-name
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium
+  secretStore:
+    provider:
+      aws:
+        enabled: true
+        region: us-east-1
