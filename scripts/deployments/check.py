@@ -46,8 +46,8 @@ REQUIRED_MAPPINGS = {
     "EXECUTOR_PRIVATE_KEYS": "executor-private-keys",
     "UTILITY_PRIVATE_KEY": "utility-private-key",
     "RPC_URL": "rpc-url",
-    "REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
-    "REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
+    #"REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
+    #"REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
 }
 SECRET_KEYS = set(REQUIRED_MAPPINGS.values())
 SUFFIX = ".values.yaml"
@@ -168,7 +168,7 @@ def check_instance(path: Path) -> list[str]:
     if secret_name not in ext:
         errors.append(f"{path}: external-secret.externalSecrets must define {secret_name!r}")
     else:
-        expected_key = f"ultra-relay/{name}"
+        expected_key = f"k8s__ultra-relay_{name}"
         found: dict[str, str] = {}
         for entry in (ext[secret_name] or {}).get("data") or []:
             secret_key = entry.get("secretKey") if isinstance(entry, dict) else None
