@@ -14,8 +14,9 @@ deployments/README.md). Rules enforced:
   3. application.configMap.files.config["config.json"] parses as JSON and
      contains none of the secret keys (those come from Secrets Manager).
   4. external-secret.externalSecrets["<instance>-secrets"].data holds exactly
-     the five required (secretKey, property) mappings, no duplicate
-     secretKey, each with remoteRef.key == "ultra-relay/<instance>".
+     the REQUIRED_MAPPINGS (secretKey, property) pairs, no duplicate
+     secretKey, each with remoteRef.key == "k8s__ultra-relay_<variant>" where
+     <variant> is the instance name without its "ultra-relay-" prefix.
   5. application.deployment.volumes.config.configMap.name is
      "<instance>-config" — a copied file that keeps another instance's name
      would mount that instance's config.json.
@@ -168,7 +169,10 @@ def check_instance(path: Path) -> list[str]:
     if secret_name not in ext:
         errors.append(f"{path}: external-secret.externalSecrets must define {secret_name!r}")
     else:
-        expected_key = f"k8s__ultra-relay_{name}"
+        # SRE's Secrets Manager naming: k8s__<service>_<variant>, where the
+        # variant is the instance name without its "ultra-relay-" prefix
+        # (ultra-relay-arbitrum-ostium -> k8s__ultra-relay_arbitrum-ostium).
+        expected_key = f"k8s__ultra-relay_{name.removeprefix('ultra-relay-')}"
         found: dict[str, str] = {}
         for entry in (ext[secret_name] or {}).get("data") or []:
             secret_key = entry.get("secretKey") if isinstance(entry, dict) else None

@@ -71,16 +71,21 @@ application:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: RPC_URL
+      # The Redis events-queue secrets are not synced yet (their ExternalSecret
+      # entries are commented out per instance), so these are optional: the
+      # pod starts without them and picks them up once the keys exist.
       ALTO_REDIS_EVENTS_QUEUE_ENDPOINT:
         valueFrom:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_ENDPOINT
+            optional: true
       ALTO_REDIS_EVENTS_QUEUE_NAME:
         valueFrom:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_NAME
+            optional: true
 
     # Volume "config" is declared per instance (its ConfigMap name carries the
     # instance name); the mount is the same for all.
@@ -161,9 +166,10 @@ external-secret:
   enabled: true
   serviceAccount:
     annotations:
-      # IRSA role in the zerodev-prod-ue2-v1 cluster account (518033442333)
-      # allowed to read Secrets Manager secrets named ultra-relay/*. SRE creates
-      # it; adjust the role name here if they pick a different one.
+      # Default only. SRE provisions one IRSA role per instance
+      # (external-secrets-<instance>-ue2, account 518033442333) that may read
+      # that instance's Secrets Manager key k8s__ultra-relay_<variant>; each
+      # instance file overrides this annotation with its own role.
       eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay
   secretStore:
     provider:

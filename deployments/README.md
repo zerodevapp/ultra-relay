@@ -15,7 +15,7 @@ file here deploys it to production.** Design and assumptions:
 A **relay instance** is named `ultra-relay-<chain>` or
 `ultra-relay-<chain>-<variant>` (see `CONTEXT.md`). The filename stem must
 equal `application.applicationName`; CI enforces it together with the image
-tag location, the config JSON and the five secret mappings
+tag location, the config JSON and the required secret mappings
 (`scripts/deployments/check.py`).
 
 ## Release → rollout
@@ -70,16 +70,19 @@ because the PR is open.
 
 1. Copy an existing instance file to `deployments/<new-name>.values.yaml`.
    Set `applicationName`, the ConfigMap volume name (`<new-name>-config`),
-   the ExternalSecret name (`<new-name>-secrets`) and every `remoteRef.key`
-   (`ultra-relay/<new-name>`), then edit `config.json`. Keep all five secret
-   mappings; CI fails if one is missing or renamed. Set `tag:` to the
+   the ExternalSecret name (`<new-name>-secrets`), every `remoteRef.key`
+   (`k8s__ultra-relay_<variant>`, the name without its `ultra-relay-`
+   prefix) and the IRSA role annotation, then edit `config.json`. Keep every
+   required secret mapping; CI fails if one is missing or renamed. Set
+   `tag:` to the
    placeholder `main-0000000`: a file copied from a live instance carries a
    real tag, and ArgoCD would deploy that image the moment it discovers the
    new application, before any deploy PR.
-2. Create Secrets Manager secret `ultra-relay/<new-name>` in the cluster
-   account, a JSON object with keys `executor-private-keys`,
-   `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint`,
-   `redis-events-queue-name`.
+2. Ask SRE for Secrets Manager secret `k8s__ultra-relay_<variant>` in the
+   cluster account, a JSON object with keys `executor-private-keys`,
+   `utility-private-key` and `rpc-url` (the Redis events-queue keys stay
+   commented out until that queue moves off Render), plus an IRSA role
+   `external-secrets-<new-name>-ue2` allowed to read it.
 3. Open a PR; `Check deployment values` must pass. Merge.
 4. Ask SRE to add a component entry for the new instance in
    `charts/zerodev/config/zerodev-prod-ue2-v1/config.yaml` of
@@ -96,7 +99,7 @@ because the PR is open.
   re-rolls the pod through the chart's ConfigMap checksum.
 - Secret settings live in Kubernetes Secret `<instance>-secrets`, which
   External Secrets Operator syncs from Secrets Manager
-  `ultra-relay/<instance>`. Its keys are the upper-cased property names
+  `k8s__ultra-relay_<variant>`. Its keys are the upper-cased property names
   (`RPC_URL`, `EXECUTOR_PRIVATE_KEYS`, ...); `common.values.yaml` maps each
   one to the `ALTO_*` env var the CLI reads. Env vars take precedence over
   the config file, and CI rejects a config file that contains a secret key.
@@ -158,10 +161,11 @@ no public hostname.
         targetRevision: main
         ref: values
   ```
-- IRSA role for External Secrets Operator in account `518033442333` that can
-  read `ultra-relay/*`; `common.values.yaml` names it
-  `external-secrets-ultra-relay`, so adjust that line if SRE picks another
-  name.
+- One IRSA role per instance for External Secrets Operator in account
+  `518033442333`, `external-secrets-<instance>-ue2`, allowed to read that
+  instance's `k8s__ultra-relay_<variant>` secret. It is set in the instance
+  file's `external-secret.serviceAccount` block; the role in
+  `common.values.yaml` is only a default.
 - AWS Load Balancer Controller and the Reloader controller on the cluster
   (Prometheus Operator too for metrics; without its CRD the chart simply
   skips the ServiceMonitor); a security-group rule admitting Render's peered
