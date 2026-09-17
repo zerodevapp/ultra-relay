@@ -78,4 +78,4 @@ external-secret:
     provider:
       aws:
         enabled: true
-        region: us-east-1
+        region: us-east-2
