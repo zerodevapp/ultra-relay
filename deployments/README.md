@@ -117,7 +117,7 @@ no public hostname.
   `352956043285`, region us-west-2 (where every other ZeroDev image lives;
   the cluster pulls cross-region and cross-account), **with immutable tags**
   and a repository policy that lets the `zerodev-prod-ue2-v1` node role pull.
-- IAM role `ultra-relay-gha` for GitHub OIDC, trusting
+- IAM role `ultra-relay-gha` for GitHub OIDC (created by SRE), trusting
   `repo:zerodevapp/ultra-relay:*`, with ECR push and `ecr:DescribeImages`.
 - Target cluster: `zerodev-prod-ue2-v1` (us-east-2, AWS account
   `518033442333`), defined by SRE in `OffchainLabs/zerodev-helm-charts`.
@@ -169,6 +169,6 @@ no public hostname.
   directions (caller → NLB, pod → Redis).
 - The first Secrets Manager secret populated.
 
-Until the IAM role exists, the first push-to-main build fails at the AWS login
-step. That is harmless: re-run it once the role is there. `dry_run` builds
-need no AWS at all.
+If the role's trust policy or the repository policy is wrong, the first
+push-to-main build fails at the AWS login or push step. That is harmless:
+re-run it once SRE has fixed it. `dry_run` builds need no AWS at all.

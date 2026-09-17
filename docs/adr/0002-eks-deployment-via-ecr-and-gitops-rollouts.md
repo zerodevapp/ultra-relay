@@ -80,12 +80,14 @@ by SRE before first rollout.
    uses immutable tags; the build workflow skips the build when the tag
    already exists, so a re-run can never replace the image behind an existing
    release.
-2. **[SRE]** IAM role `ultra-relay-gha` does not exist yet. It must trust
-   GitHub OIDC for `repo:zerodevapp/ultra-relay:*` — this repository is in
-   the `zerodevapp` org, not `OffchainLabs`, so copying another service's
-   trust policy verbatim would fail — and allow ECR push plus
-   `ecr:DescribeImages` for the deploy-time existence check. Until it exists
-   the first push-to-main build fails at the AWS login step; harmless, re-run.
+2. **[SRE]** IAM role `arn:aws:iam::352956043285:role/ultra-relay-gha` and
+   the ECR repository were created by SRE (values confirmed 2026-09-17). The
+   role must trust GitHub OIDC for `repo:zerodevapp/ultra-relay:*` — this
+   repository is in the `zerodevapp` org, not `OffchainLabs`, so copying
+   another service's trust policy verbatim would fail — and allow ECR push
+   plus `ecr:DescribeImages` for the deploy-time existence check. If the
+   trust policy is wrong, the first push-to-main build fails at the AWS login
+   step; harmless, re-run after the fix.
 3. **[SRE]** The `generic-application` chart accepts the value keys we use.
    Partially verified: the `application:` half of the merged values renders
    with the upstream Stakater `application` chart (9.3.1) into a Deployment,
