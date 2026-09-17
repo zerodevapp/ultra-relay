@@ -39,11 +39,14 @@ ever leaving main.
   release is undone by a deploy PR back to the previous one.
 - **Config.** The same JSON config file used on Render is stored in the
   values file, rendered into a ConfigMap, mounted as a file and loaded via
-  `ALTO_CONFIG`. The five secret keys (`executor-private-keys`,
-  `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint`,
-  `redis-events-queue-name`) are absent from the file. External Secrets
-  Operator syncs them from AWS Secrets Manager `ultra-relay/<instance>` into
-  a Kubernetes Secret whose keys are the upper-cased property names
+  `ALTO_CONFIG`. The secret keys (`executor-private-keys`,
+  `utility-private-key`, `rpc-url`; `redis-events-queue-endpoint` and
+  `redis-events-queue-name` are commented out until the events queue moves
+  off Render, and their env mappings are optional meanwhile) are absent from
+  the file. External Secrets Operator syncs them from AWS Secrets Manager
+  `k8s__ultra-relay_<variant>` (SRE's `k8s__<service>_<variant>` naming; the
+  variant is the instance name without its `ultra-relay-` prefix) into a
+  Kubernetes Secret whose keys are the upper-cased property names
   (`RPC_URL`, ...); the shared values map each key to the `ALTO_*` env var
   the CLI reads, with the Secret name templated from `applicationName`. yargs
   precedence is
@@ -99,8 +102,10 @@ by SRE before first rollout.
    full `helm template` before the first sync; the values files are **not
    rendered in CI**.
 4. **[SRE]** The cluster runs the AWS Load Balancer Controller (internal NLB),
-   External Secrets Operator (Secrets Manager sync, with an IRSA role allowed
-   to read `ultra-relay/*`), Prometheus Operator (ServiceMonitor CRD — the
+   External Secrets Operator (Secrets Manager sync, with one IRSA role per
+   instance, `external-secrets-<instance>-ue2`, allowed to read that
+   instance's `k8s__ultra-relay_<variant>` secret), Prometheus Operator
+   (ServiceMonitor CRD — the
    chart skips the ServiceMonitor when the CRD is absent, verified in the
    upstream template, so a missing operator costs metrics, not the sync), the
    Reloader

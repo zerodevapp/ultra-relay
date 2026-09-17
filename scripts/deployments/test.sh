@@ -13,15 +13,14 @@ expect_fail() { # expect_fail <message> <cmd...>
   if "$@" >/dev/null 2>&1; then fail "$msg"; fi
 }
 
-# data_block <remoteRefKey>: the five required secret mappings, YAML indented
-# for the externalSecrets.<name>.data list.
+# data_block <remoteRefKey>: the required secret mappings (must match
+# REQUIRED_MAPPINGS in check.py), YAML indented for the
+# externalSecrets.<name>.data list.
 data_block() {
   local key="$1" pair
   for pair in EXECUTOR_PRIVATE_KEYS:executor-private-keys \
               UTILITY_PRIVATE_KEY:utility-private-key \
-              RPC_URL:rpc-url \
-              REDIS_EVENTS_QUEUE_ENDPOINT:redis-events-queue-endpoint \
-              REDIS_EVENTS_QUEUE_NAME:redis-events-queue-name; do
+              RPC_URL:rpc-url; do
     printf '        - secretKey: %s\n          remoteRef:\n            key: %s\n            property: %s\n' \
       "${pair%%:*}" "$key" "${pair#*:}"
   done
@@ -63,33 +62,37 @@ FIXTURE
 
 OSTIUM=ultra-relay-arbitrum-ostium
 BASE=ultra-relay-base
+# Secrets Manager keys follow SRE's k8s__<service>_<variant> convention, where
+# the variant is the instance name without its ultra-relay- prefix.
+OSTIUM_KEY=k8s__ultra-relay_arbitrum-ostium
+BASE_KEY=k8s__ultra-relay_base
 
 # 1. A valid layout passes.
-fixture "$OSTIUM" "$OSTIUM" "ultra-relay/$OSTIUM"
+fixture "$OSTIUM" "$OSTIUM" "$OSTIUM_KEY"
 python3 "$HERE/check.py" "$TMP" >/dev/null || fail "valid fixtures should pass"
 
 # 2. applicationName must equal the filename stem.
-fixture "$BASE" ultra-relay-wrong "ultra-relay/$BASE"
+fixture "$BASE" ultra-relay-wrong "$BASE_KEY"
 expect_fail "applicationName mismatch should fail" python3 "$HERE/check.py" "$TMP"
 
 # 3. A secret key inside config.json fails.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE" ', "rpc-url": "https://x"'
+fixture "$BASE" "$BASE" "$BASE_KEY" ', "rpc-url": "https://x"'
 expect_fail "secret key in config.json should fail" python3 "$HERE/check.py" "$TMP"
 
-# 4. remoteRef.key must be ultra-relay/<instance>.
-fixture "$BASE" "$BASE" "ultra-relay/$OSTIUM"
+# 4. remoteRef.key must be k8s__ultra-relay_<variant> for this instance.
+fixture "$BASE" "$BASE" "$OSTIUM_KEY"
 expect_fail "wrong remoteRef.key should fail" python3 "$HERE/check.py" "$TMP"
 
-# 5. All five secret mappings are required (here only three).
-fixture "$BASE" "$BASE" "ultra-relay/$BASE" "" "$(data_block "ultra-relay/$BASE" | head -n 12)"
+# 5. Every REQUIRED_MAPPINGS entry is required (here only two of three).
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY" | head -n 8)"
 expect_fail "missing secret mapping should fail" python3 "$HERE/check.py" "$TMP"
 
 # 6. A wrong property name fails.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE" "" "$(data_block "ultra-relay/$BASE" | sed 's/property: rpc-url/property: rpc_url/')"
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY" | sed 's/property: rpc-url/property: rpc_url/')"
 expect_fail "wrong secret property should fail" python3 "$HERE/check.py" "$TMP"
 
 # 7. An empty image tag fails in check.py.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 sed -E 's/^([[:blank:]]+tag:).*$/\1/' "$TMP/$BASE.values.yaml" > "$TMP/t.tmp" && mv "$TMP/t.tmp" "$TMP/$BASE.values.yaml"
 expect_fail "empty tag should fail" python3 "$HERE/check.py" "$TMP"
 
@@ -115,12 +118,12 @@ external-secret:
   externalSecrets:
     $BASE-secrets:
       data:
-$(data_block "ultra-relay/$BASE")
+$(data_block "$BASE_KEY")
 FIXTURE
 expect_fail "tag outside deployment.image should fail" python3 "$HERE/check.py" "$TMP"
 
 # 9. A tag in common.values.yaml fails.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 printf '      tag: main-0000000\n' >> "$TMP/common.values.yaml"
 expect_fail "tag in common should fail" python3 "$HERE/check.py" "$TMP"
 sed '$d' "$TMP/common.values.yaml" > "$TMP/c.tmp" && mv "$TMP/c.tmp" "$TMP/common.values.yaml"
@@ -152,7 +155,7 @@ grep -qE 'tag: "?main-6666666"?' "$TMP/$BASE.values.yaml" || fail "empty tag mus
 [[ "$row" == *'`?`'*'`main-6666666`'* ]] || fail "empty old tag must print as ?, got: $row"
 
 # 15. A duplicated secretKey fails even when one copy is correct.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE" "" "$(data_block "ultra-relay/$BASE"; data_block "ultra-relay/$BASE" | head -n 4)"
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY"; data_block "$BASE_KEY" | head -n 4)"
 expect_fail "duplicate secret mapping should fail" python3 "$HERE/check.py" "$TMP"
 
 # 16. An inline image tag plus a second key named tag (a label) fails: the one
@@ -177,18 +180,18 @@ external-secret:
   externalSecrets:
     $BASE-secrets:
       data:
-$(data_block "ultra-relay/$BASE")
+$(data_block "$BASE_KEY")
 FIXTURE
 expect_fail "second key named tag should fail" python3 "$HERE/check.py" "$TMP"
 rm "$TMP/$BASE.values.yaml"
 
 # 17. A copied file that keeps another instance's ConfigMap name fails.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 sed "s/name: $BASE-config/name: $OSTIUM-config/" "$TMP/$BASE.values.yaml" > "$TMP/t.tmp" && mv "$TMP/t.tmp" "$TMP/$BASE.values.yaml"
 expect_fail "stale ConfigMap volume name should fail" python3 "$HERE/check.py" "$TMP"
 
 # 18. A leftover externalSecrets block from another instance fails.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 printf '    %s-secrets:\n      data: []\n' "$OSTIUM" >> "$TMP/$BASE.values.yaml"
 expect_fail "extra externalSecrets entry should fail" python3 "$HERE/check.py" "$TMP"
 rm "$TMP/$BASE.values.yaml"
@@ -197,7 +200,7 @@ rm "$TMP/$BASE.values.yaml"
 expect_fail "invalid instance name should fail" env DEPLOYMENTS_DIR="$TMP" "$HERE/bump-tag.sh" main-7777777 "../escape"
 
 # 20. A numeric-looking tag is written as a YAML string and still validates.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 DEPLOYMENTS_DIR="$TMP" "$HERE/bump-tag.sh" 123 "$BASE" >/dev/null
 grep -q 'tag: "123"' "$TMP/$BASE.values.yaml" || fail "numeric tag must be quoted"
 python3 "$HERE/check.py" "$TMP" >/dev/null || fail "quoted numeric tag must validate"
@@ -206,7 +209,7 @@ python3 "$HERE/check.py" "$TMP" >/dev/null || fail "quoted numeric tag must vali
 expect_fail "invalid image tag should fail" env DEPLOYMENTS_DIR="$TMP" "$HERE/bump-tag.sh" 'bad#tag' "$BASE"
 
 # 22. A duplicate top-level mapping key is a finding, not a traceback.
-fixture "$BASE" "$BASE" "ultra-relay/$BASE"
+fixture "$BASE" "$BASE" "$BASE_KEY"
 printf 'application:\n  deployment:\n    image: {tag: main-0000000}\n' >> "$TMP/$BASE.values.yaml"
 out=$(python3 "$HERE/check.py" "$TMP" 2>&1 || true)
 [[ "$out" == *"duplicate mapping key"* ]] || fail "duplicate key must be reported, got: $out"
