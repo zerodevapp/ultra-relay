@@ -571,7 +571,7 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for included bundles
-                    await this.updateTransactionCostMetrics(
+                    this.updateTransactionCostMetrics(
                         bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
@@ -589,7 +589,7 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for reverted bundles
-                    await this.updateTransactionCostMetrics(
+                    this.updateTransactionCostMetrics(
                         bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
