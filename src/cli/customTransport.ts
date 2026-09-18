@@ -454,12 +454,15 @@ export function customTransport(
                     const body = { method, params }
                     const start = performance.now()
                     let responseHeaders: Record<string, string> | undefined
+                    // viem's timeout covers only up to headers; the body read is unbounded.
+                    let headersAt: number | undefined
                     const fn = async (body: RpcRequest) => {
                         return [
                             await rpc.http(url, {
                                 body,
                                 fetchOptions,
                                 onResponse: (response) => {
+                                    headersAt = performance.now()
                                     responseHeaders = Object.fromEntries(
                                         response.headers.entries()
                                     )
@@ -471,6 +474,10 @@ export function customTransport(
 
                     const [{ error, result }] = await fn(body)
                     const ms = Number((performance.now() - start).toFixed(2))
+                    const headersAtMs =
+                        ms > 500 && headersAt !== undefined
+                            ? Number((headersAt - start).toFixed(2))
+                            : undefined
                     // Escape hatch: --public-client-log-level debug (or the
                     // wallet equivalent) puts the untouched payloads back in
                     // the logs. Resolved once per call, not once per field.
@@ -503,6 +510,7 @@ export function customTransport(
                                     : reduceLoggedBody(body),
                                 method,
                                 ms,
+                                headersAtMs,
                                 success: false,
                                 chainId,
                                 url: sanitizedUrl,
@@ -536,6 +544,7 @@ export function customTransport(
                                 : reduceLoggedResult(method, result),
                             method,
                             ms,
+                            headersAtMs,
                             success: true,
                             chainId,
                             url: sanitizedUrl,
