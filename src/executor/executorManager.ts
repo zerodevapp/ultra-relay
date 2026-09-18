@@ -14,18 +14,13 @@ import {
     scaleBigIntByPercent,
     timed
 } from "@alto/utils"
-import {
-    type Account,
-    type Address,
-    type Block,
-    type Hex,
-    type WatchBlocksReturnType,
-    formatEther
-} from "viem"
+import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
+import type { BundleTransactionReceipt } from "./getBundleStatus"
 import type { SenderManager } from "./senderManager"
+import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
@@ -481,32 +476,23 @@ export class ExecutorManager {
         }
     }
 
-    private async updateTransactionCostMetrics(
-        transactionHash: HexData32,
+    private updateTransactionCostMetrics(
+        receipt: BundleTransactionReceipt,
         userOperationHashes: HexData32[],
         transactionStatus: string
     ) {
+        const { transactionHash } = receipt
+
         try {
-            const receipt =
-                await this.config.publicClient.getTransactionReceipt({
-                    hash: transactionHash
-                })
+            const actualCostInEth = computeTransactionCostEth(receipt)
 
-            const l2GasCostTx = receipt.gasUsed * receipt.effectiveGasPrice
-
-            // Handle L1 fee if present (for L2 chains like Optimism)
-            let l1Fee = BigInt(0)
-            if (
-                "l1Fee" in receipt &&
-                receipt.l1Fee !== undefined &&
-                receipt.l1Fee !== null
-            ) {
-                l1Fee = BigInt(receipt.l1Fee.toString())
+            if (actualCostInEth === undefined) {
+                this.logger.warn(
+                    { transactionHash },
+                    "Skipping transaction cost metrics: receipt has neither effectiveGasPrice nor gasPrice"
+                )
+                return
             }
-
-            const actualCost = l2GasCostTx + l1Fee
-            // Convert wei to ETH using viem's formatEther
-            const actualCostInEth = Number(formatEther(actualCost))
 
             // Record cost for each userOp in the bundle since they share the transaction
             for (const userOpHash of userOperationHashes) {
@@ -585,8 +571,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for included bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
@@ -603,8 +589,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for reverted bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
