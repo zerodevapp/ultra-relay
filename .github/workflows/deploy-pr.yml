@@ -1,0 +1,219 @@
+name: Create deploy PR
+
+# Opens the PR that rolls a built image out to one or more relay instances by
+# rewriting the image tag in deployments/<instance>.values.yaml. Merging that
+# PR IS the deploy: ArgoCD tracks main. This workflow deploys nothing itself.
+#
+# Source of the image, in priority order:
+#   image_tag  – explicit ECR tag (e.g. feat-x-3f9a1c2 from a branch build)
+#   release    – GitHub release v<N> from build-push-ecr.yml → main-<sha>
+#   (neither)  – the highest-numbered v<N> release
+# The tag is verified to exist in ECR before any file is touched. If a deploy
+# PR for the same source and instances is already open, the run stops and
+# points at it (re-running never overwrites manual edits on that PR).
+on:
+  workflow_dispatch:
+    inputs:
+      instances:
+        description: 'Relay instances to roll out: "all" or comma-separated names (e.g. ultra-relay-arbitrum-ostium)'
+        type: string
+        default: all
+      release:
+        description: 'Release to roll out (e.g. v42). Empty = highest-numbered release. Ignored when image_tag is set.'
+        type: string
+        default: ''
+      image_tag:
+        description: 'Explicit image tag (e.g. feat-x-3f9a1c2). Overrides release.'
+        type: string
+        default: ''
+
+env:
+  # The ECR region (management account, us-west-2), not the cluster's.
+  AWS_REGION: us-west-2
+  AWS_ROLE_ARN: arn:aws:iam::352956043285:role/ultra-relay-gha
+  ECR_REPOSITORY: offchain-labs/ultra-relay
+
+permissions:
+  contents: write # push the deploy branch
+  pull-requests: write # open the PR
+  id-token: write # OIDC for the ECR existence check
+
+# One deploy-PR run at a time, so two operators cannot race on the same branch;
+# queue: max keeps every pending request instead of dropping all but one.
+concurrency:
+  group: deploy-pr
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  create-deploy-pr:
+    name: Create deploy PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      # Values are always edited from main's state. Fail loudly instead of
+      # leaving a silently skipped green job when dispatched from another branch.
+      - name: Refuse to run off main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Create deploy PR must be dispatched from main (got $GITHUB_REF). Build the branch image with build-push-ecr.yml, then dispatch this workflow from main with image_tag."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag and branch
+        id: resolve
+        env:
+          RELEASE_INPUT: ${{ inputs.release }}
+          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+          INSTANCES: ${{ inputs.instances }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IMAGE_TAG_INPUT" ]; then
+            # Docker tag grammar: [A-Za-z0-9_] then up to 127 of [A-Za-z0-9._-].
+            [[ "$IMAGE_TAG_INPUT" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || {
+              echo "::error::image_tag '$IMAGE_TAG_INPUT' is not a valid image tag"; exit 1; }
+            IMAGE_TAG="$IMAGE_TAG_INPUT"
+            SOURCE="$IMAGE_TAG_INPUT"
+            echo "Using explicit image tag $IMAGE_TAG"
+          else
+            if [ -n "$RELEASE_INPUT" ]; then
+              [[ "$RELEASE_INPUT" =~ ^v[0-9]+$ ]] || {
+                echo "::error::release must look like v42, got '$RELEASE_INPUT'"; exit 1; }
+              TAG="$RELEASE_INPUT"
+            else
+              # Highest-numbered published v<N>: not GitHub's "latest" flag (a
+              # retried older build can be marked latest after a newer one) and
+              # never a draft or prerelease. Filtering happens inside jq so an
+              # empty result stays reachable under pipefail (grep would exit 1).
+              N=$(gh api "repos/$REPO/releases?per_page=100" --paginate \
+                    --jq '[.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+$")) | ltrimstr("v") | tonumber] | max // empty' \
+                    | sort -n | tail -1)
+              [ -n "$N" ] || { echo "::error::no published v<N> release found"; exit 1; }
+              TAG="v$N"
+            fi
+            SHA=$(gh api "repos/$REPO/releases/tags/$TAG" -q .target_commitish)
+            [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::$TAG's target_commitish is '$SHA', not a commit sha"; exit 1; }
+            IMAGE_TAG="main-${SHA:0:7}"
+            SOURCE="$TAG"
+            echo "Resolved $TAG -> $SHA (image $IMAGE_TAG)"
+          fi
+          # Git-safe branch name, independent of the raw tag/instances text
+          # (image tags may contain "..", instances contain commas).
+          SLUG=$(printf '%s-%s' "$SOURCE" "$INSTANCES" | tr -c 'A-Za-z0-9-' '_')
+          {
+            echo "image_tag=$IMAGE_TAG"
+            echo "source=$SOURCE"
+            echo "branch=deploy/$SLUG"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stop if a deploy PR is already open for this branch
+        env:
+          BRANCH: ${{ steps.resolve.outputs.branch }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "::error::A deploy PR is already open for $BRANCH: $EXISTING. Merge or close it (or push to it by hand) instead of re-running."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: ultra-relay-deploy-pr-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Same fail-closed shape as build-push-ecr.yml: only ImageNotFoundException
+      # means "not there"; access denied, a missing repository or throttling
+      # surface with their own diagnostic instead of a misleading "not in ECR".
+      - name: Verify the image exists in ECR
+        id: ecr
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if OUT=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="$IMAGE_TAG" \
+              --region "$AWS_REGION" \
+              --query 'imageDetails[0].imageDigest' --output text 2>&1); then
+            echo "digest=$OUT" >> "$GITHUB_OUTPUT"
+            echo "ok: $ECR_REPOSITORY:$IMAGE_TAG exists ($OUT)"
+          elif grep -q ImageNotFoundException <<< "$OUT"; then
+            echo "::error::$ECR_REPOSITORY:$IMAGE_TAG is not in ECR -- nothing to deploy"
+            exit 1
+          else
+            echo "::error::ECR lookup for $ECR_REPOSITORY:$IMAGE_TAG failed: $OUT"
+            exit 1
+          fi
+
+      - name: Bump image tags
+        id: bump
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          INSTANCES: ${{ inputs.instances }}
+        run: |
+          set -euo pipefail
+          TABLE=$(scripts/deployments/bump-tag.sh "$IMAGE_TAG" "$INSTANCES")
+          if git diff --quiet -- deployments/; then
+            echo "::error::every selected instance is already at $IMAGE_TAG -- nothing to deploy"; exit 1
+          fi
+          git diff --stat -- deployments/
+          {
+            echo "table<<TABLE_EOF"
+            echo "$TABLE"
+            echo "TABLE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Never open a PR on values that CI would reject after merge.
+      - name: Validate the bumped values files
+        run: |
+          python3 -c "import yaml" || { echo "::error::PyYAML is not available on this runner"; exit 1; }
+          python3 scripts/deployments/check.py deployments
+
+      - name: Push branch and open PR
+        env:
+          BRANCH: ${{ steps.resolve.outputs.branch }}
+          SOURCE: ${{ steps.resolve.outputs.source }}
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          INSTANCES: ${{ inputs.instances }}
+          DIGEST: ${{ steps.ecr.outputs.digest }}
+          TABLE: ${{ steps.bump.outputs.table }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add deployments/
+          git commit -m "deploy: roll out $IMAGE_TAG to $INSTANCES"
+          # --force is safe here: the previous step proved no open PR uses this
+          # branch, so anything on it is a stale leftover from a merged/closed PR.
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          # printf, not echo/heredoc, so nothing in the inputs is expanded.
+          {
+            printf '%s\n\n' "Merging this PR rolls out **$IMAGE_TAG** to **$INSTANCES**. ArgoCD applies it once this lands on main."
+            printf '%s\n' \
+              "- Source: $SOURCE" \
+              "- Image: \`$ECR_REPOSITORY:$IMAGE_TAG\` (verified in ECR)" \
+              "- Digest: \`$DIGEST\`" \
+              "- Requested by @$GITHUB_ACTOR via [workflow run]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID)"
+            printf '\n%s\n' "## Tag changes"
+            printf '%s\n' "| File | Current | Target |" "|---|---|---|"
+            printf '%s\n' "$TABLE"
+            printf '\n%s\n' "No CI runs on this PR (opened with the built-in token). The Check deployment values workflow runs on main right after merge; close and reopen the PR if you want a pre-merge run."
+          } > "$RUNNER_TEMP/body.md"
+
+          URL=$(gh pr create --base main --head "$BRANCH" \
+                --title "Deploy $SOURCE to $INSTANCES" \
+                --body-file "$RUNNER_TEMP/body.md")
+          echo "Created $URL"
+          echo "### Deploy PR" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"

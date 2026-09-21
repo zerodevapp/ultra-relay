@@ -9,7 +9,10 @@ import Redis from "ioredis"
 import type { Logger } from "pino"
 import type { AltoConfig } from "../createConfig"
 
-const getQueueName = (chainId: number) => `alto:mempool:restoration:${chainId}`
+// Default prefix keeps the legacy `alto:` queue name; an explicit prefix
+// namespaces the queue like every other key.
+export const getQueueName = (config: AltoConfig) =>
+    `${config.redisKeyPrefix || "alto"}:mempool:restoration:${config.publicClient.chain.id}`
 
 async function dropAllOperationsOnShutdown({
     config,
@@ -81,7 +84,7 @@ async function queueOperationsOnShutdownToRedis({
 
     try {
         const redis = new Redis(config.redisEndpoint)
-        const queueName = getQueueName(config.publicClient.chain.id)
+        const queueName = getQueueName(config)
         const restorationQueue = new Queue(queueName, {
             createClient: () => {
                 return redis
@@ -220,7 +223,7 @@ export async function restoreShutdownState({
     let restorationTimeout: NodeJS.Timeout | null = null
 
     try {
-        const queueName = getQueueName(config.publicClient.chain.id)
+        const queueName = getQueueName(config)
 
         let client: Redis
         let subscriber: Redis
