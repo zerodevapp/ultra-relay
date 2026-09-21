@@ -4,6 +4,15 @@
 application:
   applicationName: ultra-relay-arbitrum-ostium
 
+  service:
+    enabled: true
+    type: ClusterIP
+    ports:
+      - port: 3000
+        name: http
+        protocol: TCP
+        targetPort: 3000
+
   deployment:
     image:
       # Rewritten by deploy-pr.yml; never hand-edit. Placeholder until the
