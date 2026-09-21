@@ -728,6 +728,7 @@ describe("customTransport log lines", () => {
         expect(Object.keys(line.obj).sort()).toEqual([
             "body",
             "chainId",
+            "headersAtMs",
             "method",
             "ms",
             "responseHeaders",
@@ -790,6 +791,7 @@ describe("customTransport log lines", () => {
             "body",
             "chainId",
             "err",
+            "headersAtMs",
             "method",
             "ms",
             "responseHeaders",
