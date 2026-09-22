@@ -67,6 +67,8 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
         ]
     ] as const
 
+    // Keep deployments sequential: Anvil automines on arrival and parallel
+    // submissions can leave later nonces queued without another block trigger.
     for (const [data, address] of deployments) {
         const hash = await walletClient.sendTransaction({
             to: DETERMINISTIC_DEPLOYER,
