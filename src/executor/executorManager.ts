@@ -142,12 +142,17 @@ export class ExecutorManager {
             )
 
             // Bounded per entry point so a deep queue cannot hold the whole
-            // tick: the pass returns after this many bundles and the rest
-            // waits for the next tick. Without it, sustained arrivals keep
-            // getBundles() from ever returning and nothing gets submitted.
-            const bundles = await this.mempool.getBundles(
-                this.config.maxBundleCount
+            // tick. Every bundle beyond the wallet count only queues for a
+            // wallet with its ops parked in processing, so the wallet count
+            // is the ceiling and max-bundle-count can only lower it. Without
+            // a bound, sustained arrivals keep getBundles() from ever
+            // returning and nothing gets submitted.
+            const walletCount = this.senderManager.getAllWallets().length
+            const bundleBudget = Math.max(
+                1,
+                Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
             )
+            const bundles = await this.mempool.getBundles(bundleBudget)
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps

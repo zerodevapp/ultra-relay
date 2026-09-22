@@ -1948,9 +1948,10 @@ describe("Mempool.getBundles", () => {
 
     // getBundles() itself has no deadline: while arrivals keep the queue
     // non-empty, the carry path keeps consuming them and no completed bundle
-    // reaches the caller. The auto-bundling tick bounds this by passing the
-    // configured max-bundle-count (see executorManager.test.ts). These two
-    // cases pin both halves of that contract. PR #66 review, P1.
+    // reaches the caller. The auto-bundling tick bounds this with one bundle
+    // per executor wallet, lowered by max-bundle-count if set (see
+    // executorManager.test.ts). These two cases pin both halves of that
+    // contract. PR #66 review, P1.
     describe("bundle budget under continuous arrivals", () => {
         // After every pop, add one fresh op with a higher fee so it sorts to
         // the tail and the queue never empties. Finite so a broken budget

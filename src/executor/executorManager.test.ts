@@ -172,7 +172,7 @@ const autoScalingBundling = (
     }
 ).autoScalingBundling
 
-const makeTick = (config: Record<string, unknown>) => {
+const makeTick = (config: Record<string, unknown>, wallets = 10) => {
     const getBundles = vi.fn(async (): Promise<unknown[]> => [])
     const sendBundleToExecutor = vi.fn()
 
@@ -183,6 +183,7 @@ const makeTick = (config: Record<string, unknown>) => {
             opsCount: [] as number[],
             config: { minBundleInterval: 0, maxBundleInterval: 0, ...config },
             mempool: { getBundles },
+            senderManager: { getAllWallets: () => new Array(wallets).fill({}) },
             sendBundleToExecutor,
             bundlingMode: "manual"
         }
@@ -190,8 +191,8 @@ const makeTick = (config: Record<string, unknown>) => {
 }
 
 describe("autoScalingBundling", () => {
-    it("passes the configured max-bundle-count through to getBundles", async () => {
-        const { manager, getBundles } = makeTick({ maxBundleCount: 10 })
+    it("budgets one bundle per executor wallet when max-bundle-count is unset", async () => {
+        const { manager, getBundles } = makeTick({}, 10)
 
         await autoScalingBundling.call(manager)
 
@@ -199,12 +200,30 @@ describe("autoScalingBundling", () => {
         expect(getBundles).toHaveBeenCalledWith(10)
     })
 
-    it("leaves the pass unbounded when no max-bundle-count is configured", async () => {
-        const { manager, getBundles } = makeTick({})
+    it("lets max-bundle-count lower the budget below the wallet count", async () => {
+        const { manager, getBundles } = makeTick({ maxBundleCount: 4 }, 10)
 
         await autoScalingBundling.call(manager)
 
-        expect(getBundles).toHaveBeenCalledWith(undefined)
+        expect(getBundles).toHaveBeenCalledWith(4)
+    })
+
+    it("clamps max-bundle-count to the wallet count, since extra bundles only queue", async () => {
+        const { manager, getBundles } = makeTick({ maxBundleCount: 50 }, 10)
+
+        await autoScalingBundling.call(manager)
+
+        expect(getBundles).toHaveBeenCalledWith(10)
+    })
+
+    it("still bounds the pass to one bundle when no wallets are configured", async () => {
+        const { manager, getBundles } = makeTick({}, 0)
+
+        await autoScalingBundling.call(manager)
+
+        // getBundles(0) would mean unbounded, which is the failure this
+        // budget exists to prevent.
+        expect(getBundles).toHaveBeenCalledWith(1)
     })
 
     it("hands every returned bundle to the executor", async () => {
