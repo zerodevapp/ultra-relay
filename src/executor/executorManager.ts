@@ -14,18 +14,13 @@ import {
     scaleBigIntByPercent,
     timed
 } from "@alto/utils"
-import {
-    type Account,
-    type Address,
-    type Block,
-    type Hex,
-    type WatchBlocksReturnType,
-    formatEther
-} from "viem"
+import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
+import type { BundleTransactionReceipt } from "./getBundleStatus"
 import type { SenderManager } from "./senderManager"
+import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
@@ -56,6 +51,11 @@ export class ExecutorManager {
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
+
+    // When handleBlock last reconciled pending bundles, from either trigger
+    // (a new block, or the stale-block watchdog below). Drives the watchdog.
+    private lastReconcileAt = Date.now()
+    private staleBlockTimer: NodeJS.Timeout | undefined
 
     // Executor wallets rotated away from a stuck bundle whose cancel did not
     // confirm. Held out of the sender pool (markWalletProcessed deferred) until
@@ -219,10 +219,56 @@ export class ExecutorManager {
                     includeTransactions: false,
                     emitMissed: false
                 })
+                this.startStaleBlockWatchdog()
             }
 
             this.logger.debug("started watching blocks")
         })
+    }
+
+    // handleBlock is the only path that frees an executor wallet, and
+    // watchBlocks only fires it on a new block. On a chain that produces blocks
+    // only when it receives a transaction, that deadlocks: no submissions -> no
+    // blocks -> no wallets freed. Re-arms the time-based stuck check the block
+    // gate makes unreachable; no RPC on a healthy chain.
+    private startStaleBlockWatchdog(): void {
+        if (this.staleBlockTimer) {
+            return
+        }
+
+        this.lastReconcileAt = Date.now()
+        this.staleBlockTimer = setInterval(() => {
+            const msSinceReconcile = Date.now() - this.lastReconcileAt
+
+            if (msSinceReconcile < this.config.resubmitStuckTimeout) {
+                return
+            }
+
+            const pendingBundles = this.bundleManager.getPendingBundles().length
+            if (pendingBundles === 0) {
+                // Nothing to reconcile: drop the watcher and this timer.
+                // Submission re-arms both, and a missed submission block is
+                // caught by the fresh watchdog.
+                this.stopWatchingBlocks()
+                return
+            }
+
+            this.logger.warn(
+                {
+                    event: "staleBlockWatchdogFired",
+                    msSinceReconcile,
+                    pendingBundles
+                },
+                "no new block within resubmitStuckTimeout, reconciling pending bundles on a timer"
+            )
+
+            this.handleBlock().catch((err) =>
+                this.logger.error(
+                    { err },
+                    "stale block watchdog failed to reconcile pending bundles"
+                )
+            )
+        }, this.config.blockTime)
     }
 
     async getBaseFee(): Promise<bigint> {
@@ -479,34 +525,29 @@ export class ExecutorManager {
             this.unWatch()
             this.unWatch = undefined
         }
+        if (this.staleBlockTimer) {
+            clearInterval(this.staleBlockTimer)
+            this.staleBlockTimer = undefined
+        }
     }
 
-    private async updateTransactionCostMetrics(
-        transactionHash: HexData32,
+    private updateTransactionCostMetrics(
+        receipt: BundleTransactionReceipt,
         userOperationHashes: HexData32[],
         transactionStatus: string
     ) {
+        const { transactionHash } = receipt
+
         try {
-            const receipt =
-                await this.config.publicClient.getTransactionReceipt({
-                    hash: transactionHash
-                })
+            const actualCostInEth = computeTransactionCostEth(receipt)
 
-            const l2GasCostTx = receipt.gasUsed * receipt.effectiveGasPrice
-
-            // Handle L1 fee if present (for L2 chains like Optimism)
-            let l1Fee = BigInt(0)
-            if (
-                "l1Fee" in receipt &&
-                receipt.l1Fee !== undefined &&
-                receipt.l1Fee !== null
-            ) {
-                l1Fee = BigInt(receipt.l1Fee.toString())
+            if (actualCostInEth === undefined) {
+                this.logger.warn(
+                    { transactionHash },
+                    "Skipping transaction cost metrics: receipt has neither effectiveGasPrice nor gasPrice"
+                )
+                return
             }
-
-            const actualCost = l2GasCostTx + l1Fee
-            // Convert wei to ETH using viem's formatEther
-            const actualCostInEth = Number(formatEther(actualCost))
 
             // Record cost for each userOp in the bundle since they share the transaction
             for (const userOpHash of userOperationHashes) {
@@ -537,29 +578,36 @@ export class ExecutorManager {
             return
         }
 
+        // try/finally, else a throw in handleBlockInner leaves this set and
+        // every later tick bails at the guard above.
+        this.currentlyHandlingBlock = true
+
         // startWatchingBlocks() registers its timers inside whichever flow
         // first started the watcher, so those timers inherit that flow's log
         // context on every future tick. Open a fresh context here so block
         // handling is never attributed to one arbitrary bundle.
-        await runWithLogContext({ flow: "block" }, () =>
-            timed(
-                this.logger,
-                "handleBlock",
-                { blockNumber: block ? Number(block.number) : undefined },
-                () => this.handleBlockInner(block)
+        try {
+            await runWithLogContext({ flow: "block" }, () =>
+                timed(
+                    this.logger,
+                    "handleBlock",
+                    { blockNumber: block ? Number(block.number) : undefined },
+                    () => this.handleBlockInner(block)
+                )
             )
-        )
+        } finally {
+            this.currentlyHandlingBlock = false
+        }
     }
 
     private async handleBlockInner(block?: Block) {
-        this.currentlyHandlingBlock = true
         const blockReceivedTimestamp = Date.now()
+        this.lastReconcileAt = blockReceivedTimestamp
 
         const pendingBundles = this.bundleManager.getPendingBundles()
 
         if (pendingBundles.length === 0) {
             this.stopWatchingBlocks()
-            this.currentlyHandlingBlock = false
             return
         }
 
@@ -585,8 +633,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for included bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
@@ -603,8 +651,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for reverted bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
@@ -623,8 +671,6 @@ export class ExecutorManager {
                 }
             })
         )
-
-        this.currentlyHandlingBlock = false
     }
 
     potentiallyResubmitBundle({
@@ -649,7 +695,7 @@ export class ExecutorManager {
             maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
 
         const isStuck =
-            Date.now() - lastReplaced > this.config.resubmitStuckTimeout
+            Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
 
         if (!(isGasPriceTooLow || isStuck)) {
             return
