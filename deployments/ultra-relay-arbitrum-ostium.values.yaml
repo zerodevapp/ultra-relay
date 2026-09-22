@@ -72,14 +72,14 @@ external-secret:
           remoteRef:
             key: k8s__ultra-relay_arbitrum-ostium
             property: rpc-url
-        # - secretKey: REDIS_EVENTS_QUEUE_ENDPOINT
-        #   remoteRef:
-        #     key: k8s__ultra-relay_arbitrum-ostium
-        #     property: redis-events-queue-endpoint
-        # - secretKey: REDIS_EVENTS_QUEUE_NAME
-        #   remoteRef:
-        #     key: k8s__ultra-relay_arbitrum-ostium
-        #     property: redis-events-queue-name
+        - secretKey: REDIS_EVENTS_QUEUE_ENDPOINT
+          remoteRef:
+            key: k8s__ultra-relay_arbitrum-ostium
+            property: redis-events-queue-endpoint
+        - secretKey: REDIS_EVENTS_QUEUE_NAME
+          remoteRef:
+            key: k8s__ultra-relay_arbitrum-ostium
+            property: redis-events-queue-name
   serviceAccount:
     annotations:
       eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium-ue2

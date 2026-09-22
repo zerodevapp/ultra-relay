@@ -80,8 +80,8 @@ because the PR is open.
    new application, before any deploy PR.
 2. Ask SRE for Secrets Manager secret `k8s__ultra-relay_<variant>` in the
    cluster account, a JSON object with keys `executor-private-keys`,
-   `utility-private-key` and `rpc-url` (the Redis events-queue keys stay
-   commented out until that queue moves off Render), plus an IRSA role
+   `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint` and
+   `redis-events-queue-name`, plus an IRSA role
    `external-secrets-<new-name>-ue2` allowed to read it.
 3. Open a PR; `Check deployment values` must pass. Merge.
 4. Ask SRE to add a component entry for the new instance in

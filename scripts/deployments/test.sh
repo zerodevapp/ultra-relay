@@ -20,7 +20,9 @@ data_block() {
   local key="$1" pair
   for pair in EXECUTOR_PRIVATE_KEYS:executor-private-keys \
               UTILITY_PRIVATE_KEY:utility-private-key \
-              RPC_URL:rpc-url; do
+              RPC_URL:rpc-url \
+              REDIS_EVENTS_QUEUE_ENDPOINT:redis-events-queue-endpoint \
+              REDIS_EVENTS_QUEUE_NAME:redis-events-queue-name; do
     printf '        - secretKey: %s\n          remoteRef:\n            key: %s\n            property: %s\n' \
       "${pair%%:*}" "$key" "${pair#*:}"
   done
@@ -83,8 +85,8 @@ expect_fail "secret key in config.json should fail" python3 "$HERE/check.py" "$T
 fixture "$BASE" "$BASE" "$OSTIUM_KEY"
 expect_fail "wrong remoteRef.key should fail" python3 "$HERE/check.py" "$TMP"
 
-# 5. Every REQUIRED_MAPPINGS entry is required (here only two of three).
-fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY" | head -n 8)"
+# 5. Every REQUIRED_MAPPINGS entry is required (here only three of five).
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY" | head -n 12)"
 expect_fail "missing secret mapping should fail" python3 "$HERE/check.py" "$TMP"
 
 # 6. A wrong property name fails.

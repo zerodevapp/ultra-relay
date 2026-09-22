@@ -71,21 +71,16 @@ application:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: RPC_URL
-      # The Redis events-queue secrets are not synced yet (their ExternalSecret
-      # entries are commented out per instance), so these are optional: the
-      # pod starts without them and picks them up once the keys exist.
       ALTO_REDIS_EVENTS_QUEUE_ENDPOINT:
         valueFrom:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_ENDPOINT
-            optional: true
       ALTO_REDIS_EVENTS_QUEUE_NAME:
         valueFrom:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_NAME
-            optional: true
 
     # Volume "config" is declared per instance (its ConfigMap name carries the
     # instance name); the mount is the same for all.
