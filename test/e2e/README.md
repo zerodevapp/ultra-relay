@@ -62,18 +62,18 @@ EntryPoint versions:
 
 These are request-surface combinations, not four independent admission paths.
 Every operation in this gate has zero fees and enters the shared boosted path;
-the current implementation bypasses PVG validation for all of them. The gate
-checks that future boosted enforcement is reachable through each endpoint/API
+with enforcement disabled, PVG validation is bypassed for all of them. The gate
+checks that enabled boosted enforcement is reachable through each endpoint/API
 combination. It does not test non-boosted fee/PVG policy or prove L1-fee coverage.
 
 ```sh
 pnpm --filter e2e run test:boosted:strict
 ```
 
-**This command is expected to fail against the current production code.** It does
-not enable enforcement or modify the bundler configuration. Use it to qualify a
-separate enforcement change; update the default characterization when admission
-behavior intentionally changes.
+This command explicitly enables `ALTO_ENFORCE_BOOST_PVG=true` in the isolated
+local bundler process. Normal tests leave enforcement disabled and continue to
+characterize compatibility behavior. CI runs both modes; neither command changes
+any deployed service configuration.
 
 ### Scope
 
