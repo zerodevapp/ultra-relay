@@ -3,6 +3,7 @@ import { Redis } from "ioredis"
 import { getRedisKeys } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import { userOperationStatusSchema } from "../types/schemas"
+import { REDIS_OPTIONS } from "../utils/redis-options"
 
 interface UserOperationStatusStore {
     set(userOpHash: HexData32, status: UserOperationStatus): Promise<void>
@@ -42,7 +43,7 @@ class RedisUserOperationStatusStore implements UserOperationStatusStore {
         ttlSeconds?: number
         redisEndpoint: string
     }) {
-        this.redis = new Redis(redisEndpoint)
+        this.redis = new Redis(redisEndpoint, REDIS_OPTIONS)
         this.keyPrefix = getRedisKeys(config).userOpStatusQueue
         this.ttlSeconds = ttlSeconds
     }

@@ -8,6 +8,7 @@ import Queue from "bull"
 import Redis from "ioredis"
 import type { Logger } from "pino"
 import type { AltoConfig } from "../createConfig"
+import { REDIS_OPTIONS, REDIS_WORKER_OPTIONS } from "../utils/redis-options"
 
 // Default prefix keeps the legacy `alto:` queue name; an explicit prefix
 // namespaces the queue like every other key.
@@ -83,7 +84,7 @@ async function queueOperationsOnShutdownToRedis({
     }
 
     try {
-        const redis = new Redis(config.redisEndpoint)
+        const redis = new Redis(config.redisEndpoint, REDIS_OPTIONS)
         const queueName = getQueueName(config)
         const restorationQueue = new Queue(queueName, {
             createClient: () => {
@@ -235,8 +236,7 @@ export async function restoreShutdownState({
                         if (!client) {
                             client = new Redis(redisEndpoint, {
                                 ...redisOpts,
-                                enableReadyCheck: false,
-                                maxRetriesPerRequest: null
+                                ...REDIS_WORKER_OPTIONS
                             })
                         }
                         return client
@@ -245,8 +245,7 @@ export async function restoreShutdownState({
                         if (!subscriber) {
                             subscriber = new Redis(redisEndpoint, {
                                 ...redisOpts,
-                                enableReadyCheck: false,
-                                maxRetriesPerRequest: null
+                                ...REDIS_WORKER_OPTIONS
                             })
                         }
                         return subscriber
@@ -254,8 +253,7 @@ export async function restoreShutdownState({
                     case "bclient":
                         return new Redis(redisEndpoint, {
                             ...redisOpts,
-                            enableReadyCheck: false,
-                            maxRetriesPerRequest: null
+                            ...REDIS_WORKER_OPTIONS
                         })
                     default:
                         throw new Error(`Unexpected connection type: ${type}`)

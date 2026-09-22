@@ -4,6 +4,7 @@ import type { Account } from "viem"
 import { getAvailableWallets } from "."
 import { getRedisKeys } from "../../cli/config/redisKeys"
 import type { AltoConfig } from "../../createConfig"
+import { REDIS_OPTIONS } from "../../utils/redis-options"
 import type { SenderManager } from "../senderManager"
 
 async function createRedisQueue({
@@ -56,7 +57,7 @@ export const createRedisSenderManager = async ({
         }
     )
 
-    const redis = new Redis(redisEndpoint)
+    const redis = new Redis(redisEndpoint, REDIS_OPTIONS)
     const redisQueueName = getRedisKeys(config).senderManagerQueue
     const redisQueue = await createRedisQueue({
         redis,
