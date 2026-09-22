@@ -26,9 +26,9 @@ application:
 
   # Non-secret runtime config, identical in shape to the Render config file.
   # Secret keys (executor-private-keys, utility-private-key, rpc-url,
-  # redis-events-queue-endpoint, redis-events-queue-name) are NOT here — they
-  # arrive as ALTO_* env vars from the Secret below. Editing this block
-  # re-rolls the pod on the next sync.
+  # redis-events-queue-endpoint) are NOT here — they arrive as ALTO_* env vars
+  # from the Secret below. The queue name is not a secret and stays here.
+  # Editing this block re-rolls the pod on the next sync.
   configMap:
     enabled: true
     files:
@@ -47,11 +47,12 @@ application:
             "gas-price-bump": "110",
             "enforce-unique-senders-per-bundle": false,
             "max-bundle-interval": 200,
-            "max-gas-per-bundle": "27000000"
+            "max-gas-per-bundle": "27000000",
+            "redis-events-queue-name": "ur-userop-events-queue"
           }
 
-# Secrets Manager secret "ultra-relay/ultra-relay-arbitrum-ostium" is a JSON
-# object with the five property keys below; each becomes one key (the
+# Secrets Manager secret "k8s__ultra-relay_arbitrum-ostium" is a JSON object
+# with the four property keys below; each becomes one key (the
 # upper-cased property name) in Kubernetes Secret
 # "ultra-relay-arbitrum-ostium-secrets". common.values.yaml maps those keys
 # to the ALTO_* env vars the CLI reads.
@@ -76,10 +77,6 @@ external-secret:
           remoteRef:
             key: k8s__ultra-relay_arbitrum-ostium
             property: redis-events-queue-endpoint
-        - secretKey: REDIS_EVENTS_QUEUE_NAME
-          remoteRef:
-            key: k8s__ultra-relay_arbitrum-ostium
-            property: redis-events-queue-name
   serviceAccount:
     annotations:
       eks.amazonaws.com/role-arn: arn:aws:iam::518033442333:role/external-secrets-ultra-relay-arbitrum-ostium-ue2

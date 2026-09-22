@@ -48,7 +48,6 @@ REQUIRED_MAPPINGS = {
     "UTILITY_PRIVATE_KEY": "utility-private-key",
     "RPC_URL": "rpc-url",
     "REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
-    "REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
 }
 SECRET_KEYS = set(REQUIRED_MAPPINGS.values())
 SUFFIX = ".values.yaml"

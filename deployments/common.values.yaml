@@ -76,11 +76,6 @@ application:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_ENDPOINT
-      ALTO_REDIS_EVENTS_QUEUE_NAME:
-        valueFrom:
-          secretKeyRef:
-            name: '{{ .Values.applicationName }}-secrets'
-            key: REDIS_EVENTS_QUEUE_NAME
 
     # Volume "config" is declared per instance (its ConfigMap name carries the
     # instance name); the mount is the same for all.
