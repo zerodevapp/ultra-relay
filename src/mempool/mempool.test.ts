@@ -1859,4 +1859,141 @@ describe("Mempool.getBundles", () => {
             })
         })
     })
+
+    // The executor dispatches every bundle a pass returns concurrently and
+    // simulates each in isolation, so a later nonce for a sender whose
+    // earlier nonce sits in a previous bundle of the same pass would fail
+    // AA25 before its predecessor lands and be dropped as not-found. The
+    // pass must therefore never split one sender-and-nonce-key chain across
+    // bundles. PR #66 review, P1.
+    describe("nonce chains never span bundles within one pass", () => {
+        // One sender, nonces 0..count-1, distinct hashes. The memory store
+        // keeps only the lowest pending nonce per sender in its priority
+        // queue and promotes the next on pop, so these pop in nonce order
+        // regardless of fee.
+        const chainOps = (count: number, sender = senderOf(1)) =>
+            Array.from({ length: count }, (_, i) =>
+                makeUserOpInfoV06(i + 1, { sender, nonce: BigInt(i) })
+            )
+
+        const processingIds = async (store: MempoolStore) =>
+            (await store.dumpProcessing(ENTRY_POINT_V06))
+                .map((userOpInfo) => idOf(userOpInfo.userOpHash))
+                .sort((a, b) => a - b)
+
+        it("hands back the first nonce whose predecessor is in an earlier bundle and ends the pass", async () => {
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                chainOps(7)
+            )
+
+            const bundles = await mempool.getBundles()
+
+            // Nonces 0-2 pack; nonce 3 would exceed 27M and is carried. Its
+            // slot is already in bundle 1, so it goes back to outstanding and
+            // the pass ends instead of opening a bundle the executor would
+            // dispatch alongside bundle 1.
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                4, 5, 6, 7
+            ])
+            expect(await processingIds(store)).toEqual([1, 2, 3])
+
+            // Exactly one write: the handed-back nonce 3, flagged reentered
+            // like every other re-add path. No pop past the one handed back.
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            const [[written]] = storeSpies.addOutstanding.mock.calls
+            expect(written.userOpInfo.userOpHash).toBe(hash(4))
+            expect(written.userOpInfo.reentered).toBe(true)
+            expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(4)
+        })
+
+        it("still packs consecutive nonces into one bundle", async () => {
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                chainOps(3)
+            )
+
+            const bundles = await mempool.getBundles()
+
+            // One handleOps call executes sequential nonces in order, so the
+            // guard is per bundle, not per pass.
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
+            expect(storeSpies.addOutstanding).not.toHaveBeenCalled()
+        })
+
+        it("ends the pass for the whole tick, so independent senders behind the chain wait too", async () => {
+            // Sender A holds nonces 0-3 (ids 1-4); ids 5-7 are unrelated
+            // senders. Fees ascend by id, so A's chain is popped first.
+            const ops = [
+                ...chainOps(4),
+                makeUserOpInfoV06(5),
+                makeUserOpInfoV06(6),
+                makeUserOpInfoV06(7)
+            ]
+            const { mempool, store, storeSpies } = await harnessSeededWith(ops)
+
+            const bundles = await mempool.getBundles()
+
+            // Accepted cost of the guard: ending the pass is deterministic
+            // regardless of store ordering, at the price of ids 5-7 waiting
+            // one tick. Requeue-and-continue would re-pop nonce 3 on the
+            // memory store and trip the repeat guard with a second write.
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                4, 5, 6, 7
+            ])
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+        })
+    })
+
+    // getBundles() itself has no deadline: while arrivals keep the queue
+    // non-empty, the carry path keeps consuming them and no completed bundle
+    // reaches the caller. The auto-bundling tick bounds this by passing the
+    // configured max-bundle-count (see executorManager.test.ts). These two
+    // cases pin both halves of that contract. PR #66 review, P1.
+    describe("bundle budget under continuous arrivals", () => {
+        // After every pop, add one fresh op with a higher fee so it sorts to
+        // the tail and the queue never empties. Finite so a broken budget
+        // fails loudly on the outstanding assertion instead of hanging.
+        const installProducer = (store: MempoolStore, arrivals: number) => {
+            let nextId = 100
+            const realPop = store.popOutstanding.bind(store)
+            store.popOutstanding = async (entryPoint) => {
+                const popped = await realPop(entryPoint)
+                if (nextId < 100 + arrivals) {
+                    await store.addOutstanding({
+                        entryPoint,
+                        userOpInfo: makeUserOpInfoV06(nextId++)
+                    })
+                }
+                return popped
+            }
+        }
+
+        it("returns after the budget even though the producer is still active", async () => {
+            const { mempool, store } = await harnessSeededWith(sevenGasOps())
+            installProducer(store, 60)
+
+            const bundles = await mempool.getBundles(2)
+
+            expect(bundles).toHaveLength(2)
+            // The pass ended on budget, not on exhaustion: work is still queued.
+            const left = await outstandingIds(store, ENTRY_POINT_V06)
+            expect(left.length).toBeGreaterThan(0)
+        })
+
+        it("without a budget runs until the producer stops", async () => {
+            const { mempool, store } = await harnessSeededWith(sevenGasOps())
+            installProducer(store, 60)
+
+            const bundles = await mempool.getBundles()
+
+            // 7 seeded + 60 arrivals, all drained in one call.
+            expect(bundles.length).toBeGreaterThan(2)
+            expect(
+                bundles.reduce((sum, bundle) => sum + bundle.userOps.length, 0)
+            ).toBe(67)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
+        })
+    })
 })

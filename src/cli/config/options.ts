@@ -102,9 +102,10 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
     },
     "max-bundle-count": {
         description:
-            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+            "Maximum number of bundles one bundling pass may produce per entry point before handing them to the executor. Bounds how long a pass holds the event loop when the queue is deep.",
         type: "number",
-        require: false
+        require: false,
+        default: 10
     },
     "rpc-methods": {
         description: "Supported RPC methods split by commas",

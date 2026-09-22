@@ -160,3 +160,66 @@ describe("updateTransactionCostMetrics", () => {
         expect(warn).not.toHaveBeenCalled()
     })
 })
+
+// The tick reaches only this.opsCount, this.config, this.mempool.getBundles,
+// this.sendBundleToExecutor and this.bundlingMode, so a stand-in suffices.
+// bundlingMode "manual" keeps it from re-arming its own setTimeout.
+type AutoScalingBundling = () => Promise<void>
+
+const autoScalingBundling = (
+    ExecutorManager.prototype as unknown as {
+        autoScalingBundling: AutoScalingBundling
+    }
+).autoScalingBundling
+
+const makeTick = (config: Record<string, unknown>) => {
+    const getBundles = vi.fn(async (): Promise<unknown[]> => [])
+    const sendBundleToExecutor = vi.fn()
+
+    return {
+        getBundles,
+        sendBundleToExecutor,
+        manager: {
+            opsCount: [] as number[],
+            config: { minBundleInterval: 0, maxBundleInterval: 0, ...config },
+            mempool: { getBundles },
+            sendBundleToExecutor,
+            bundlingMode: "manual"
+        }
+    }
+}
+
+describe("autoScalingBundling", () => {
+    it("passes the configured max-bundle-count through to getBundles", async () => {
+        const { manager, getBundles } = makeTick({ maxBundleCount: 10 })
+
+        await autoScalingBundling.call(manager)
+
+        expect(getBundles).toHaveBeenCalledTimes(1)
+        expect(getBundles).toHaveBeenCalledWith(10)
+    })
+
+    it("leaves the pass unbounded when no max-bundle-count is configured", async () => {
+        const { manager, getBundles } = makeTick({})
+
+        await autoScalingBundling.call(manager)
+
+        expect(getBundles).toHaveBeenCalledWith(undefined)
+    })
+
+    it("hands every returned bundle to the executor", async () => {
+        const { manager, getBundles, sendBundleToExecutor } = makeTick({
+            maxBundleCount: 10
+        })
+        const bundleA = { userOps: [{}] }
+        const bundleB = { userOps: [{}, {}] }
+        getBundles.mockResolvedValue([bundleA, bundleB])
+
+        await autoScalingBundling.call(manager)
+
+        expect(sendBundleToExecutor.mock.calls.map(([b]) => b)).toEqual([
+            bundleA,
+            bundleB
+        ])
+    })
+})

@@ -20,6 +20,7 @@ import type { Logger, Metrics } from "@alto/utils"
 import {
     getAAError,
     getAddressFromInitCodeOrPaymasterAndData,
+    getNonceKeyAndSequence,
     getSerializedHandleOpsTx,
     getUserOpHash,
     isVersion06,
@@ -788,6 +789,14 @@ export class Mempool {
         const seenOps = new Set()
         let breakLoop = false
 
+        // Sender-and-nonce-key slots already placed in an EARLIER bundle of
+        // this pass. The executor dispatches every bundle from one pass
+        // concurrently and simulates each on its own, so a later nonce for one
+        // of these slots would fail AA25 before its predecessor lands and be
+        // dropped as not-found. Such an op is handed back and the pass ends;
+        // the next tick picks it up once the predecessor has had a block.
+        const slotsInPriorBundles = new Set<string>()
+
         // A userOp deferred by a bundle cap is held here rather than written
         // back to outstanding: its hash is already in seenOps, so re-popping it
         // would trip the repeat guard below and end the whole pass with the
@@ -839,6 +848,7 @@ export class Mempool {
                 let senders = new Set<string>()
                 let knownEntities = await this.getKnownEntities(entryPoint)
                 let storageMap: StorageMap = {}
+                const currentBundleSlots = new Set<string>()
 
                 // A carried userOp is no longer in outstanding, so the snapshot
                 // above no longer lists its entities. Put them back so this
@@ -913,6 +923,23 @@ export class Mempool {
                     }
 
                     const { userOp } = userOpInfo
+
+                    const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)
+                    const nonceSlot = `${userOp.sender}-${nonceKey}`
+                    if (slotsInPriorBundles.has(nonceSlot)) {
+                        // Its predecessor sits in an earlier bundle of this
+                        // pass. Release the carry slot before the write so the
+                        // finally cannot write it a second time, then end the
+                        // pass so the predecessor gets a block to land first.
+                        carriedUserOpInfo = undefined
+                        breakLoop = true
+                        userOpInfo.reentered = true
+                        await this.store.addOutstanding({
+                            entryPoint,
+                            userOpInfo
+                        })
+                        break
+                    }
 
                     // Check if we should skip this operation
                     const skipResult = await this.shouldSkip({
@@ -1038,10 +1065,14 @@ export class Mempool {
 
                     // Add op to current bundle
                     currentBundle.userOps.push(userOpInfo)
+                    currentBundleSlots.add(nonceSlot)
                 }
 
                 if (currentBundle.userOps.length > 0) {
                     bundles.push(currentBundle)
+                    for (const slot of currentBundleSlots) {
+                        slotsInPriorBundles.add(slot)
+                    }
                 }
             }
 

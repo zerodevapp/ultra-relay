@@ -141,7 +141,13 @@ export class ExecutorManager {
                 (timestamp) => now - timestamp < RPM_WINDOW
             )
 
-            const bundles = await this.mempool.getBundles()
+            // Bounded per entry point so a deep queue cannot hold the whole
+            // tick: the pass returns after this many bundles and the rest
+            // waits for the next tick. Without it, sustained arrivals keep
+            // getBundles() from ever returning and nothing gets submitted.
+            const bundles = await this.mempool.getBundles(
+                this.config.maxBundleCount
+            )
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
