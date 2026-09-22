@@ -1,0 +1,201 @@
+name: Build and push image to ECR
+
+# Every merge to main builds the Dockerfile, pushes main-<sha> to ECR and cuts
+# GitHub release v<run_number>. Nothing deploys here — see deploy-pr.yml and
+# deployments/README.md. A manual run on any branch pushes <branch>-<sha>
+# (no release) so a branch can be rolled out; dry_run builds without AWS.
+# Pull requests that touch the image inputs get a build-only check.
+#
+# Re-runs are safe: if the tag already exists in ECR the build is skipped and
+# the release is only created when missing (the ECR repo should use immutable
+# tags, ADR 0002 assumption 1).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'deployments/**'
+      - 'scripts/deployments/**'
+      - '.github/workflows/deploy-pr.yml'
+      - '.github/workflows/deployments-check.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'contracts/**'
+      - '.github/workflows/build-push-ecr.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only: skip AWS login and push (works before the IAM role exists)'
+        type: boolean
+        default: false
+
+env:
+  # ECR lives in the management account in us-west-2 like every other ZeroDev
+  # image; the us-east-2 cluster pulls cross-region (ADR 0002, assumption 1).
+  AWS_REGION: us-west-2
+  # Created by SRE; trust policy must allow repo:zerodevapp/ultra-relay:* (ADR 0002).
+  AWS_ROLE_ARN: arn:aws:iam::352956043285:role/ultra-relay-gha
+  ECR_REGISTRY: 352956043285.dkr.ecr.us-west-2.amazonaws.com
+  ECR_REPOSITORY: offchain-labs/ultra-relay
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # OIDC for aws-actions/configure-aws-credentials
+
+# PR builds on the same ref supersede each other. Publishing runs are grouped
+# by commit: a push and a manual run of the same sha serialise instead of
+# racing on the same tag, different commits build concurrently, and a queue
+# of quick merges never drops a build.
+concurrency:
+  group: build-push-ecr-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Push on main, or on a manual run unless dry_run. Never on pull_request.
+      PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # contracts/ has git submodules and the Dockerfile copies the tree.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: ultra-relay-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix={{branch}}-,format=short,enable=${{ github.event_name != 'pull_request' }}
+            type=ref,event=pr
+
+      # A re-run of an already-published commit must not rebuild and overwrite
+      # the image behind an existing release.
+      - name: Check whether the image already exists in ECR
+        id: exists
+        if: env.PUBLISH == 'true'
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if OUT=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="$IMAGE_TAG" \
+              --region "$AWS_REGION" \
+              --query 'imageDetails[0].imageDigest' --output text 2>&1); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$OUT" >> "$GITHUB_OUTPUT"
+            echo "$ECR_REPOSITORY:$IMAGE_TAG already exists ($OUT); skipping the build"
+          elif grep -q ImageNotFoundException <<< "$OUT"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            # Access denied, missing repository, throttling: surface it instead
+            # of rebuilding blindly and losing the diagnostic.
+            echo "::error::ECR lookup for $ECR_REPOSITORY:$IMAGE_TAG failed: $OUT"
+            exit 1
+          fi
+
+      - name: Build and push
+        id: build
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Only merges to main are releases. target_commitish pins v<run_number>
+      # to the commit this run built; run_number is monotonic, so the tag never
+      # collides (including with the upstream v1.2.x tags this fork carries).
+      # Idempotent: a re-run finds the existing release for this commit and
+      # stops; a release with the same tag for another commit is an error.
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: v${{ github.run_number }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.exists.outputs.digest }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG
+            const { owner, repo } = context.repo
+            const existing = await github.rest.repos
+              .getReleaseByTag({ owner, repo, tag })
+              .catch((error) => { if (error.status === 404) return null; throw error })
+            if (existing) {
+              if (existing.data.target_commitish !== context.sha) {
+                core.setFailed(`${tag} already exists for ${existing.data.target_commitish}, not ${context.sha}`)
+              } else {
+                core.info(`${tag} already exists for this commit; nothing to do`)
+              }
+              return
+            }
+            const tags = process.env.IMAGE_TAGS.split('\n').filter(Boolean)
+            const body = [
+              '## Docker images',
+              ...tags.map((t) => `- \`${t}\``),
+              '',
+              `Digest: \`${process.env.IMAGE_DIGEST}\``,
+              '',
+              'Roll out with the "Create deploy PR" workflow.'
+            ].join('\n')
+            await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: `Release ${tag}`,
+              body,
+              generate_release_notes: true,
+              draft: false,
+              prerelease: false
+            })
+
+      - name: Summary
+        env:
+          PUBLISHED: ${{ env.PUBLISH }}
+          SKIPPED: ${{ steps.exists.outputs.exists == 'true' }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.exists.outputs.digest }}
+        run: |
+          {
+            echo "### Image"
+            echo "Published to ECR: $PUBLISHED (build skipped because the tag already existed: $SKIPPED)"
+            echo '```'
+            echo "$IMAGE_TAGS"
+            echo "digest: ${IMAGE_DIGEST:-n/a}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
