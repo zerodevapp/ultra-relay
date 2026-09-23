@@ -102,7 +102,7 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
     },
     "max-bundle-count": {
         description:
-            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+            "Maximum number of bundles one bundling pass may produce per entry point. Defaults to the number of executor wallets; a larger value is clamped to it, since bundles beyond the wallet count only queue for a wallet.",
         type: "number",
         require: false
     },
