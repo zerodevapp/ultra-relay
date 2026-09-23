@@ -6,6 +6,13 @@ name: Build and push image to ECR
 # (no release) so a branch can be rolled out; dry_run builds without AWS.
 # Pull requests that touch the image inputs get a build-only check.
 #
+# The image is multi-arch (linux/amd64 + linux/arm64) so the us-east-2 cluster
+# can schedule ultra-relay onto Graviton (arm64) nodes as well as amd64; a
+# single-arch amd64 manifest fails to pull on arm64 with "no match for platform
+# in manifest". Each arch builds on its own NATIVE runner in parallel (no QEMU
+# emulation, which made the arm64 leg ~4x slower) and the two per-arch images
+# are stitched into one manifest list in the merge job.
+#
 # Re-runs are safe: if the tag already exists in ECR the build is skipped and
 # the release is only created when missing (the ECR repo should use immutable
 # tags, ADR 0002 assumption 1).
@@ -57,39 +64,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
-    name: Build image
+  # Compute tags/labels, decide whether we publish, and skip the whole run if an
+  # immutable tag already exists. Cheap and runner-agnostic, so it gates the
+  # expensive per-arch builds.
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     env:
       # Push on main, or on a manual run unless dry_run. Never on pull_request.
       PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+    outputs:
+      publish: ${{ env.PUBLISH }}
+      version: ${{ steps.meta.outputs.version }}
+      labels: ${{ steps.meta.outputs.labels }}
+      exists: ${{ steps.exists.outputs.exists }}
+      digest: ${{ steps.exists.outputs.digest }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # contracts/ has git submodules and the Dockerfile copies the tree.
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Configure AWS credentials
-        if: env.PUBLISH == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          role-session-name: ultra-relay-build-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        if: env.PUBLISH == 'true'
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -98,6 +88,14 @@ jobs:
           tags: |
             type=sha,prefix={{branch}}-,format=short,enable=${{ github.event_name != 'pull_request' }}
             type=ref,event=pr
+
+      - name: Configure AWS credentials
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: ultra-relay-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # A re-run of an already-published commit must not rebuild and overwrite
       # the image behind an existing release.
@@ -125,32 +123,153 @@ jobs:
             exit 1
           fi
 
-      - name: Build and push
+  # One job per architecture, each on its native runner so arm64 is not emulated.
+  # On publish each pushes an untagged, by-digest image; the merge job assembles
+  # the tagged manifest list. On PRs this is a build-only check (no push).
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: prepare
+    if: needs.prepare.outputs.exists != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # contracts/ has git submodules and the Dockerfile copies the tree.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        if: needs.prepare.outputs.publish == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: ultra-relay-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: needs.prepare.outputs.publish == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # push-by-digest: publish an untagged image and record only its digest, so
+      # two parallel arch builds never race on a shared tag. The merge job binds
+      # the tags to the assembled manifest. On PRs (no publish) this just builds.
+      - name: Build and push by digest
         id: build
-        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ env.PUBLISH == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: ${{ needs.prepare.outputs.publish == 'true' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.ECR_REGISTRY, env.ECR_REPOSITORY) || '' }}
+          # Per-arch cache scopes so amd64 and arm64 don't clobber each other.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
-      # Only merges to main are releases. target_commitish pins v<run_number>
-      # to the commit this run built; run_number is monotonic, so the tag never
-      # collides (including with the upstream v1.2.x tags this fork carries).
-      # Idempotent: a re-run finds the existing release for this commit and
-      # stops; a release with the same tag for another commit is an error.
+      - name: Export digest
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Upload digest
+        if: needs.prepare.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-arch digests into a single tagged manifest list and push it.
+  # Only runs when we actually built and published something.
+  merge:
+    name: Merge manifest
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: ultra-relay-merge-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix={{branch}}-,format=short,enable=${{ github.event_name != 'pull_request' }}
+            type=ref,event=pr
+
+      - name: Create and push manifest list
+        id: manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$ECR_REGISTRY/$ECR_REPOSITORY@sha256:%s " *)
+          digest=$(docker buildx imagetools inspect \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.meta.outputs.version }}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # Only merges to main are releases. Runs even when the build was skipped
+  # (exists == true) so a re-run of a published commit is still idempotent.
+  release:
+    name: Create GitHub release
+    needs: [prepare, merge]
+    if: always() && github.event_name == 'push' && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # target_commitish pins v<run_number> to the commit this run built;
+      # run_number is monotonic, so the tag never collides (including with the
+      # upstream v1.2.x tags this fork carries). Idempotent: a re-run finds the
+      # existing release for this commit and stops; a release with the same tag
+      # for another commit is an error.
       - name: Create GitHub release
-        if: github.event_name == 'push'
         uses: actions/github-script@v7
         env:
           RELEASE_TAG: v${{ github.run_number }}
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.exists.outputs.digest }}
+          IMAGE_REF: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.merge.outputs.digest || needs.prepare.outputs.digest }}
         with:
           script: |
             const tag = process.env.RELEASE_TAG
@@ -166,10 +285,9 @@ jobs:
               }
               return
             }
-            const tags = process.env.IMAGE_TAGS.split('\n').filter(Boolean)
             const body = [
-              '## Docker images',
-              ...tags.map((t) => `- \`${t}\``),
+              '## Docker image',
+              `- \`${process.env.IMAGE_REF}\` (linux/amd64, linux/arm64)`,
               '',
               `Digest: \`${process.env.IMAGE_DIGEST}\``,
               '',
@@ -186,19 +304,3 @@ jobs:
               draft: false,
               prerelease: false
             })
-
-      - name: Summary
-        env:
-          PUBLISHED: ${{ env.PUBLISH }}
-          SKIPPED: ${{ steps.exists.outputs.exists == 'true' }}
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.exists.outputs.digest }}
-        run: |
-          {
-            echo "### Image"
-            echo "Published to ECR: $PUBLISHED (build skipped because the tag already existed: $SKIPPED)"
-            echo '```'
-            echo "$IMAGE_TAGS"
-            echo "digest: ${IMAGE_DIGEST:-n/a}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
