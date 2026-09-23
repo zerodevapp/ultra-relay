@@ -39,11 +39,10 @@ ever leaving main.
   release is undone by a deploy PR back to the previous one.
 - **Config.** The same JSON config file used on Render is stored in the
   values file, rendered into a ConfigMap, mounted as a file and loaded via
-  `ALTO_CONFIG`. The secret keys (`executor-private-keys`,
-  `utility-private-key`, `rpc-url`; `redis-events-queue-endpoint` and
-  `redis-events-queue-name` are commented out until the events queue moves
-  off Render, and their env mappings are optional meanwhile) are absent from
-  the file. External Secrets Operator syncs them from AWS Secrets Manager
+  `ALTO_CONFIG`. The four secret keys (`executor-private-keys`,
+  `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint`) are
+  absent from the file; the queue name is plain config. External Secrets
+  Operator syncs the secrets from AWS Secrets Manager
   `k8s__ultra-relay_<variant>` (SRE's `k8s__<service>_<variant>` naming; the
   variant is the instance name without its `ultra-relay-` prefix) into a
   Kubernetes Secret whose keys are the upper-cased property names
