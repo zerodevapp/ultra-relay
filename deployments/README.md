@@ -34,7 +34,8 @@ Nothing deploys automatically. Building and rolling out are two steps.
    `tag:` line in the chosen instance files. If a deploy PR for the same
    release and instances is already open, the run stops and points at it, so
    edits you made on that PR are never overwritten.
-3. **Review and merge the deploy PR.** ArgoCD notices main changed, re-renders
+3. **Review and merge the deploy PR.** Branch protection on main requires an
+   approval first, like any other PR. ArgoCD notices main changed, re-renders
    the chart and replaces the pod. Rolling replacement: the new pod starts
    before the old one stops.
 

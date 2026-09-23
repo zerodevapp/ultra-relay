@@ -126,10 +126,10 @@ by SRE before first rollout.
    `ultra-relay`; Application name `zerodev-prod-ue2-v1-ultra-relay-<instance>`.
    The values stay in this repo by decision; only the entry lives in the
    charts repo (`charts/zerodev/config/zerodev-prod-ue2-v1/config.yaml`).
-7. **[verified]** `main` has no branch protection or rulesets. Merging any
-   change under `deployments/` is therefore a production change with no
-   required review. Enabling required review on main is recommended and is
-   outside this change.
+7. `main` is branch-protected and requires an explicit approval before any
+   PR merges (confirmed by the team 2026-09-23; there are no rulesets). Deploy
+   PRs are no exception: a person approves each rollout, and that approval is
+   the deploy gate.
 8. **[verified]** OCL self-hosted runners are org-scoped to `OffchainLabs`, so
    workflows use `ubuntu-latest` while this repo stays in `zerodevapp`.
 9. The deploy-PR workflow uses the built-in `GITHUB_TOKEN`, which requires
@@ -185,8 +185,8 @@ by SRE before first rollout.
 
 ## Consequences
 
-- Merging a `deployments/` change deploys to prod. Treat those PRs as
-  production changes; a reviewer is recommended even though none is enforced.
+- Merging a `deployments/` change deploys to prod. Branch protection makes
+  each such PR, deploy PRs included, wait for an approval.
 - Adding an instance = copy a values file, create its Secrets Manager secret,
   merge (+ one SRE line if the ApplicationSet fallback is in use). Workflows
   need no change; the deploy-PR workflow globs the directory.
