@@ -1,6 +1,7 @@
 import type { Logger } from "@alto/utils"
 import {
     type Hex,
+    HttpRequestError,
     type HttpTransport,
     type HttpTransportConfig,
     RpcRequestError,
@@ -9,6 +10,7 @@ import {
     getAbiItem,
     isHex,
     slice,
+    stringify,
     toFunctionSelector
 } from "viem"
 import { formatAbiItem, rpc } from "viem/utils"
@@ -83,6 +85,12 @@ const CALLPHASE_REVERTED_SELECTOR = toFunctionSelector(
         })
     )
 )
+
+// The HTTP statuses viem's buildRequest retries, honouring Retry-After, but
+// only when it sees an HttpRequestError. viem does not export the list.
+const RETRYABLE_HTTP_STATUSES = new Set([
+    403, 408, 413, 429, 500, 502, 503, 504
+])
 
 // Log the endpoint origin only (scheme + host): provider API keys live in
 // the path (Alchemy) or the query string, so neither is safe to log.
@@ -454,6 +462,7 @@ export function customTransport(
                     const body = { method, params }
                     const start = performance.now()
                     let responseHeaders: Record<string, string> | undefined
+                    let httpResponse: Response | undefined
                     // viem's timeout covers only up to headers; the body read is unbounded.
                     let headersAt: number | undefined
                     const fn = async (body: RpcRequest) => {
@@ -461,7 +470,9 @@ export function customTransport(
                             await rpc.http(url, {
                                 body,
                                 fetchOptions,
+                                maxResponseBodySize: false,
                                 onResponse: (response) => {
+                                    httpResponse = response
                                     headersAt = performance.now()
                                     responseHeaders = Object.fromEntries(
                                         response.headers.entries()
@@ -519,6 +530,25 @@ export function customTransport(
                             },
                             `upstream RPC ${method} to ${sanitizedUrl}${chainTag} failed after ${ms}ms`
                         )
+
+                        // viem 2.56 returns JSON-RPC errors from non-2xx
+                        // responses instead of throwing; keep the HTTP status
+                        // and headers so 429/5xx retries and Retry-After work.
+                        // Other statuses keep the typed JSON-RPC error, so a
+                        // 400/-32601 still marks eth_fillTransaction as
+                        // unsupported.
+                        if (
+                            httpResponse &&
+                            RETRYABLE_HTTP_STATUSES.has(httpResponse.status)
+                        ) {
+                            throw new HttpRequestError({
+                                body,
+                                details: stringify(error),
+                                headers: httpResponse.headers,
+                                status: httpResponse.status,
+                                url
+                            })
+                        }
 
                         throw new RpcRequestError({
                             body,

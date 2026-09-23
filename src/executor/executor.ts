@@ -241,6 +241,7 @@ export class Executor {
             data: handleOpsCalldata,
             from: account.address,
             chain: publicClient.chain,
+            chainId: publicClient.chain.id,
             gas,
             account,
             nonce,
