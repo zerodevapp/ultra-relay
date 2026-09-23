@@ -57,7 +57,9 @@ ever leaving main.
   IPs over VPC peering using the NLB's own DNS name; we own no DNS zone.
 - **Logs** go to stdout as JSON and are collected by the cluster agent into
   Grafana. No BetterStack transport is configured on EKS.
-- **Sizing.** One replica; requests 1 CPU / 2 GiB, memory limit 4 GiB, no CPU
+- **Sizing.** One replica by default; `ultra-relay-arbitrum-ostium` runs
+  two with `enable-horizontal-scaling` (shared mempool and executor wallets
+  in Redis at the optional `REDIS_ENDPOINT` secret). Requests 1 CPU / 2 GiB, memory limit 4 GiB, no CPU
   limit; Node heap capped below the memory limit so OOM is a clean crash, not
   a kernel kill. Liveness and readiness probe `/health`; a ServiceMonitor
   scrapes `/metrics` on the same port.

@@ -76,6 +76,14 @@ application:
           secretKeyRef:
             name: '{{ .Values.applicationName }}-secrets'
             key: REDIS_EVENTS_QUEUE_ENDPOINT
+      # Only instances with enable-horizontal-scaling map REDIS_ENDPOINT;
+      # optional so the others still start without it.
+      ALTO_REDIS_ENDPOINT:
+        valueFrom:
+          secretKeyRef:
+            name: '{{ .Values.applicationName }}-secrets'
+            key: REDIS_ENDPOINT
+            optional: true
 
     # Volume "config" is declared per instance (its ConfigMap name carries the
     # instance name); the mount is the same for all.
