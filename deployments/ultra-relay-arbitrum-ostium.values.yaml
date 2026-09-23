@@ -17,7 +17,7 @@ application:
     image:
       # Rewritten by deploy-pr.yml; never hand-edit. Placeholder until the
       # first rollout — the pod cannot start until then.
-      tag: "main-51dcc69"
+      tag: "main-3bef454"
 
     volumes:
       config:
