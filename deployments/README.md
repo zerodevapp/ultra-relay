@@ -34,7 +34,8 @@ Nothing deploys automatically. Building and rolling out are two steps.
    `tag:` line in the chosen instance files. If a deploy PR for the same
    release and instances is already open, the run stops and points at it, so
    edits you made on that PR are never overwritten.
-3. **Review and merge the deploy PR.** ArgoCD notices main changed, re-renders
+3. **Review and merge the deploy PR.** Branch protection on main requires an
+   approval first, like any other PR. ArgoCD notices main changed, re-renders
    the chart and replaces the pod. Rolling replacement: the new pod starts
    before the old one stops.
 
@@ -80,9 +81,11 @@ because the PR is open.
    new application, before any deploy PR.
 2. Ask SRE for Secrets Manager secret `k8s__ultra-relay_<variant>` in the
    cluster account, a JSON object with keys `executor-private-keys`,
-   `utility-private-key`, `rpc-url` and `redis-events-queue-endpoint`, plus
-   an IRSA role `external-secrets-<new-name>-ue2` allowed to read it. The
-   queue name is not a secret; it lives in `config.json`.
+   `utility-private-key`, `rpc-url` and `redis-events-queue-endpoint`
+   (plus `redis-endpoint` if the instance sets `enable-horizontal-scaling`,
+   mapped as `REDIS_ENDPOINT`), and an IRSA role
+   `external-secrets-<new-name>-ue2` allowed to read it. The queue name is
+   not a secret; it lives in `config.json`.
 3. Open a PR; `Check deployment values` must pass. Merge.
 4. Ask SRE to add a component entry for the new instance in
    `charts/zerodev/config/zerodev-prod-ue2-v1/config.yaml` of

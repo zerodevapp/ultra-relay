@@ -216,4 +216,26 @@ out=$(python3 "$HERE/check.py" "$TMP" 2>&1 || true)
 [[ "$out" == *"duplicate mapping key"* ]] || fail "duplicate key must be reported, got: $out"
 rm "$TMP/$BASE.values.yaml"
 
+# 23. The optional REDIS_ENDPOINT mapping is accepted when present.
+redis_mapping() {
+  printf '        - secretKey: REDIS_ENDPOINT\n          remoteRef:\n            key: %s\n            property: %s\n' "$1" "$2"
+}
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY"; redis_mapping "$BASE_KEY" redis-endpoint)"
+python3 "$HERE/check.py" "$TMP" >/dev/null || fail "optional REDIS_ENDPOINT mapping should pass"
+
+# 24. An optional mapping with the wrong property fails.
+fixture "$BASE" "$BASE" "$BASE_KEY" "" "$(data_block "$BASE_KEY"; redis_mapping "$BASE_KEY" redis_endpoint)"
+expect_fail "wrong REDIS_ENDPOINT property should fail" python3 "$HERE/check.py" "$TMP"
+
+# 25. Horizontal scaling without REDIS_ENDPOINT fails; with it, passes.
+fixture "$BASE" "$BASE" "$BASE_KEY" ', "enable-horizontal-scaling": true'
+expect_fail "horizontal scaling without REDIS_ENDPOINT should fail" python3 "$HERE/check.py" "$TMP"
+fixture "$BASE" "$BASE" "$BASE_KEY" ', "enable-horizontal-scaling": true' "$(data_block "$BASE_KEY"; redis_mapping "$BASE_KEY" redis-endpoint)"
+python3 "$HERE/check.py" "$TMP" >/dev/null || fail "horizontal scaling with REDIS_ENDPOINT should pass"
+
+# 26. redis-endpoint is a secret and must not be in config.json.
+fixture "$BASE" "$BASE" "$BASE_KEY" ', "redis-endpoint": "redis://x"'
+expect_fail "redis-endpoint in config.json should fail" python3 "$HERE/check.py" "$TMP"
+rm "$TMP/$BASE.values.yaml"
+
 echo "ok: deployments scripts"
