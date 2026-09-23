@@ -84,10 +84,6 @@ jobs:
         if: env.PUBLISH == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
-      # arm64 is cross-built via QEMU emulation on the amd64 runner so the
-      # us-east-2 cluster can schedule ultra-relay onto Graviton (arm64) nodes,
-      # not just amd64. A single-arch amd64 manifest fails to pull there with
-      # "no match for platform in manifest".
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
