@@ -7,17 +7,17 @@ export type InclusionTimings = {
     outstandingMs: number | undefined
     processingMs: number | undefined
     submittedMs: number | undefined
-    bundleBuildMs: number | undefined
-    handOffMs: number | undefined
-    walletWaitMs: number | undefined
-    submissionMs: number | undefined
+    bundleBuildMs?: number
+    handOffMs?: number
+    walletWaitMs?: number
+    submissionMs?: number
 }
 
 // Stage durations for the inclusion log. The first six are the existing
 // fields, moved here unchanged. The last four split processingMs
 // (processingAt -> submittedAt) into adjacent stages that sum to it exactly;
 // they are emitted only when every stamp is present and in order, so a
-// re-picked or rotated record never reports a negative stage.
+// rotated or older record never reports a negative stage.
 export function computeInclusionTimings(
     userOpInfo: UserOpInfo,
     blockReceivedTimestamp: number
@@ -40,13 +40,11 @@ export function computeInclusionTimings(
     const totalMs = blockReceivedTimestamp - (receivedAt ?? addedToMempool)
 
     const hasBreakdown =
-        processingAt !== undefined &&
-        processingAt !== 0 &&
-        bundledAt !== undefined &&
-        dispatchedAt !== undefined &&
-        walletAcquiredAt !== undefined &&
-        submittedAt !== undefined &&
-        submittedAt !== 0 &&
+        processingAt &&
+        bundledAt &&
+        dispatchedAt &&
+        walletAcquiredAt &&
+        submittedAt &&
         processingAt <= bundledAt &&
         bundledAt <= dispatchedAt &&
         dispatchedAt <= walletAcquiredAt &&
@@ -65,11 +63,11 @@ export function computeInclusionTimings(
         submittedMs: submittedAt
             ? blockReceivedTimestamp - submittedAt
             : undefined,
-        bundleBuildMs: hasBreakdown ? bundledAt - processingAt : undefined,
-        handOffMs: hasBreakdown ? dispatchedAt - bundledAt : undefined,
-        walletWaitMs: hasBreakdown
-            ? walletAcquiredAt - dispatchedAt
-            : undefined,
-        submissionMs: hasBreakdown ? submittedAt - walletAcquiredAt : undefined
+        ...(hasBreakdown && {
+            bundleBuildMs: bundledAt - processingAt,
+            handOffMs: dispatchedAt - bundledAt,
+            walletWaitMs: walletAcquiredAt - dispatchedAt,
+            submissionMs: submittedAt - walletAcquiredAt
+        })
     }
 }

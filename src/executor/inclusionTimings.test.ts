@@ -211,24 +211,22 @@ describe("computeInclusionTimings", () => {
             BLOCK_RECEIVED_TIMESTAMP
         )
 
-        expect(timings).toEqual({
+        // Strict: the four breakdown keys are absent, not set to undefined.
+        expect(timings).toStrictEqual({
             inclusionTimeMs: 760,
             totalMs: 760,
             validationMs: undefined,
             outstandingMs: undefined,
             processingMs: undefined,
-            submittedMs: undefined,
-            bundleBuildMs: undefined,
-            handOffMs: undefined,
-            walletWaitMs: undefined,
-            submissionMs: undefined
+            submittedMs: undefined
         })
     })
 
     it("omits the breakdown for a rotated record whose new executor stamps follow the old submittedAt", () => {
         // submittedAt is the original successful submission; dispatchedAt and
         // walletAcquiredAt are from a later rotation pass through
-        // sendBundleToExecutor, which (per D3) does not move submittedAt.
+        // sendBundleToExecutor, which does not move submittedAt (see the
+        // stamp rule in userOpInfoSchema).
         const timings = computeInclusionTimings(
             baseUserOpInfo({ dispatchedAt: 2000, walletAcquiredAt: 2100 }),
             BLOCK_RECEIVED_TIMESTAMP

@@ -5,7 +5,7 @@ import type {
 } from "@alto/types"
 import type { Address, Hex } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { ExecutorManager } from "./executorManager"
+import { ExecutorManager, summarizePass } from "./executorManager"
 import { computeInclusionTimings } from "./inclusionTimings"
 
 // Importing ExecutorManager reaches utils/logger, which builds a Logtail
@@ -555,16 +555,17 @@ describe("updateTransactionCostMetrics", () => {
 })
 
 // The tick reaches only this.opsCount, this.config, this.mempool.getBundles,
-// this.sendBundleToExecutor, this.logger and this.bundlingMode, so a stand-in
-// suffices. bundlingMode "manual" keeps it from re-arming its own setTimeout;
-// in "auto" the timer calls this.autoScalingBundling, which runs the real tick.
-type AutoScalingBundling = (tickDueAt?: number) => Promise<void>
+// this.sendBundleToExecutor, this.logger, this.bundlingMode and the real
+// scheduleNextTick and logTickLateness, so a stand-in suffices. bundlingMode
+// "manual" keeps it from re-arming its own setTimeout; in "auto" the timer
+// calls this.autoScalingBundling, which runs the real tick.
+const tickMethods = ExecutorManager.prototype as unknown as {
+    autoScalingBundling: () => Promise<void>
+    scheduleNextTick: (interval: number) => void
+    logTickLateness: (dueAt: number) => void
+}
 
-const autoScalingBundling = (
-    ExecutorManager.prototype as unknown as {
-        autoScalingBundling: AutoScalingBundling
-    }
-).autoScalingBundling
+const autoScalingBundling = tickMethods.autoScalingBundling
 
 const makeTick = (config: Record<string, unknown>, wallets = 10) => {
     const getBundles = vi.fn(async (): Promise<unknown[]> => [])
@@ -579,9 +580,10 @@ const makeTick = (config: Record<string, unknown>, wallets = 10) => {
         sendBundleToExecutor,
         logger,
         bundlingMode: "manual",
+        scheduleNextTick: tickMethods.scheduleNextTick,
+        logTickLateness: tickMethods.logTickLateness,
         autoScalingBundling: vi.fn(
-            (tickDueAt?: number): Promise<void> =>
-                autoScalingBundling.call(manager, tickDueAt)
+            (): Promise<void> => autoScalingBundling.call(manager)
         )
     }
 
@@ -677,10 +679,13 @@ describe("autoScalingBundling", () => {
     })
 
     it("logs an empty pass that was slow", async () => {
-        vi.spyOn(performance, "now")
-            .mockReturnValueOnce(0)
-            .mockReturnValueOnce(80)
-        const { manager, logger } = makeTick({})
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const { manager, getBundles, logger } = makeTick({})
+        getBundles.mockImplementation(() => {
+            clock += 80
+            return Promise.resolve([])
+        })
 
         await autoScalingBundling.call(manager)
 
@@ -696,34 +701,33 @@ describe("autoScalingBundling", () => {
         )
     })
 
-    // 49.999 rounds to 50.00, so only the unrounded time keeps it quiet.
-    it.each([
-        { elapsedMs: 49.999, logged: false },
-        { elapsedMs: 50, logged: true }
-    ])(
-        "compares the unrounded empty-pass time ($elapsedMs ms, logged: $logged)",
-        async ({ elapsedMs, logged }) => {
-            vi.spyOn(performance, "now")
-                .mockReturnValueOnce(0)
-                .mockReturnValueOnce(elapsedMs)
-            const { manager, logger } = makeTick({})
+    // Arms one tick at monotonic 0 with a 100ms interval (due at 100), then
+    // fires it with the monotonic clock at firedAt. The fired tick runs in
+    // manual mode, so it arms no successor.
+    const fireScheduledTick = async (firedAt: number) => {
+        vi.useFakeTimers()
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const tick = makeTick({
+            minBundleInterval: 100,
+            maxBundleInterval: 100
+        })
+        tick.manager.bundlingMode = "auto"
+        await autoScalingBundling.call(tick.manager)
 
-            await autoScalingBundling.call(manager)
-
-            expect(
-                loggedSteps(logger.info).includes("bundling.getBundles")
-            ).toBe(logged)
-        }
-    )
+        tick.manager.bundlingMode = "manual"
+        clock = firedAt
+        await vi.advanceTimersByTimeAsync(100)
+        await tick.manager.autoScalingBundling.mock.results[0]?.value
+        return tick
+    }
 
     it("logs a late timer tick on the monotonic clock", async () => {
-        vi.spyOn(performance, "now").mockReturnValue(1000)
-        // A wall clock far from the monotonic one must not move lateness.
-        vi.spyOn(Date, "now").mockReturnValue(5_000_000)
-        const { manager, logger } = makeTick({})
+        // The fake wall clock advances exactly by the timer delay, so only
+        // the monotonic clock can see the 120ms.
+        const { manager, logger } = await fireScheduledTick(220)
 
-        await autoScalingBundling.call(manager, 880)
-
+        expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
         expect(logger.info).toHaveBeenCalledWith(
             { step: "bundling.tickLate", lateMs: 120 },
             "[timing] bundling.tickLate"
@@ -736,11 +740,9 @@ describe("autoScalingBundling", () => {
     ])(
         "applies the late-tick threshold at $lateMs ms (logged: $logged)",
         async ({ lateMs, logged }) => {
-            vi.spyOn(performance, "now").mockReturnValue(1000)
-            const { manager, logger } = makeTick({})
+            const { manager, logger } = await fireScheduledTick(100 + lateMs)
 
-            await autoScalingBundling.call(manager, 1000 - lateMs)
-
+            expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
             const lateLines = logger.info.mock.calls.filter(
                 ([fields]) => fields.step === "bundling.tickLate"
             )
@@ -756,35 +758,6 @@ describe("autoScalingBundling", () => {
             )
         }
     )
-
-    it("reports no lateness for a manual-to-auto call after a long pause", async () => {
-        vi.useFakeTimers()
-        let clock = 0
-        vi.spyOn(performance, "now").mockImplementation(() => clock)
-        const setBundlingMode = ExecutorManager.prototype.setBundlingMode
-        const { manager, logger } = makeTick({
-            minBundleInterval: 100,
-            maxBundleInterval: 100
-        })
-        manager.bundlingMode = "auto"
-
-        // An initial call has no due time; it arms a tick due at 100.
-        await autoScalingBundling.call(manager)
-        // Switched to manual: the armed tick fires on time and ends the loop.
-        manager.bundlingMode = "manual"
-        clock = 100
-        await vi.advanceTimersByTimeAsync(100)
-        expect(vi.getTimerCount()).toBe(0)
-
-        // Long pause, then back to auto: the old due time must not be reused.
-        clock = 1_000_000
-        await setBundlingMode.call(manager, "auto")
-        await manager.autoScalingBundling.mock.results.at(-1)?.value
-
-        expect(manager.autoScalingBundling).toHaveBeenLastCalledWith()
-        expect(loggedSteps(logger.info)).not.toContain("bundling.tickLate")
-        vi.clearAllTimers()
-    })
 
     it("arms the next due time from the end of the pass in auto mode", async () => {
         vi.useFakeTimers()
@@ -809,7 +782,7 @@ describe("autoScalingBundling", () => {
         clock = 600
         await vi.advanceTimersByTimeAsync(1)
         expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
-        expect(manager.autoScalingBundling).toHaveBeenCalledWith(600)
+        expect(manager.autoScalingBundling).toHaveBeenCalledWith()
         await manager.autoScalingBundling.mock.results[0]?.value
         // Fired on time.
         expect(loggedSteps(logger.info)).not.toContain("bundling.tickLate")
@@ -831,14 +804,16 @@ describe("autoScalingBundling", () => {
     })
 
     it("logs a failed pass with its duration and rethrows the original error", async () => {
-        vi.spyOn(performance, "now")
-            .mockReturnValueOnce(0)
-            .mockReturnValueOnce(30)
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
         const { manager, getBundles, logger, sendBundleToExecutor } = makeTick(
             {}
         )
         const error = new Error("store unavailable")
-        getBundles.mockRejectedValue(error)
+        getBundles.mockImplementation(() => {
+            clock += 30
+            return Promise.reject(error)
+        })
 
         await expect(autoScalingBundling.call(manager)).rejects.toBe(error)
 
@@ -949,10 +924,43 @@ const makeSend = () => {
             metrics: {
                 bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) }
             },
-            getBaseFee: ExecutorManager.prototype.getBaseFee
+            getBaseFee: ExecutorManager.prototype.getBaseFee,
+            acquireWallet: (
+                ExecutorManager.prototype as unknown as {
+                    acquireWallet: unknown
+                }
+            ).acquireWallet
         }
     }
 }
+
+describe("summarizePass", () => {
+    const oneOpBundle = () => makeBundle([makeUserOpInfo(USER_OP_A)])
+
+    // 49.999 would round to 50.00, so the threshold must see the raw time.
+    it.each([0, 49.999])("stays quiet for an empty pass of %s ms", (ms) => {
+        expect(summarizePass([], ms)).toBeUndefined()
+    })
+
+    it.each([50, 80])("logs an empty pass of %s ms", (ms) => {
+        expect(summarizePass([], ms)).toEqual({
+            bundleCount: 0,
+            userOpCount: 0
+        })
+    })
+
+    it("always logs a pass that produced bundles, with its counts", () => {
+        const twoOpBundle = makeBundle([
+            makeUserOpInfo(USER_OP_A),
+            makeUserOpInfo(USER_OP_B)
+        ])
+
+        expect(summarizePass([oneOpBundle(), twoOpBundle], 0)).toEqual({
+            bundleCount: 2,
+            userOpCount: 3
+        })
+    })
+})
 
 describe("sendBundleToExecutor stage stamps", () => {
     const sendBundleToExecutor = (

@@ -799,18 +799,26 @@ export const userOpInfoSchema = z.object({
     userOpHash: hexData32Schema,
     // Lifecycle timestamps (Date.now() epoch ms). receivedAt is stamped at
     // RPC handler entry; addedToMempool at outstanding entry; processingAt
-    // when picked for a bundle; submittedAt when the bundle tx is broadcast.
-    // bundledAt, dispatchedAt and walletAcquiredAt split processingAt to
-    // submittedAt into stages for the inclusion log. Optional so records
-    // serialized before this change keep deserializing.
+    // when picked for a bundle; bundledAt when that bundle is complete in the
+    // bundling pass; dispatchedAt when sendBundleToExecutor takes the bundle;
+    // walletAcquiredAt when it has obtained an executor wallet; submittedAt
+    // when the bundle tx is broadcast. processingAt through submittedAt split
+    // processingMs into four stages for the inclusion log. All but
+    // addedToMempool are optional so records serialized before they existed
+    // keep deserializing.
+    //
+    // Stamp rule: once an op is placed in a bundle, that record never returns
+    // to outstanding. Resubmission rebuilds it via mempool.add (fresh stamps,
+    // keeping only receivedAt and the reentry flag); every other write-back
+    // to outstanding (skip, carry, repeat guard, prior-slot guard, conflict)
+    // only touches records that were never placed; and
+    // rotation re-sends the same record. So processingAt and bundledAt, set
+    // when the op is placed, are overwritten, while dispatchedAt,
+    // walletAcquiredAt and submittedAt keep their first value, so a rotated
+    // record keeps its original chain.
     receivedAt: z.number().optional(),
     addedToMempool: z.number(),
     processingAt: z.number().optional(),
-    // Stage stamps that split processingMs in the inclusion log:
-    // bundledAt when the op's bundle is complete in the bundling pass,
-    // dispatchedAt when sendBundleToExecutor takes the bundle, and
-    // walletAcquiredAt when it has obtained an executor wallet. All optional
-    // so records serialized before this change keep deserializing.
     bundledAt: z.number().optional(),
     dispatchedAt: z.number().optional(),
     walletAcquiredAt: z.number().optional(),

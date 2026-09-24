@@ -4,6 +4,7 @@ import type {
     BundlingMode,
     HexData32,
     SubmittedBundleInfo,
+    UserOpInfo,
     UserOperationBundle
 } from "@alto/types"
 import type { GasPriceParameters } from "@alto/types"
@@ -12,6 +13,7 @@ import {
     type Metrics,
     runWithLogContext,
     scaleBigIntByPercent,
+    stampFirst,
     timed
 } from "@alto/utils"
 import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
@@ -29,8 +31,23 @@ const RPM_WINDOW = 60000 // 1 minute window in ms
 // is logged only when it took at least this long, so idle ticks stay quiet.
 const EMPTY_PASS_LOG_THRESHOLD_MS = 50
 // Log timer-callback lateness. A slow previous pass delays timer arming
-// and is measured by passMs, not by this threshold.
+// and is measured by bundling.getBundles, not by this threshold.
 const TICK_LATE_LOG_THRESHOLD_MS = 50
+
+const countUserOps = (bundles: UserOperationBundle[]): number =>
+    bundles.reduce((sum, bundle) => sum + bundle.userOps.length, 0)
+
+// Success-line fields for the bundling.getBundles timing, or undefined to
+// keep a fast empty pass quiet. ms is unrounded, so 49.999 stays quiet.
+export function summarizePass(
+    bundles: UserOperationBundle[],
+    ms: number
+): { bundleCount: number; userOpCount: number } | undefined {
+    if (bundles.length === 0 && ms < EMPTY_PASS_LOG_THRESHOLD_MS) {
+        return undefined
+    }
+    return { bundleCount: bundles.length, userOpCount: countUserOps(bundles) }
+}
 
 // While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
 // emit an error log every this-many reconcile ticks so a permanently wedged
@@ -141,23 +158,12 @@ export class ExecutorManager {
         }
     }
 
-    async autoScalingBundling(tickDueAt?: number) {
+    async autoScalingBundling() {
         // The re-arming setTimeout below inherits whatever context the
         // caller had (e.g. the debug_bundler_setBundlingMode RPC flow) and
         // would keep it forever. A fresh literal here keeps every tick, and
         // its successor timer, on a stable context.
-        // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: linear tick flow; the timing try/catch and log guard add branches, and splitting it would scatter the pass-timing logic
         return await runWithLogContext({ flow: "bundling" }, async () => {
-            if (tickDueAt !== undefined) {
-                const lateMs = performance.now() - tickDueAt
-                if (lateMs >= TICK_LATE_LOG_THRESHOLD_MS) {
-                    this.logger.info(
-                        { step: "bundling.tickLate", lateMs },
-                        "[timing] bundling.tickLate"
-                    )
-                }
-            }
-
             const now = Date.now()
             this.opsCount = this.opsCount.filter(
                 (timestamp) => now - timestamp < RPM_WINDOW
@@ -175,48 +181,19 @@ export class ExecutorManager {
                 Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
             )
 
-            const passStart = performance.now()
-            let bundles: UserOperationBundle[]
-            try {
-                bundles = await this.mempool.getBundles(bundleBudget)
-            } catch (err) {
-                this.logger.warn(
-                    {
-                        step: "bundling.getBundles",
-                        ms: Number((performance.now() - passStart).toFixed(2)),
-                        bundleBudget,
-                        err: err instanceof Error ? err.message : String(err)
-                    },
-                    "[timing] bundling.getBundles failed"
-                )
-                throw err
-            }
-            const passElapsedMs = performance.now() - passStart
-            const passMs = Number(passElapsedMs.toFixed(2))
-
-            const userOpCount = bundles.reduce(
-                (sum, bundle) => sum + bundle.userOps.length,
-                0
+            const bundles = await timed(
+                this.logger,
+                "bundling.getBundles",
+                { bundleBudget },
+                () => this.mempool.getBundles(bundleBudget),
+                { summarize: summarizePass }
             )
-            if (
-                bundles.length > 0 ||
-                passElapsedMs >= EMPTY_PASS_LOG_THRESHOLD_MS
-            ) {
-                this.logger.info(
-                    {
-                        step: "bundling.getBundles",
-                        ms: passMs,
-                        bundleBudget,
-                        bundleCount: bundles.length,
-                        userOpCount
-                    },
-                    "[timing] bundling.getBundles"
-                )
-            }
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
-                this.opsCount.push(...new Array(userOpCount).fill(Date.now()))
+                this.opsCount.push(
+                    ...new Array(countUserOps(bundles)).fill(Date.now())
+                )
             }
 
             // Send bundles to executor
@@ -233,10 +210,29 @@ export class ExecutorManager {
             )
 
             if (this.bundlingMode === "auto") {
-                const dueAt = performance.now() + nextInterval
-                setTimeout(() => this.autoScalingBundling(dueAt), nextInterval)
+                this.scheduleNextTick(nextInterval)
             }
         })
+    }
+
+    // Lateness is measured here, where the delay is created, on the
+    // monotonic clock.
+    private scheduleNextTick(interval: number) {
+        const dueAt = performance.now() + interval
+        setTimeout(() => {
+            this.logTickLateness(dueAt)
+            this.autoScalingBundling()
+        }, interval)
+    }
+
+    private logTickLateness(dueAt: number) {
+        const lateMs = performance.now() - dueAt
+        if (lateMs >= TICK_LATE_LOG_THRESHOLD_MS) {
+            this.logger.info(
+                { step: "bundling.tickLate", lateMs },
+                "[timing] bundling.tickLate"
+            )
+        }
     }
 
     startWatchingBlocks(): void {
@@ -341,6 +337,19 @@ export class ExecutorManager {
         return await this.gasPriceManager.getBaseFee()
     }
 
+    // Times the wallet wait and stamps walletAcquiredAt (first value wins;
+    // see the stamp rule on userOpInfoSchema).
+    private async acquireWallet(userOps: UserOpInfo[], entryPoint: Address) {
+        const wallet = await timed(
+            this.logger,
+            "bundle.getWallet",
+            { entryPoint, bundleSize: userOps.length },
+            () => this.senderManager.getWallet()
+        )
+        stampFirst(userOps, "walletAcquiredAt", Date.now())
+        return wallet
+    }
+
     async sendBundleToExecutor(
         userOpBundle: UserOperationBundle
     ): Promise<Hex | undefined> {
@@ -349,36 +358,21 @@ export class ExecutorManager {
             return undefined
         }
 
-        // First value wins (??=), like submittedAt, so the inclusion-log
-        // breakdown stays with the original submitted record even if the
-        // bundle is later rotated back through here.
-        const dispatchedAt = Date.now()
-        for (const userOpInfo of userOps) {
-            userOpInfo.dispatchedAt ??= dispatchedAt
-        }
+        // First value wins; see the stamp rule on userOpInfoSchema.
+        stampFirst(userOps, "dispatchedAt", Date.now())
 
         return await runWithLogContext(
             {
                 flow: "bundle",
                 userOpHashes: userOps.map((op) => op.userOpHash)
             },
-            // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: existing recovery flow plus wallet-timing stamps; refactoring is out of scope for instrumentation
             async () => {
                 // Own userOp recovery on ANY unexpected throw so a single RPC failure
                 // can't orphan them (this is invoked fire-and-forget by callers). The
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await timed(
-                    this.logger,
-                    "bundle.getWallet",
-                    { entryPoint, bundleSize: userOps.length },
-                    () => this.senderManager.getWallet()
-                )
-                const walletAcquiredAt = Date.now()
-                for (const userOpInfo of userOps) {
-                    userOpInfo.walletAcquiredAt ??= walletAcquiredAt
-                }
+                const wallet = await this.acquireWallet(userOps, entryPoint)
                 let bundleSubmitted = false
                 try {
                     const bundleCtx = {
