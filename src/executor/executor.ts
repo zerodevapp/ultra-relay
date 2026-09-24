@@ -117,22 +117,35 @@ export class Executor {
             resubmitMultiplierCeiling,
             legacyTransactions,
             chainType,
-            arbitrumGasBidMultiplier
+            arbitrumGasBidMultiplier,
+            arbitrumPriorityFeePerGas
         } = this.config
 
-        // Arbtirum's sequencer orders based on first come first serve.
-        // Because of this, maxFee/maxPriorityFee is ignored and the bundler *always* pays the network's baseFee.
-        // The bundler need to set a large enough gasBid to account for network baseFee fluctuations.
-        // GasBid = min(maxFee, base + priority)
+        // Arbitrum charges min(maxFee, baseFee + priorityFee). maxFee carries
+        // headroom for baseFee moves between estimation and inclusion. The
+        // priority fee is a separate, configurable bid (default 0): with
+        // priority ordering live the tip is collected, and a tip equal to
+        // maxFee made every bundle pay the whole headroom.
         if (chainType === "arbitrum") {
+            const resubmitPercent =
+                100n + 20n * BigInt(bundle.submissionAttempts)
             const scaledBaseFee = scaleBigIntByPercent(
                 networkBaseFee,
-                100n + 20n * BigInt(bundle.submissionAttempts)
+                resubmitPercent
+            )
+            // Scaled with retries too, so a non-zero tip still clears the
+            // replacement-price rule on resubmission.
+            const priorityFee = scaleBigIntByPercent(
+                arbitrumPriorityFeePerGas,
+                resubmitPercent
             )
 
             return {
-                maxFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier,
-                maxPriorityFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier
+                maxFeePerGas: maxBigInt(
+                    scaledBaseFee * arbitrumGasBidMultiplier,
+                    scaledBaseFee + priorityFee
+                ),
+                maxPriorityFeePerGas: priorityFee
             }
         }
 

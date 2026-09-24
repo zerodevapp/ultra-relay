@@ -457,6 +457,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "5"
     },
+    "arbitrum-priority-fee-per-gas": {
+        description:
+            "Priority fee (in gwei) bid on Arbitrum networks. Arbitrum collects it under priority ordering, so keep 0 unless inclusion position matters more than cost",
+        type: "string",
+        require: false,
+        default: "0"
+    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",

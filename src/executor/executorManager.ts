@@ -701,9 +701,14 @@ export class ExecutorManager {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
+        // On Arbitrum the tip is our configured bid, not a market estimate
+        // (the network estimate floors a 0 tip to maxFee/200), so only the
+        // fee cap can be too low there. Comparing tips would flag every
+        // zero-tip bundle as underpriced and replace it each block.
         const isGasPriceTooLow =
             maxFeePerGas < networkGasPrice.maxFeePerGas ||
-            maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
+            (this.config.chainType !== "arbitrum" &&
+                maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas)
 
         const isStuck =
             Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
