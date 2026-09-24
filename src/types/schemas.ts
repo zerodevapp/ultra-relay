@@ -800,10 +800,20 @@ export const userOpInfoSchema = z.object({
     // Lifecycle timestamps (Date.now() epoch ms). receivedAt is stamped at
     // RPC handler entry; addedToMempool at outstanding entry; processingAt
     // when picked for a bundle; submittedAt when the bundle tx is broadcast.
-    // Optional so records serialized before this change keep deserializing.
+    // bundledAt, dispatchedAt and walletAcquiredAt split processingAt to
+    // submittedAt into stages for the inclusion log. Optional so records
+    // serialized before this change keep deserializing.
     receivedAt: z.number().optional(),
     addedToMempool: z.number(),
     processingAt: z.number().optional(),
+    // Stage stamps that split processingMs in the inclusion log:
+    // bundledAt when the op's bundle is complete in the bundling pass,
+    // dispatchedAt when sendBundleToExecutor takes the bundle, and
+    // walletAcquiredAt when it has obtained an executor wallet. All optional
+    // so records serialized before this change keep deserializing.
+    bundledAt: z.number().optional(),
+    dispatchedAt: z.number().optional(),
+    walletAcquiredAt: z.number().optional(),
     submittedAt: z.number().optional(),
     // Set when a userOp re-enters the mempool after a failed cycle; demotes its
     // transition logs to debug so retries don't repeat the info lines.

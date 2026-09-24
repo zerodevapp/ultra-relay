@@ -25,6 +25,12 @@ import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
+// Pass timing is logged for every pass that produced a bundle; an empty pass
+// is logged only when it took at least this long, so idle ticks stay quiet.
+const EMPTY_PASS_LOG_THRESHOLD_MS = 50
+// Log timer-callback lateness. A slow previous pass delays timer arming
+// and is measured by passMs, not by this threshold.
+const TICK_LATE_LOG_THRESHOLD_MS = 50
 
 // While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
 // emit an error log every this-many reconcile ticks so a permanently wedged
@@ -135,12 +141,23 @@ export class ExecutorManager {
         }
     }
 
-    async autoScalingBundling() {
+    async autoScalingBundling(tickDueAt?: number) {
         // The re-arming setTimeout below inherits whatever context the
         // caller had (e.g. the debug_bundler_setBundlingMode RPC flow) and
         // would keep it forever. A fresh literal here keeps every tick, and
         // its successor timer, on a stable context.
+        // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: linear tick flow; the timing try/catch and log guard add branches, and splitting it would scatter the pass-timing logic
         return await runWithLogContext({ flow: "bundling" }, async () => {
+            if (tickDueAt !== undefined) {
+                const lateMs = performance.now() - tickDueAt
+                if (lateMs >= TICK_LATE_LOG_THRESHOLD_MS) {
+                    this.logger.info(
+                        { step: "bundling.tickLate", lateMs },
+                        "[timing] bundling.tickLate"
+                    )
+                }
+            }
+
             const now = Date.now()
             this.opsCount = this.opsCount.filter(
                 (timestamp) => now - timestamp < RPM_WINDOW
@@ -157,15 +174,49 @@ export class ExecutorManager {
                 1,
                 Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
             )
-            const bundles = await this.mempool.getBundles(bundleBudget)
+
+            const passStart = performance.now()
+            let bundles: UserOperationBundle[]
+            try {
+                bundles = await this.mempool.getBundles(bundleBudget)
+            } catch (err) {
+                this.logger.warn(
+                    {
+                        step: "bundling.getBundles",
+                        ms: Number((performance.now() - passStart).toFixed(2)),
+                        bundleBudget,
+                        err: err instanceof Error ? err.message : String(err)
+                    },
+                    "[timing] bundling.getBundles failed"
+                )
+                throw err
+            }
+            const passElapsedMs = performance.now() - passStart
+            const passMs = Number(passElapsedMs.toFixed(2))
+
+            const userOpCount = bundles.reduce(
+                (sum, bundle) => sum + bundle.userOps.length,
+                0
+            )
+            if (
+                bundles.length > 0 ||
+                passElapsedMs >= EMPTY_PASS_LOG_THRESHOLD_MS
+            ) {
+                this.logger.info(
+                    {
+                        step: "bundling.getBundles",
+                        ms: passMs,
+                        bundleBudget,
+                        bundleCount: bundles.length,
+                        userOpCount
+                    },
+                    "[timing] bundling.getBundles"
+                )
+            }
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
-                const totalOps = bundles.reduce(
-                    (sum, bundle) => sum + bundle.userOps.length,
-                    0
-                )
-                this.opsCount.push(...new Array(totalOps).fill(Date.now()))
+                this.opsCount.push(...new Array(userOpCount).fill(Date.now()))
             }
 
             // Send bundles to executor
@@ -182,7 +233,8 @@ export class ExecutorManager {
             )
 
             if (this.bundlingMode === "auto") {
-                setTimeout(this.autoScalingBundling.bind(this), nextInterval)
+                const dueAt = performance.now() + nextInterval
+                setTimeout(() => this.autoScalingBundling(dueAt), nextInterval)
             }
         })
     }
@@ -297,18 +349,36 @@ export class ExecutorManager {
             return undefined
         }
 
+        // First value wins (??=), like submittedAt, so the inclusion-log
+        // breakdown stays with the original submitted record even if the
+        // bundle is later rotated back through here.
+        const dispatchedAt = Date.now()
+        for (const userOpInfo of userOps) {
+            userOpInfo.dispatchedAt ??= dispatchedAt
+        }
+
         return await runWithLogContext(
             {
                 flow: "bundle",
                 userOpHashes: userOps.map((op) => op.userOpHash)
             },
+            // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: existing recovery flow plus wallet-timing stamps; refactoring is out of scope for instrumentation
             async () => {
                 // Own userOp recovery on ANY unexpected throw so a single RPC failure
                 // can't orphan them (this is invoked fire-and-forget by callers). The
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await this.senderManager.getWallet()
+                const wallet = await timed(
+                    this.logger,
+                    "bundle.getWallet",
+                    { entryPoint, bundleSize: userOps.length },
+                    () => this.senderManager.getWallet()
+                )
+                const walletAcquiredAt = Date.now()
+                for (const userOpInfo of userOps) {
+                    userOpInfo.walletAcquiredAt ??= walletAcquiredAt
+                }
                 let bundleSubmitted = false
                 try {
                     const bundleCtx = {

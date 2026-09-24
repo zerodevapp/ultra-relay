@@ -1069,6 +1069,13 @@ export class Mempool {
                 }
 
                 if (currentBundle.userOps.length > 0) {
+                    // Assigned (not ??=) like processingAt: stamped every
+                    // time the pass places the op, so a re-picked record
+                    // cannot carry a stale value.
+                    const bundledAt = Date.now()
+                    for (const userOpInfo of currentBundle.userOps) {
+                        userOpInfo.bundledAt = bundledAt
+                    }
                     bundles.push(currentBundle)
                     for (const slot of currentBundleSlots) {
                         slotsInPriorBundles.add(slot)
