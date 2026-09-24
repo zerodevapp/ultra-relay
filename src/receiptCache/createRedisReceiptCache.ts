@@ -7,6 +7,7 @@ import Redis from "ioredis"
 import { type Hex, toHex } from "viem"
 import { getRedisKeys } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
+import { REDIS_OPTIONS } from "../utils/redis-options"
 import type { ReceiptCache } from "./index"
 
 const serializeReceipt = (receipt: UserOperationReceipt): string => {
@@ -34,7 +35,7 @@ export const createRedisReceiptCache = ({
     logger: Logger
 }): ReceiptCache => {
     const REDIS_TIMEOUT = 100 // 100ms timeout for all Redis operations
-    const redis = new Redis(redisEndpoint)
+    const redis = new Redis(redisEndpoint, REDIS_OPTIONS)
     const redisKeys = getRedisKeys(config)
     const keyPrefix = redisKeys.userOpReceiptCachePrefix
 

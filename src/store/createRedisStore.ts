@@ -9,6 +9,7 @@ import {
     type UserOperation,
     userOperationSchema
 } from "../types/schemas"
+import { REDIS_OPTIONS } from "../utils/redis-options"
 import { isVersion06, isVersion07 } from "../utils/userop"
 import { RedisHash } from "./createRedisOutstandingStore"
 import { createMemoryStore } from "./createStore"
@@ -59,7 +60,7 @@ export const createRedisStore = ({
     entryPoint: Address
     redisEndpoint: string
 }): Store => {
-    const redis = new Redis(redisEndpoint, {})
+    const redis = new Redis(redisEndpoint, REDIS_OPTIONS)
 
     const storePrefix = getRedisStorePrefix(config)
     const factoryLookupKey = `${storePrefix}:${storeType}:factory-lookup:${entryPoint}`
