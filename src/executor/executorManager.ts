@@ -146,7 +146,18 @@ export class ExecutorManager {
                 (timestamp) => now - timestamp < RPM_WINDOW
             )
 
-            const bundles = await this.mempool.getBundles()
+            // Bounded per entry point so a deep queue cannot hold the whole
+            // tick. Every bundle beyond the wallet count only queues for a
+            // wallet with its ops parked in processing, so the wallet count
+            // is the ceiling and max-bundle-count can only lower it. Without
+            // a bound, sustained arrivals keep getBundles() from ever
+            // returning and nothing gets submitted.
+            const walletCount = this.senderManager.getAllWallets().length
+            const bundleBudget = Math.max(
+                1,
+                Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
+            )
+            const bundles = await this.mempool.getBundles(bundleBudget)
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
@@ -690,9 +701,14 @@ export class ExecutorManager {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
+        // On Arbitrum the tip is our configured bid, not a market estimate
+        // (the network estimate floors a 0 tip to maxFee/200), so only the
+        // fee cap can be too low there. Comparing tips would flag every
+        // zero-tip bundle as underpriced and replace it each block.
         const isGasPriceTooLow =
             maxFeePerGas < networkGasPrice.maxFeePerGas ||
-            maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
+            (this.config.chainType !== "arbitrum" &&
+                maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas)
 
         const isStuck =
             Date.now() - lastReplaced >= this.config.resubmitStuckTimeout

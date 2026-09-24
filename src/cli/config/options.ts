@@ -102,7 +102,7 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
     },
     "max-bundle-count": {
         description:
-            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+            "Maximum number of bundles one bundling pass may produce per entry point. Defaults to the number of executor wallets; a larger value is clamped to it, since bundles beyond the wallet count only queue for a wallet.",
         type: "number",
         require: false
     },
@@ -456,6 +456,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         type: "string",
         require: false,
         default: "5"
+    },
+    "arbitrum-priority-fee-per-gas": {
+        description:
+            "Priority fee (in gwei) bid on Arbitrum networks. Arbitrum collects it under priority ordering, so keep 0 unless inclusion position matters more than cost",
+        type: "string",
+        require: false,
+        default: "0"
     },
     "binary-search-max-retries": {
         description:

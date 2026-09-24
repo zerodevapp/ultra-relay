@@ -39,11 +39,10 @@ ever leaving main.
   release is undone by a deploy PR back to the previous one.
 - **Config.** The same JSON config file used on Render is stored in the
   values file, rendered into a ConfigMap, mounted as a file and loaded via
-  `ALTO_CONFIG`. The secret keys (`executor-private-keys`,
-  `utility-private-key`, `rpc-url`; `redis-events-queue-endpoint` and
-  `redis-events-queue-name` are commented out until the events queue moves
-  off Render, and their env mappings are optional meanwhile) are absent from
-  the file. External Secrets Operator syncs them from AWS Secrets Manager
+  `ALTO_CONFIG`. The four secret keys (`executor-private-keys`,
+  `utility-private-key`, `rpc-url`, `redis-events-queue-endpoint`) are
+  absent from the file; the queue name is plain config. External Secrets
+  Operator syncs the secrets from AWS Secrets Manager
   `k8s__ultra-relay_<variant>` (SRE's `k8s__<service>_<variant>` naming; the
   variant is the instance name without its `ultra-relay-` prefix) into a
   Kubernetes Secret whose keys are the upper-cased property names
@@ -58,7 +57,9 @@ ever leaving main.
   IPs over VPC peering using the NLB's own DNS name; we own no DNS zone.
 - **Logs** go to stdout as JSON and are collected by the cluster agent into
   Grafana. No BetterStack transport is configured on EKS.
-- **Sizing.** One replica; requests 1 CPU / 2 GiB, memory limit 4 GiB, no CPU
+- **Sizing.** One replica by default; `ultra-relay-arbitrum-ostium` runs
+  two with `enable-horizontal-scaling` (shared mempool and executor wallets
+  in Redis at the optional `REDIS_ENDPOINT` secret). Requests 1 CPU / 2 GiB, memory limit 4 GiB, no CPU
   limit; Node heap capped below the memory limit so OOM is a clean crash, not
   a kernel kill. Liveness and readiness probe `/health`; a ServiceMonitor
   scrapes `/metrics` on the same port.
@@ -127,10 +128,10 @@ by SRE before first rollout.
    `ultra-relay`; Application name `zerodev-prod-ue2-v1-ultra-relay-<instance>`.
    The values stay in this repo by decision; only the entry lives in the
    charts repo (`charts/zerodev/config/zerodev-prod-ue2-v1/config.yaml`).
-7. **[verified]** `main` has no branch protection or rulesets. Merging any
-   change under `deployments/` is therefore a production change with no
-   required review. Enabling required review on main is recommended and is
-   outside this change.
+7. `main` is branch-protected and requires an explicit approval before any
+   PR merges (confirmed by the team 2026-09-23; there are no rulesets). Deploy
+   PRs are no exception: a person approves each rollout, and that approval is
+   the deploy gate.
 8. **[verified]** OCL self-hosted runners are org-scoped to `OffchainLabs`, so
    workflows use `ubuntu-latest` while this repo stays in `zerodevapp`.
 9. The deploy-PR workflow uses the built-in `GITHUB_TOKEN`, which requires
@@ -186,8 +187,8 @@ by SRE before first rollout.
 
 ## Consequences
 
-- Merging a `deployments/` change deploys to prod. Treat those PRs as
-  production changes; a reviewer is recommended even though none is enforced.
+- Merging a `deployments/` change deploys to prod. Branch protection makes
+  each such PR, deploy PRs included, wait for an approval.
 - Adding an instance = copy a values file, create its Secrets Manager secret,
   merge (+ one SRE line if the ApplicationSet fallback is in use). Workflows
   need no change; the deploy-PR workflow globs the directory.

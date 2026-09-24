@@ -13,10 +13,13 @@ deployments/README.md). Rules enforced:
      line, so this is its contract.
   3. application.configMap.files.config["config.json"] parses as JSON and
      contains none of the secret keys (those come from Secrets Manager).
-  4. external-secret.externalSecrets["<instance>-secrets"].data holds exactly
-     the REQUIRED_MAPPINGS (secretKey, property) pairs, no duplicate
-     secretKey, each with remoteRef.key == "k8s__ultra-relay_<variant>" where
-     <variant> is the instance name without its "ultra-relay-" prefix.
+  4. external-secret.externalSecrets["<instance>-secrets"].data holds every
+     REQUIRED_MAPPINGS (secretKey, property) pair, optionally the
+     OPTIONAL_MAPPINGS pairs, nothing else and no duplicate secretKey, each
+     with remoteRef.key == "k8s__ultra-relay_<variant>" where <variant> is
+     the instance name without its "ultra-relay-" prefix. A config.json with
+     "enable-horizontal-scaling": true must map REDIS_ENDPOINT, or the
+     process exits at startup.
   5. application.deployment.volumes.config.configMap.name is
      "<instance>-config" — a copied file that keeps another instance's name
      would mount that instance's config.json.
@@ -47,10 +50,15 @@ REQUIRED_MAPPINGS = {
     "EXECUTOR_PRIVATE_KEYS": "executor-private-keys",
     "UTILITY_PRIVATE_KEY": "utility-private-key",
     "RPC_URL": "rpc-url",
-    #"REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
-    #"REDIS_EVENTS_QUEUE_NAME": "redis-events-queue-name",
+    "REDIS_EVENTS_QUEUE_ENDPOINT": "redis-events-queue-endpoint",
 }
-SECRET_KEYS = set(REQUIRED_MAPPINGS.values())
+# Mapped only by instances that need them (common.values.yaml marks the env
+# var optional). REDIS_ENDPOINT backs enable-horizontal-scaling.
+OPTIONAL_MAPPINGS = {
+    "REDIS_ENDPOINT": "redis-endpoint",
+}
+ALL_MAPPINGS = REQUIRED_MAPPINGS | OPTIONAL_MAPPINGS
+SECRET_KEYS = set(ALL_MAPPINGS.values())
 SUFFIX = ".values.yaml"
 
 
@@ -150,6 +158,7 @@ def check_instance(path: Path) -> list[str]:
         )
 
     config = dig(doc, "application", "configMap", "files", "config", "config.json")
+    parsed = {}
     if config is None:
         errors.append(f"{path}: missing application.configMap.files.config.config.json")
     else:
@@ -191,8 +200,19 @@ def check_instance(path: Path) -> list[str]:
                 errors.append(
                     f"{path}: {secret_key} must map to property {prop!r}, got {found[secret_key]!r}"
                 )
-        for secret_key in sorted(set(found) - set(REQUIRED_MAPPINGS)):
+        for secret_key, prop in OPTIONAL_MAPPINGS.items():
+            if secret_key in found and found[secret_key] != prop:
+                errors.append(
+                    f"{path}: {secret_key} must map to property {prop!r}, got {found[secret_key]!r}"
+                )
+        for secret_key in sorted(set(found) - set(ALL_MAPPINGS)):
             errors.append(f"{path}: unexpected secret mapping {secret_key}")
+        scaling = isinstance(parsed, dict) and parsed.get("enable-horizontal-scaling") is True
+        if scaling and "REDIS_ENDPOINT" not in found:
+            errors.append(
+                f"{path}: enable-horizontal-scaling needs secret mapping "
+                f"REDIS_ENDPOINT -> {OPTIONAL_MAPPINGS['REDIS_ENDPOINT']}"
+            )
 
     extras = sorted(set(ext) - {secret_name})
     if extras:
