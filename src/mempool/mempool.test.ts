@@ -174,7 +174,7 @@ const makeMetricsStub = () => {
     const gauge = { inc: vi.fn(), dec: vi.fn() }
     return {
         userOperationsInMempool: { labels: vi.fn(() => gauge) },
-        userOperationsResubmitted: { inc: vi.fn() }
+        userOperationsResubmitted: { labels: vi.fn(() => ({ inc: vi.fn() })) }
     } as unknown as Metrics
 }
 
@@ -2065,6 +2065,59 @@ describe("Mempool.getBundles", () => {
     })
 })
 
+// A promise a test settles by hand, so a pass can be held at an exact point
+// and released without a real sleep.
+type Deferred<T> = {
+    promise: Promise<T>
+    resolve: (value: T) => void
+    reject: (reason: unknown) => void
+}
+
+const deferred = <T = void>(): Deferred<T> => {
+    const handle = {} as Deferred<T>
+    handle.promise = new Promise<T>((resolve, reject) => {
+        handle.resolve = resolve
+        handle.reject = reject
+    })
+    return handle
+}
+
+// Whether a promise has settled yet. Both outcomes are consumed here, so a
+// rejection is never reported as unhandled; the caller still awaits the
+// original promise for its value or error.
+const trackSettled = (promise: Promise<unknown>): (() => boolean) => {
+    let settled = false
+    const markSettled = () => {
+        settled = true
+    }
+    promise.then(markSettled, markSettled)
+    return () => settled
+}
+
+// One macrotask turn: every microtask queued before it has run by the time it
+// resolves, and so has Node's check for unhandled rejections.
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+// Rejections nobody handled while `run` executed or within one turn after it,
+// so a detached promise that rejects late in `run` is still caught. The
+// listener is removed whatever happens.
+const collectUnhandledRejections = async (
+    run: () => Promise<void>
+): Promise<unknown[]> => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+    try {
+        await run()
+        await nextTurn()
+    } finally {
+        process.off("unhandledRejection", onUnhandled)
+    }
+    return unhandled
+}
+
 describe("userOpInfoSchema stage stamps", () => {
     // Reproduces the Redis outstanding store's serializer, which is not
     // exported (createRedisOutstandingStore.ts:19-23).
@@ -2141,5 +2194,50 @@ describe("Mempool.resubmitUserOps", () => {
         expect("dispatchedAt" in restored).toBe(false)
         expect("walletAcquiredAt" in restored).toBe(false)
         expect("submittedAt" in restored).toBe(false)
+    })
+
+    // The drop after a refused re-add is launched without await. A rejected
+    // drop must be logged rather than escape as an unhandled rejection, which
+    // shuts the process down, and must not hold up or fail resubmitUserOps.
+    it("logs a failed drop after a refused re-add and still resolves", async () => {
+        const { mempool } = makeHarness({ config: makeConfig() })
+        vi.spyOn(mempool, "add").mockResolvedValue([false, "re-add refused"])
+        const drop = deferred()
+        const dropCalls: Parameters<Mempool["dropUserOps"]>[] = []
+        // A plain stub, not vi.spyOn: a spy attaches its own handlers to the
+        // promise it returns (to record how it settled), which would hide the
+        // very unhandled rejection this test is about.
+        mempool.dropUserOps = (...args) => {
+            dropCalls.push(args)
+            return drop.promise
+        }
+        const dropError = new Error("drop failed")
+        const userOpInfo = makeUserOpInfoV06(1)
+
+        const unhandled = await collectUnhandledRejections(async () => {
+            const resubmitted = mempool.resubmitUserOps({
+                userOps: [userOpInfo],
+                entryPoint: ENTRY_POINT_V06,
+                reason: "test"
+            })
+            const isSettled = trackSettled(resubmitted)
+            await nextTurn()
+
+            // Settled while the drop is still pending: the drop stays
+            // detached, so callers see the same timing as before.
+            expect(isSettled()).toBe(true)
+            await expect(resubmitted).resolves.toBeUndefined()
+
+            drop.reject(dropError)
+        })
+
+        expect(unhandled).toEqual([])
+        expect(dropCalls).toEqual([
+            [ENTRY_POINT_V06, [{ ...userOpInfo, reason: "re-add refused" }]]
+        ])
+        expect(silentLogger.error).toHaveBeenCalledWith(
+            { err: dropError, userOpHash: hash(1) },
+            `failed to drop userOp ${hash(1)} after its re-add was refused`
+        )
     })
 })

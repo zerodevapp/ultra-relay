@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AltoConfig } from "../../createConfig"
-import { createRedisSenderManager } from "./createRedisSenderManager"
+import {
+    WalletNotFoundError,
+    createRedisSenderManager
+} from "./createRedisSenderManager"
 
 // Minimal in-memory stand-in for the four list commands the sender manager
 // uses. Hand-rolled (not ioredis-mock) so fake timers can't interfere with
@@ -73,6 +76,9 @@ const metrics = {
 
 const flush = () => new Promise<void>((r) => queueMicrotask(r))
 
+// Existing log queries match on this prefix.
+const WALLET_NOT_FOUND_MESSAGE = /^wallet not found/
+
 describe("createRedisSenderManager.getWallet", () => {
     beforeEach(() => {
         lists.clear()
@@ -142,5 +148,29 @@ describe("createRedisSenderManager.getWallet", () => {
 
         expect(wallets.map((w) => w.address)).toContain(wallet.address)
         expect(unhandled).not.toHaveBeenCalled()
+    })
+
+    it("rejects with WalletNotFoundError for an address it does not own, and does not push it back", async () => {
+        const manager = await createRedisSenderManager({
+            config,
+            metrics,
+            redisEndpoint
+        })
+        // Another instance's key sharing the queue, next in line for the pop.
+        const foreign = "0x3333333333333333333333333333333333333333"
+        const [[queueName, queue]] = [...lists.entries()]
+        queue.push(foreign)
+
+        const popped = manager.getWallet()
+
+        await expect(popped).rejects.toBeInstanceOf(WalletNotFoundError)
+        await expect(popped).rejects.toMatchObject({
+            name: "WalletNotFoundError",
+            address: foreign,
+            message: expect.stringMatching(WALLET_NOT_FOUND_MESSAGE)
+        })
+        expect(calls.rpop).toBe(1)
+        // Current behaviour: the foreign address is discarded.
+        expect(lists.get(queueName)).toEqual(wallets.map((w) => w.address))
     })
 })

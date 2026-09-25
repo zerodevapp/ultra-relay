@@ -7,6 +7,7 @@ import type { Address, Hex } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ExecutorManager, summarizePass } from "./executorManager"
 import { computeInclusionTimings } from "./inclusionTimings"
+import { WalletNotFoundError } from "./senderManager"
 
 // Importing ExecutorManager reaches utils/logger, which builds a Logtail
 // transport at module load when BETTER_STACK_TOKEN is set. vi.hoisted runs
@@ -118,7 +119,8 @@ const createHarness = (bundles: unknown[] = [createBundle()]) => {
             })
         } as any,
         senderManager: { getAllWallets: () => [] } as any,
-        bundleManager: bundleManager as any
+        bundleManager: bundleManager as any,
+        requestShutdown: vi.fn()
     })
 
     // Stops at the replacement decision: everything past it needs a real
@@ -867,14 +869,57 @@ const makeBundle = (userOps: UserOpInfo[]): UserOperationBundle => ({
     userOps
 })
 
-// Everything sendBundleToExecutor reaches on its success path.
+// One macrotask turn: every microtask queued before it has run by the time it
+// resolves, and so has Node's check for unhandled rejections.
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+// Rejections nobody handled while `run` executed or within one turn after it,
+// so a detached promise that rejects late in `run` is still caught. The
+// listener is removed whatever happens.
+const collectUnhandledRejections = async (
+    run: () => Promise<void>
+): Promise<unknown[]> => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+    try {
+        await run()
+        await nextTurn()
+    } finally {
+        process.off("unhandledRejection", onUnhandled)
+    }
+    return unhandled
+}
+
+// A recovery call a failure test may replace with a rejectingStub.
+type RecoveryCall = (...args: never[]) => Promise<unknown>
+
+// Rejects like a failing dependency, as a plain function rather than a vi.fn:
+// a Vitest mock attaches its own handlers to every promise it returns, so a
+// rejection it produced could never surface as unhandled.
+const rejectingStub = (error: Error) => {
+    const calls: unknown[][] = []
+    return {
+        calls,
+        stub: (...args: unknown[]): Promise<never> => {
+            calls.push(args)
+            return Promise.reject(error)
+        }
+    }
+}
+
+// Everything sendBundleToExecutor reaches on its success and recovery paths.
 // legacyTransactions keeps getBaseFee off the gas price manager.
 const makeSend = () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const getWallet = vi.fn(
         async (): Promise<{ address: Address }> => ({ address: EXECUTOR })
     )
-    const markWalletProcessed = vi.fn()
+    const markWalletProcessed = vi.fn().mockResolvedValue(undefined)
+    const resubmitUserOps = vi.fn().mockResolvedValue(undefined)
+    const requestShutdown = vi.fn()
     const tryGetNetworkGasPrice = vi.fn(async () => ({
         maxFeePerGas: 1n,
         maxPriorityFeePerGas: 1n
@@ -904,6 +949,8 @@ const makeSend = () => {
         logger,
         getWallet,
         markWalletProcessed,
+        resubmitUserOps,
+        requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
         bundle,
@@ -911,16 +958,25 @@ const makeSend = () => {
         markUserOpsAsSubmitted,
         manager: {
             logger,
+            requestShutdown,
+            shutdownRequested: false,
             config: {
                 legacyTransactions: true,
                 publicClient: { getTransactionCount }
             },
-            senderManager: { getWallet, markWalletProcessed },
+            senderManager: {
+                getWallet,
+                markWalletProcessed: markWalletProcessed as RecoveryCall
+            },
             gasPriceManager: { tryGetNetworkGasPrice },
             executor: { bundle },
             bundleManager: { trackBundle },
             startWatchingBlocks: vi.fn(),
-            mempool: { markUserOpsAsSubmitted, dropUserOps: vi.fn() },
+            mempool: {
+                markUserOpsAsSubmitted,
+                dropUserOps: vi.fn(),
+                resubmitUserOps: resubmitUserOps as RecoveryCall
+            },
             metrics: {
                 bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) }
             },
@@ -929,7 +985,12 @@ const makeSend = () => {
                 ExecutorManager.prototype as unknown as {
                     acquireWallet: unknown
                 }
-            ).acquireWallet
+            ).acquireWallet,
+            recoverFailedSend: (
+                ExecutorManager.prototype as unknown as {
+                    recoverFailedSend: unknown
+                }
+            ).recoverFailedSend
         }
     }
 }
@@ -1146,23 +1207,17 @@ describe("sendBundleToExecutor stage stamps", () => {
         })
     })
 
-    it("logs a failed wallet wait and still rejects before any gas lookup", async () => {
-        const {
-            manager,
-            getWallet,
-            logger,
-            markWalletProcessed,
-            tryGetNetworkGasPrice,
-            getTransactionCount,
-            bundle
-        } = makeSend()
+    it("logs a failed wallet wait, stamps no wallet time and resolves", async () => {
+        const { manager, getWallet, logger } = makeSend()
+        vi.spyOn(Date, "now").mockReturnValue(5000)
         const error = new Error("wallet pool unavailable")
         getWallet.mockRejectedValueOnce(error)
         const userOps = [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
 
+        // The recovery guard owns the failure (see the recovery tests below).
         await expect(
             sendBundleToExecutor.call(manager, makeBundle(userOps))
-        ).rejects.toBe(error)
+        ).resolves.toBeUndefined()
 
         expect(logger.warn).toHaveBeenCalledWith(
             {
@@ -1174,16 +1229,352 @@ describe("sendBundleToExecutor stage stamps", () => {
             },
             "[timing] bundle.getWallet failed"
         )
-        // getWallet runs outside the recovery guard: nothing freed or retried.
-        expect(logger.error).not.toHaveBeenCalled()
-        expect(markWalletProcessed).not.toHaveBeenCalled()
-        expect(tryGetNetworkGasPrice).not.toHaveBeenCalled()
-        expect(getTransactionCount).not.toHaveBeenCalled()
-        expect(bundle).not.toHaveBeenCalled()
+        expect(userOps.map((u) => u.dispatchedAt)).toEqual([5000, 5000])
         expect(userOps.map((u) => u.walletAcquiredAt)).toEqual([
             undefined,
             undefined
         ])
+    })
+})
+
+// Runs the real sendBundleToExecutor and hands back its promises untouched:
+// no handler is attached before the test settles them, so a rejection would
+// surface as unhandled first.
+type Dispatch = (
+    send: ReturnType<typeof makeSend>,
+    bundle: UserOperationBundle
+) => Promise<Promise<unknown>[]>
+
+const realSendBundleToExecutor = (
+    ExecutorManager.prototype as unknown as {
+        sendBundleToExecutor: (bundle: unknown) => Promise<unknown>
+    }
+).sendBundleToExecutor
+
+const dispatchDirectly: Dispatch = async (send, bundle) => [
+    realSendBundleToExecutor.call(send.manager, bundle)
+]
+
+// Through the real tick: the mocked pass returns the bundle and the tick starts
+// the real sendBundleToExecutor on it without awaiting, on the same stand-in
+// (not makeTick's stub). The stand-in returns that promise as the real method
+// would, so any handler the tick attached would run against it.
+const dispatchThroughTick: Dispatch = async (send, bundle) => {
+    const dispatched: Promise<unknown>[] = []
+    const tick = {
+        ...send.manager,
+        opsCount: [] as number[],
+        config: {
+            ...send.manager.config,
+            minBundleInterval: 0,
+            maxBundleInterval: 0
+        },
+        mempool: {
+            ...send.manager.mempool,
+            getBundles: () => Promise.resolve([bundle])
+        },
+        senderManager: {
+            ...send.manager.senderManager,
+            getAllWallets: () => [{}]
+        },
+        bundlingMode: "manual",
+        sendBundleToExecutor: (handed: UserOperationBundle) => {
+            const sent = realSendBundleToExecutor.call(tick, handed)
+            dispatched.push(sent)
+            return sent
+        }
+    }
+
+    await autoScalingBundling.call(tick)
+
+    return dispatched
+}
+
+const makeUserOps = () => [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
+
+// What the recovery guard hands back to the mempool for a failed bundle.
+const requeueArgs = (
+    userOps: UserOpInfo[],
+    reason = "send_bundle_unexpected_error"
+) => ({
+    userOps,
+    entryPoint: ENTRY_POINT,
+    reason
+})
+
+// A failed wallet wait requeues under its own reason.
+const WALLET_FAILED = "wallet_acquisition_failed"
+
+// Exactly one dispatch, which resolved undefined, with nothing unhandled.
+const RESOLVED_QUIETLY = {
+    unhandled: [],
+    outcomes: [{ status: "fulfilled", value: undefined }]
+}
+
+// Another instance's key, popped from the shared Redis wallet queue.
+const FOREIGN_WALLET = "0x000000000000000000000000000000000000beef"
+
+const NOT_OWNED_LINE = [
+    { event: "executorWalletNotOwned", executor: FOREIGN_WALLET },
+    "executor wallet from the shared queue is not one of this instance's keys; shutting down so a restart can re-seed the queue"
+]
+
+describe("sendBundleToExecutor failure recovery", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    describe.each([
+        ["called directly", dispatchDirectly],
+        ["dispatched by the tick", dispatchThroughTick]
+    ] as const)("%s", (_via, dispatch) => {
+        // Dispatches one bundle and waits a turn for its detached work,
+        // recording any rejection nobody handled. Only then are the executor
+        // promises settled; allSettled keeps a rejection visible as one.
+        const run = async (
+            send: ReturnType<typeof makeSend>,
+            userOps: UserOpInfo[]
+        ) => {
+            let dispatched: Promise<unknown>[] = []
+            const unhandled = await collectUnhandledRejections(async () => {
+                dispatched = await dispatch(send, makeBundle(userOps))
+            })
+            return { unhandled, outcomes: await Promise.allSettled(dispatched) }
+        }
+
+        it("requeues a bundle whose wallet wait failed, freeing nothing", async () => {
+            const send = makeSend()
+            const error = new Error("wallet pool unavailable")
+            send.getWallet.mockRejectedValueOnce(error)
+            const userOps = makeUserOps()
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.logger.warn).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    step: "bundle.getWallet",
+                    err: error.message
+                }),
+                "[timing] bundle.getWallet failed"
+            )
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: error, executor: undefined },
+                    "unexpected error sending bundle to executor"
+                ]
+            ])
+            expect(send.resubmitUserOps.mock.calls).toEqual([
+                [requeueArgs(userOps, WALLET_FAILED)]
+            ])
+            // No wallet was acquired, so there is none to free.
+            expect(send.markWalletProcessed).not.toHaveBeenCalled()
+            expect(send.requestShutdown).not.toHaveBeenCalled()
+            expect(send.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+            expect(send.getTransactionCount).not.toHaveBeenCalled()
+            expect(send.bundle).not.toHaveBeenCalled()
+        })
+
+        it("requeues a popped wallet this instance does not own, then requests shutdown", async () => {
+            const send = makeSend()
+            const error = new WalletNotFoundError(FOREIGN_WALLET)
+            send.getWallet.mockRejectedValueOnce(error)
+            const userOps = makeUserOps()
+
+            // Resolves on every path: the restart is requested explicitly,
+            // not left to an unhandled rejection (ADR 0004).
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.requestShutdown.mock.calls).toEqual([
+                ["executorWalletNotOwned"]
+            ])
+            expect(send.resubmitUserOps.mock.calls).toEqual([
+                [requeueArgs(userOps, WALLET_FAILED)]
+            ])
+            expect(
+                send.resubmitUserOps.mock.invocationCallOrder[0]
+            ).toBeLessThan(send.requestShutdown.mock.invocationCallOrder[0])
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: error, executor: undefined },
+                    "unexpected error sending bundle to executor"
+                ],
+                NOT_OWNED_LINE
+            ])
+            expect(send.markWalletProcessed).not.toHaveBeenCalled()
+            expect(send.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+            expect(send.getTransactionCount).not.toHaveBeenCalled()
+            expect(send.bundle).not.toHaveBeenCalled()
+        })
+
+        it("requests shutdown for a wallet it does not own only after the requeue settles", async () => {
+            const send = makeSend()
+            send.getWallet.mockRejectedValueOnce(
+                new WalletNotFoundError(FOREIGN_WALLET)
+            )
+            let settleRequeue: (value: undefined) => void = () => undefined
+            send.resubmitUserOps.mockReturnValueOnce(
+                new Promise((resolve) => {
+                    settleRequeue = resolve
+                })
+            )
+
+            let dispatched: Promise<unknown>[] = []
+            const unhandled = await collectUnhandledRejections(async () => {
+                dispatched = await dispatch(send, makeBundle(makeUserOps()))
+                await nextTurn()
+                expect(send.resubmitUserOps).toHaveBeenCalledTimes(1)
+                expect(send.requestShutdown).not.toHaveBeenCalled()
+                settleRequeue(undefined)
+            })
+
+            expect(unhandled).toEqual([])
+            expect(send.requestShutdown).toHaveBeenCalledTimes(1)
+            expect(await Promise.allSettled(dispatched)).toEqual([
+                { status: "fulfilled", value: undefined }
+            ])
+        })
+
+        it("still resolves when a step after wallet acquisition throws WalletNotFoundError", async () => {
+            const send = makeSend()
+            const error = new WalletNotFoundError(FOREIGN_WALLET)
+            send.bundle.mockRejectedValueOnce(error)
+            const userOps = makeUserOps()
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.markWalletProcessed).toHaveBeenCalledTimes(1)
+            expect(send.resubmitUserOps.mock.calls).toEqual([
+                [requeueArgs(userOps)]
+            ])
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: error, executor: EXECUTOR },
+                    "unexpected error sending bundle to executor"
+                ]
+            ])
+            expect(send.requestShutdown).not.toHaveBeenCalled()
+        })
+
+        it("frees the acquired wallet, then requeues, when a pre-submit step throws", async () => {
+            const send = makeSend()
+            const wallet: { address: Address } = { address: EXECUTOR }
+            send.getWallet.mockResolvedValueOnce(wallet)
+            const error = new Error("simulation crashed")
+            send.bundle.mockRejectedValueOnce(error)
+            const userOps = makeUserOps()
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: error, executor: EXECUTOR },
+                    "unexpected error sending bundle to executor"
+                ]
+            ])
+            expect(send.markWalletProcessed).toHaveBeenCalledTimes(1)
+            expect(send.markWalletProcessed.mock.calls[0][0]).toBe(wallet)
+            expect(send.resubmitUserOps.mock.calls).toEqual([
+                [requeueArgs(userOps)]
+            ])
+            expect(
+                send.markWalletProcessed.mock.invocationCallOrder[0]
+            ).toBeLessThan(send.resubmitUserOps.mock.invocationCallOrder[0])
+            expect(send.trackBundle).not.toHaveBeenCalled()
+        })
+
+        it("leaves a tracked bundle to block reconciliation when a later step throws", async () => {
+            const send = makeSend()
+            const error = new Error("submitted write failed")
+            send.markUserOpsAsSubmitted.mockRejectedValueOnce(error)
+
+            expect(await run(send, makeUserOps())).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.trackBundle).toHaveBeenCalledTimes(1)
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: error, executor: EXECUTOR },
+                    "unexpected error sending bundle to executor"
+                ]
+            ])
+            expect(send.markWalletProcessed).not.toHaveBeenCalled()
+            expect(send.resubmitUserOps).not.toHaveBeenCalled()
+        })
+
+        it("logs a rejected requeue and still resolves", async () => {
+            const send = makeSend()
+            const walletError = new Error("wallet pool unavailable")
+            send.getWallet.mockRejectedValueOnce(walletError)
+            const requeueError = new Error("requeue failed")
+            const failingRequeue = rejectingStub(requeueError)
+            send.manager.mempool.resubmitUserOps = failingRequeue.stub
+            const userOps = makeUserOps()
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(failingRequeue.calls).toEqual([
+                [requeueArgs(userOps, WALLET_FAILED)]
+            ])
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: walletError, executor: undefined },
+                    "unexpected error sending bundle to executor"
+                ],
+                [
+                    { err: requeueError },
+                    "failed to resubmit userOps after send error"
+                ]
+            ])
+        })
+
+        it("logs a rejected wallet release and still requeues", async () => {
+            const send = makeSend()
+            const wallet: { address: Address } = { address: EXECUTOR }
+            send.getWallet.mockResolvedValueOnce(wallet)
+            const sendError = new Error("simulation crashed")
+            send.bundle.mockRejectedValueOnce(sendError)
+            const releaseError = new Error("release failed")
+            const failingRelease = rejectingStub(releaseError)
+            send.manager.senderManager.markWalletProcessed = failingRelease.stub
+            const userOps = makeUserOps()
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(failingRelease.calls).toHaveLength(1)
+            expect(failingRelease.calls[0][0]).toBe(wallet)
+            expect(send.resubmitUserOps.mock.calls).toEqual([
+                [requeueArgs(userOps)]
+            ])
+            expect(send.logger.error.mock.calls).toEqual([
+                [
+                    { err: sendError, executor: EXECUTOR },
+                    "unexpected error sending bundle to executor"
+                ],
+                [
+                    { err: releaseError },
+                    "failed to free wallet after send error"
+                ]
+            ])
+        })
+    })
+
+    it("requests shutdown once however many popped wallets it does not own", async () => {
+        const send = makeSend()
+        send.getWallet
+            .mockRejectedValueOnce(new WalletNotFoundError(FOREIGN_WALLET))
+            .mockRejectedValueOnce(new WalletNotFoundError(FOREIGN_WALLET))
+
+        await realSendBundleToExecutor.call(
+            send.manager,
+            makeBundle(makeUserOps())
+        )
+        await realSendBundleToExecutor.call(
+            send.manager,
+            makeBundle(makeUserOps())
+        )
+
+        // Both bundles are requeued; the shutdown starts once.
+        expect(send.resubmitUserOps).toHaveBeenCalledTimes(2)
+        expect(send.requestShutdown).toHaveBeenCalledTimes(1)
     })
 })
 

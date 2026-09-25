@@ -159,12 +159,23 @@ export class Mempool {
                         ...userOpInfo,
                         reason: failureReason
                     }
-                    this.dropUserOps(entryPoint, [rejectedUserOp])
+                    // Deliberately not awaited, so every caller keeps the
+                    // resolve/reject behavior it has today; the catch keeps a
+                    // failed drop from escaping as an unhandled rejection.
+                    this.dropUserOps(entryPoint, [rejectedUserOp]).catch(
+                        (err) =>
+                            this.logger.error(
+                                { err, userOpHash },
+                                `failed to drop userOp ${userOpHash} after its re-add was refused`
+                            )
+                    )
                 }
             })
         )
 
-        this.metrics.userOperationsResubmitted.inc(userOps.length)
+        this.metrics.userOperationsResubmitted
+            .labels({ reason })
+            .inc(userOps.length)
     }
 
     async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {
