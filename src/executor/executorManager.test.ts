@@ -1,6 +1,12 @@
-import type { Hex } from "viem"
-import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ExecutorManager } from "./executorManager"
+import type {
+    UserOpInfo,
+    UserOperation06,
+    UserOperationBundle
+} from "@alto/types"
+import type { Address, Hex } from "viem"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { ExecutorManager, summarizePass } from "./executorManager"
+import { computeInclusionTimings } from "./inclusionTimings"
 
 // Importing ExecutorManager reaches utils/logger, which builds a Logtail
 // transport at module load when BETTER_STACK_TOKEN is set. vi.hoisted runs
@@ -549,35 +555,51 @@ describe("updateTransactionCostMetrics", () => {
 })
 
 // The tick reaches only this.opsCount, this.config, this.mempool.getBundles,
-// this.sendBundleToExecutor and this.bundlingMode, so a stand-in suffices.
-// bundlingMode "manual" keeps it from re-arming its own setTimeout.
-type AutoScalingBundling = () => Promise<void>
+// this.sendBundleToExecutor, this.logger, this.bundlingMode and the real
+// scheduleNextTick and logTickLateness, so a stand-in suffices. bundlingMode
+// "manual" keeps it from re-arming its own setTimeout; in "auto" the timer
+// calls this.autoScalingBundling, which runs the real tick.
+const tickMethods = ExecutorManager.prototype as unknown as {
+    autoScalingBundling: () => Promise<void>
+    scheduleNextTick: (interval: number) => void
+    logTickLateness: (dueAt: number) => void
+}
 
-const autoScalingBundling = (
-    ExecutorManager.prototype as unknown as {
-        autoScalingBundling: AutoScalingBundling
-    }
-).autoScalingBundling
+const autoScalingBundling = tickMethods.autoScalingBundling
 
 const makeTick = (config: Record<string, unknown>, wallets = 10) => {
     const getBundles = vi.fn(async (): Promise<unknown[]> => [])
     const sendBundleToExecutor = vi.fn()
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
-    return {
-        getBundles,
+    const manager = {
+        opsCount: [] as number[],
+        config: { minBundleInterval: 0, maxBundleInterval: 0, ...config },
+        mempool: { getBundles },
+        senderManager: { getAllWallets: () => new Array(wallets).fill({}) },
         sendBundleToExecutor,
-        manager: {
-            opsCount: [] as number[],
-            config: { minBundleInterval: 0, maxBundleInterval: 0, ...config },
-            mempool: { getBundles },
-            senderManager: { getAllWallets: () => new Array(wallets).fill({}) },
-            sendBundleToExecutor,
-            bundlingMode: "manual"
-        }
+        logger,
+        bundlingMode: "manual",
+        scheduleNextTick: tickMethods.scheduleNextTick,
+        logTickLateness: tickMethods.logTickLateness,
+        autoScalingBundling: vi.fn(
+            (): Promise<void> => autoScalingBundling.call(manager)
+        )
     }
+
+    return { getBundles, sendBundleToExecutor, logger, manager }
 }
 
+// The step field of every line logged at one level.
+const loggedSteps = (log: ReturnType<typeof vi.fn>): unknown[] =>
+    log.mock.calls.map(([fields]) => fields.step)
+
 describe("autoScalingBundling", () => {
+    afterEach(() => {
+        vi.useRealTimers()
+        vi.restoreAllMocks()
+    })
+
     it("budgets one bundle per executor wallet when max-bundle-count is unset", async () => {
         const { manager, getBundles } = makeTick({}, 10)
 
@@ -626,6 +648,541 @@ describe("autoScalingBundling", () => {
         expect(sendBundleToExecutor.mock.calls.map(([b]) => b)).toEqual([
             bundleA,
             bundleB
+        ])
+    })
+
+    it("logs the pass duration with its bundle and userOp counts", async () => {
+        const { manager, getBundles, logger } = makeTick({})
+        getBundles.mockResolvedValue([{ userOps: [{}] }, { userOps: [{}, {}] }])
+
+        await autoScalingBundling.call(manager)
+
+        expect(logger.info).toHaveBeenCalledWith(
+            {
+                step: "bundling.getBundles",
+                ms: expect.any(Number),
+                bundleBudget: 10,
+                bundleCount: 2,
+                userOpCount: 3
+            },
+            "[timing] bundling.getBundles"
+        )
+    })
+
+    it("stays quiet for a fast empty pass", async () => {
+        vi.spyOn(performance, "now").mockReturnValue(0)
+        const { manager, logger } = makeTick({})
+
+        await autoScalingBundling.call(manager)
+
+        expect(logger.info).not.toHaveBeenCalled()
+    })
+
+    it("logs an empty pass that was slow", async () => {
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const { manager, getBundles, logger } = makeTick({})
+        getBundles.mockImplementation(() => {
+            clock += 80
+            return Promise.resolve([])
+        })
+
+        await autoScalingBundling.call(manager)
+
+        expect(logger.info).toHaveBeenCalledWith(
+            {
+                step: "bundling.getBundles",
+                ms: 80,
+                bundleBudget: 10,
+                bundleCount: 0,
+                userOpCount: 0
+            },
+            "[timing] bundling.getBundles"
+        )
+    })
+
+    // Arms one tick at monotonic 0 with a 100ms interval (due at 100), then
+    // fires it with the monotonic clock at firedAt. The fired tick runs in
+    // manual mode, so it arms no successor.
+    const fireScheduledTick = async (firedAt: number) => {
+        vi.useFakeTimers()
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const tick = makeTick({
+            minBundleInterval: 100,
+            maxBundleInterval: 100
+        })
+        tick.manager.bundlingMode = "auto"
+        await autoScalingBundling.call(tick.manager)
+
+        tick.manager.bundlingMode = "manual"
+        clock = firedAt
+        await vi.advanceTimersByTimeAsync(100)
+        await tick.manager.autoScalingBundling.mock.results[0]?.value
+        return tick
+    }
+
+    it("logs a late timer tick on the monotonic clock", async () => {
+        // The fake wall clock advances exactly by the timer delay, so only
+        // the monotonic clock can see the 120ms.
+        const { manager, logger } = await fireScheduledTick(220)
+
+        expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
+        expect(logger.info).toHaveBeenCalledWith(
+            { step: "bundling.tickLate", lateMs: 120 },
+            "[timing] bundling.tickLate"
+        )
+    })
+
+    it.each([
+        { lateMs: 49, logged: false },
+        { lateMs: 50, logged: true }
+    ])(
+        "applies the late-tick threshold at $lateMs ms (logged: $logged)",
+        async ({ lateMs, logged }) => {
+            const { manager, logger } = await fireScheduledTick(100 + lateMs)
+
+            expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
+            const lateLines = logger.info.mock.calls.filter(
+                ([fields]) => fields.step === "bundling.tickLate"
+            )
+            expect(lateLines).toEqual(
+                logged
+                    ? [
+                          [
+                              { step: "bundling.tickLate", lateMs },
+                              "[timing] bundling.tickLate"
+                          ]
+                      ]
+                    : []
+            )
+        }
+    )
+
+    it("arms the next due time from the end of the pass in auto mode", async () => {
+        vi.useFakeTimers()
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const { manager, getBundles, logger } = makeTick({
+            minBundleInterval: 100,
+            maxBundleInterval: 100
+        })
+        manager.bundlingMode = "auto"
+        // Every pass takes 500ms on the monotonic clock.
+        getBundles.mockImplementation(() => {
+            clock += 500
+            return Promise.resolve([])
+        })
+
+        await autoScalingBundling.call(manager)
+
+        // Due 100ms after the pass ended at 500, not after it started at 0.
+        await vi.advanceTimersByTimeAsync(99)
+        expect(manager.autoScalingBundling).not.toHaveBeenCalled()
+        clock = 600
+        await vi.advanceTimersByTimeAsync(1)
+        expect(manager.autoScalingBundling).toHaveBeenCalledTimes(1)
+        expect(manager.autoScalingBundling).toHaveBeenCalledWith()
+        await manager.autoScalingBundling.mock.results[0]?.value
+        // Fired on time.
+        expect(loggedSteps(logger.info)).not.toContain("bundling.tickLate")
+
+        // Manual mode arms no timer.
+        vi.clearAllTimers()
+        manager.bundlingMode = "manual"
+        await autoScalingBundling.call(manager)
+        expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it("still counts every userOp toward the rate", async () => {
+        const { manager, getBundles } = makeTick({})
+        getBundles.mockResolvedValue([{ userOps: [{}] }, { userOps: [{}, {}] }])
+
+        await autoScalingBundling.call(manager)
+
+        expect(manager.opsCount).toHaveLength(3)
+    })
+
+    it("logs a failed pass with its duration and rethrows the original error", async () => {
+        let clock = 0
+        vi.spyOn(performance, "now").mockImplementation(() => clock)
+        const { manager, getBundles, logger, sendBundleToExecutor } = makeTick(
+            {}
+        )
+        const error = new Error("store unavailable")
+        getBundles.mockImplementation(() => {
+            clock += 30
+            return Promise.reject(error)
+        })
+
+        await expect(autoScalingBundling.call(manager)).rejects.toBe(error)
+
+        expect(logger.warn).toHaveBeenCalledTimes(1)
+        expect(logger.warn).toHaveBeenCalledWith(
+            {
+                step: "bundling.getBundles",
+                ms: 30,
+                bundleBudget: 10,
+                err: error.message
+            },
+            "[timing] bundling.getBundles failed"
+        )
+        expect(logger.info).not.toHaveBeenCalled()
+        expect(sendBundleToExecutor).not.toHaveBeenCalled()
+    })
+})
+
+const ENTRY_POINT: Address = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
+const TX_HASH = hash(2)
+
+const USER_OP: UserOperation06 = {
+    sender: "0x1111111111111111111111111111111111111111",
+    nonce: 0n,
+    initCode: "0x",
+    callData: "0x",
+    callGasLimit: 6_000_000n,
+    verificationGasLimit: 350_000n,
+    preVerificationGas: 100_000n,
+    maxFeePerGas: 1n,
+    maxPriorityFeePerGas: 1n,
+    paymasterAndData: "0x",
+    signature: "0x"
+}
+
+const makeUserOpInfo = (
+    userOpHash: Hex,
+    overrides: Partial<UserOpInfo> = {}
+): UserOpInfo => ({
+    userOp: USER_OP,
+    userOpHash,
+    addedToMempool: 1000,
+    submissionAttempts: 0,
+    ...overrides
+})
+
+const makeBundle = (userOps: UserOpInfo[]): UserOperationBundle => ({
+    entryPoint: ENTRY_POINT,
+    version: "0.6",
+    submissionAttempts: 0,
+    userOps
+})
+
+// Everything sendBundleToExecutor reaches on its success path.
+// legacyTransactions keeps getBaseFee off the gas price manager.
+const makeSend = () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const getWallet = vi.fn(
+        async (): Promise<{ address: Address }> => ({ address: EXECUTOR })
+    )
+    const markWalletProcessed = vi.fn()
+    const tryGetNetworkGasPrice = vi.fn(async () => ({
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n
+    }))
+    const getTransactionCount = vi.fn(async () => 0)
+    const bundle = vi.fn(
+        async ({ userOpBundle }: { userOpBundle: UserOperationBundle }) => ({
+            success: true,
+            userOpsBundled: userOpBundle.userOps,
+            rejectedUserOps: [],
+            transactionRequest: {},
+            transactionHash: TX_HASH
+        })
+    )
+    const trackBundle = vi.fn()
+    // Mirrors the stamp in Mempool.markUserOpsAsSubmitted.
+    const markUserOpsAsSubmitted = vi.fn(
+        ({ userOps }: { userOps: UserOpInfo[] }) => {
+            for (const userOpInfo of userOps) {
+                userOpInfo.submittedAt ??= Date.now()
+            }
+            return Promise.resolve()
+        }
+    )
+
+    return {
+        logger,
+        getWallet,
+        markWalletProcessed,
+        tryGetNetworkGasPrice,
+        getTransactionCount,
+        bundle,
+        trackBundle,
+        markUserOpsAsSubmitted,
+        manager: {
+            logger,
+            config: {
+                legacyTransactions: true,
+                publicClient: { getTransactionCount }
+            },
+            senderManager: { getWallet, markWalletProcessed },
+            gasPriceManager: { tryGetNetworkGasPrice },
+            executor: { bundle },
+            bundleManager: { trackBundle },
+            startWatchingBlocks: vi.fn(),
+            mempool: { markUserOpsAsSubmitted, dropUserOps: vi.fn() },
+            metrics: {
+                bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) }
+            },
+            getBaseFee: ExecutorManager.prototype.getBaseFee,
+            acquireWallet: (
+                ExecutorManager.prototype as unknown as {
+                    acquireWallet: unknown
+                }
+            ).acquireWallet
+        }
+    }
+}
+
+describe("summarizePass", () => {
+    const oneOpBundle = () => makeBundle([makeUserOpInfo(USER_OP_A)])
+
+    // 49.999 would round to 50.00, so the threshold must see the raw time.
+    it.each([0, 49.999])("stays quiet for an empty pass of %s ms", (ms) => {
+        expect(summarizePass([], ms)).toBeUndefined()
+    })
+
+    it.each([50, 80])("logs an empty pass of %s ms", (ms) => {
+        expect(summarizePass([], ms)).toEqual({
+            bundleCount: 0,
+            userOpCount: 0
+        })
+    })
+
+    it("always logs a pass that produced bundles, with its counts", () => {
+        const twoOpBundle = makeBundle([
+            makeUserOpInfo(USER_OP_A),
+            makeUserOpInfo(USER_OP_B)
+        ])
+
+        expect(summarizePass([oneOpBundle(), twoOpBundle], 0)).toEqual({
+            bundleCount: 2,
+            userOpCount: 3
+        })
+    })
+})
+
+describe("sendBundleToExecutor stage stamps", () => {
+    const sendBundleToExecutor = (
+        ExecutorManager.prototype as unknown as {
+            sendBundleToExecutor: (bundle: unknown) => Promise<unknown>
+        }
+    ).sendBundleToExecutor
+
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it("stamps dispatchedAt on entry and walletAcquiredAt once the wallet arrives", async () => {
+        const { manager, getWallet } = makeSend()
+        const now = vi.spyOn(Date, "now").mockReturnValue(5000)
+        let releaseWallet: (wallet: { address: Address }) => void = () =>
+            undefined
+        getWallet.mockReturnValueOnce(
+            new Promise((resolve) => {
+                releaseWallet = resolve
+            })
+        )
+        const userOps = [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
+
+        const sent = sendBundleToExecutor.call(manager, makeBundle(userOps))
+
+        // Held at getWallet: dispatched, no wallet yet.
+        expect(getWallet).toHaveBeenCalledTimes(1)
+        expect(userOps.map((u) => u.dispatchedAt)).toEqual([5000, 5000])
+        expect(userOps.map((u) => u.walletAcquiredAt)).toEqual([
+            undefined,
+            undefined
+        ])
+
+        now.mockReturnValue(5100)
+        releaseWallet({ address: EXECUTOR })
+        await expect(sent).resolves.toBe(TX_HASH)
+
+        expect(userOps.map((u) => u.dispatchedAt)).toEqual([5000, 5000])
+        expect(userOps.map((u) => u.walletAcquiredAt)).toEqual([5100, 5100])
+    })
+
+    it("keeps stamps a record already carries (first value wins)", async () => {
+        const { manager } = makeSend()
+        vi.spyOn(Date, "now").mockReturnValue(5000)
+        const userOps = [
+            makeUserOpInfo(USER_OP_A, { dispatchedAt: 1, walletAcquiredAt: 2 }),
+            makeUserOpInfo(USER_OP_B)
+        ]
+
+        await sendBundleToExecutor.call(manager, makeBundle(userOps))
+
+        expect(userOps[0]).toMatchObject({
+            dispatchedAt: 1,
+            walletAcquiredAt: 2
+        })
+        expect(userOps[1]).toMatchObject({
+            dispatchedAt: 5000,
+            walletAcquiredAt: 5000
+        })
+    })
+
+    it("times the wallet wait", async () => {
+        const { manager, logger } = makeSend()
+        const userOps = [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
+
+        await sendBundleToExecutor.call(manager, makeBundle(userOps))
+
+        expect(logger.info).toHaveBeenCalledWith(
+            {
+                entryPoint: ENTRY_POINT,
+                bundleSize: 2,
+                step: "bundle.getWallet",
+                ms: expect.any(Number)
+            },
+            "[timing] bundle.getWallet"
+        )
+    })
+
+    it("returns early for an empty bundle without a wallet or stamps", async () => {
+        const { manager, getWallet, logger } = makeSend()
+        const emptyBundle = makeBundle([])
+
+        await expect(
+            sendBundleToExecutor.call(manager, emptyBundle)
+        ).resolves.toBeUndefined()
+
+        expect(getWallet).not.toHaveBeenCalled()
+        expect(logger.info).not.toHaveBeenCalled()
+        expect(emptyBundle).toEqual(makeBundle([]))
+    })
+
+    it("carries every stamp through the executor's copy so the stages sum to processingMs", async () => {
+        const { manager, getWallet, trackBundle, markUserOpsAsSubmitted } =
+            makeSend()
+        let now = 1190
+        vi.spyOn(Date, "now").mockImplementation(() => now)
+        // The wallet arrives at 1290; the broadcast is tracked at 1500.
+        getWallet.mockImplementationOnce(() => {
+            now = 1290
+            return Promise.resolve({ address: EXECUTOR })
+        })
+        trackBundle.mockImplementationOnce(() => {
+            now = 1500
+        })
+        const userOps = [
+            makeUserOpInfo(USER_OP_A, { processingAt: 1100, bundledAt: 1130 }),
+            makeUserOpInfo(USER_OP_B, { processingAt: 1120, bundledAt: 1130 })
+        ]
+
+        await sendBundleToExecutor.call(manager, makeBundle(userOps))
+
+        const submitted: UserOpInfo[] =
+            trackBundle.mock.calls[0][0].bundle.userOps
+        expect(markUserOpsAsSubmitted.mock.calls[0][0].userOps).toBe(submitted)
+        submitted.forEach((userOpInfo, i) => {
+            // A copy with the attempt counted, not the record the pass built.
+            expect(userOpInfo).not.toBe(userOps[i])
+            expect(userOpInfo).toMatchObject({
+                submissionAttempts: 1,
+                processingAt: userOps[i].processingAt,
+                bundledAt: 1130,
+                dispatchedAt: 1190,
+                walletAcquiredAt: 1290,
+                submittedAt: 1500
+            })
+        })
+
+        const timings = submitted.map((userOpInfo) =>
+            computeInclusionTimings(userOpInfo, 1760)
+        )
+        expect(timings[0]).toMatchObject({
+            processingMs: 400,
+            bundleBuildMs: 30,
+            handOffMs: 60,
+            walletWaitMs: 100,
+            submissionMs: 210
+        })
+        expect(timings[1]).toMatchObject({
+            processingMs: 380,
+            bundleBuildMs: 10,
+            handOffMs: 60,
+            walletWaitMs: 100,
+            submissionMs: 210
+        })
+        for (const t of timings) {
+            expect(
+                (t.bundleBuildMs ?? 0) +
+                    (t.handOffMs ?? 0) +
+                    (t.walletWaitMs ?? 0) +
+                    (t.submissionMs ?? 0)
+            ).toBe(t.processingMs)
+        }
+    })
+
+    it("keeps the original submission chain when a submitted record is rotated", async () => {
+        const { manager, trackBundle } = makeSend()
+        vi.spyOn(Date, "now").mockReturnValue(9000)
+        // A record from a prior successful cycle, as rotateStuckBundle passes
+        // the submitted bundle back in.
+        const userOps = [
+            makeUserOpInfo(USER_OP_A, {
+                processingAt: 1100,
+                bundledAt: 1130,
+                dispatchedAt: 1190,
+                walletAcquiredAt: 1290,
+                submittedAt: 1500,
+                submissionAttempts: 1
+            })
+        ]
+
+        await sendBundleToExecutor.call(manager, {
+            ...makeBundle(userOps),
+            submissionAttempts: 1
+        })
+
+        const [rotated] = trackBundle.mock.calls[0][0].bundle.userOps
+        expect(rotated).toMatchObject({
+            submissionAttempts: 2,
+            dispatchedAt: 1190,
+            walletAcquiredAt: 1290,
+            submittedAt: 1500
+        })
+    })
+
+    it("logs a failed wallet wait and still rejects before any gas lookup", async () => {
+        const {
+            manager,
+            getWallet,
+            logger,
+            markWalletProcessed,
+            tryGetNetworkGasPrice,
+            getTransactionCount,
+            bundle
+        } = makeSend()
+        const error = new Error("wallet pool unavailable")
+        getWallet.mockRejectedValueOnce(error)
+        const userOps = [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
+
+        await expect(
+            sendBundleToExecutor.call(manager, makeBundle(userOps))
+        ).rejects.toBe(error)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+            {
+                entryPoint: ENTRY_POINT,
+                bundleSize: 2,
+                step: "bundle.getWallet",
+                ms: expect.any(Number),
+                err: error.message
+            },
+            "[timing] bundle.getWallet failed"
+        )
+        // getWallet runs outside the recovery guard: nothing freed or retried.
+        expect(logger.error).not.toHaveBeenCalled()
+        expect(markWalletProcessed).not.toHaveBeenCalled()
+        expect(tryGetNetworkGasPrice).not.toHaveBeenCalled()
+        expect(getTransactionCount).not.toHaveBeenCalled()
+        expect(bundle).not.toHaveBeenCalled()
+        expect(userOps.map((u) => u.walletAcquiredAt)).toEqual([
+            undefined,
+            undefined
         ])
     })
 })

@@ -26,6 +26,7 @@ import { entryPoint07Abi } from "viem/account-abstraction"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import { type BundleStatus, getBundleStatus } from "./getBundleStatus"
+import { computeInclusionTimings } from "./inclusionTimings"
 
 export class BundleManager {
     private reputationManager: InterfaceReputationManager
@@ -276,35 +277,18 @@ export class BundleManager {
         entryPoint: Address,
         blockReceivedTimestamp: number
     ) {
-        const { userOpHash, userOp, submissionAttempts, addedToMempool } =
-            userOpInfo
-        const { receivedAt, processingAt, submittedAt, reentered } = userOpInfo
+        const { userOpHash, userOp, submissionAttempts } = userOpInfo
 
-        const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
-        // totalMs spans the op's whole life (receivedAt survives resubmission);
-        // validationMs is suppressed for reentered records, whose restamped
-        // addedToMempool would make the delta span the entire prior cycle.
-        const totalMs = blockReceivedTimestamp - (receivedAt ?? addedToMempool)
+        const timings = computeInclusionTimings(
+            userOpInfo,
+            blockReceivedTimestamp
+        )
+        const { inclusionTimeMs, totalMs } = timings
         this.logger.info(
             {
                 userOpHash,
                 transactionHash,
-                inclusionTimeMs,
-                totalMs,
-                validationMs:
-                    receivedAt && !reentered
-                        ? addedToMempool - receivedAt
-                        : undefined,
-                outstandingMs: processingAt
-                    ? processingAt - addedToMempool
-                    : undefined,
-                processingMs:
-                    processingAt && submittedAt
-                        ? submittedAt - processingAt
-                        : undefined,
-                submittedMs: submittedAt
-                    ? blockReceivedTimestamp - submittedAt
-                    : undefined,
+                ...timings,
                 submissionAttempts
             },
             `userOp ${userOpHash} included in tx ${transactionHash} after ${totalMs}ms (${submissionAttempts} submission attempts)`

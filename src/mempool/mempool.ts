@@ -28,7 +28,8 @@ import {
     isVersion08,
     jsonStringifyWithBigint,
     minBigInt,
-    scaleBigIntByPercent
+    scaleBigIntByPercent,
+    stampLatest
 } from "@alto/utils"
 import { type Hex, getAddress, getContract, size } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
@@ -100,6 +101,7 @@ export class Mempool {
             userOps.map(async (userOpInfo) => {
                 const { userOpHash } = userOpInfo
                 await this.store.removeProcessing({ entryPoint, userOpHash })
+                // First value wins; see the stamp rule on userOpInfoSchema.
                 userOpInfo.submittedAt ??= Date.now()
                 await this.store.addSubmitted({ entryPoint, userOpInfo })
                 await this.monitor.setUserOpStatus(userOpHash, {
@@ -1069,6 +1071,9 @@ export class Mempool {
                 }
 
                 if (currentBundle.userOps.length > 0) {
+                    // Overwritten like processingAt; see the stamp rule on
+                    // userOpInfoSchema.
+                    stampLatest(currentBundle.userOps, "bundledAt", Date.now())
                     bundles.push(currentBundle)
                     for (const slot of currentBundleSlots) {
                         slotsInPriorBundles.add(slot)

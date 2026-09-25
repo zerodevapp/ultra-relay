@@ -1,14 +1,15 @@
 import type { EventManager } from "@alto/handlers"
 import { createMempoolStore } from "@alto/store"
 import type { MempoolStore } from "@alto/store"
-import type {
-    Address,
-    InterfaceValidator,
-    UserOpInfo,
-    UserOperation,
-    UserOperation06,
-    UserOperation07,
-    UserOperationBundle
+import {
+    type Address,
+    type InterfaceValidator,
+    type UserOpInfo,
+    type UserOperation,
+    type UserOperation06,
+    type UserOperation07,
+    type UserOperationBundle,
+    userOpInfoSchema
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import {
@@ -16,7 +17,7 @@ import {
     getSerializedHandleOpsTx,
     scaleBigIntByPercent
 } from "@alto/utils"
-import { type Hex, getAddress, size } from "viem"
+import { type Hex, getAddress, size, toHex } from "viem"
 import {
     type Mock,
     type MockInstance,
@@ -172,7 +173,8 @@ const makeConfig = (overrides: Record<string, unknown> = {}) =>
 const makeMetricsStub = () => {
     const gauge = { inc: vi.fn(), dec: vi.fn() }
     return {
-        userOperationsInMempool: { labels: vi.fn(() => gauge) }
+        userOperationsInMempool: { labels: vi.fn(() => gauge) },
+        userOperationsResubmitted: { inc: vi.fn() }
     } as unknown as Metrics
 }
 
@@ -193,12 +195,16 @@ const makeHarness = ({
     config,
     validateUserOp,
     getStatus,
-    store: storeOverride
+    store: storeOverride,
+    monitor: monitorOverride,
+    eventManager: eventManagerOverride
 }: {
     config: AltoConfig
     validateUserOp?: ValidateUserOpStub
     getStatus?: () => ReputationStatus
     store?: MempoolStore
+    monitor?: Monitor
+    eventManager?: EventManager
 }) => {
     const metrics = makeMetricsStub()
     const store = storeOverride ?? createMempoolStore({ config, metrics })
@@ -208,7 +214,9 @@ const makeHarness = ({
     const reputationManager = {
         decreaseUserOpCount,
         getStatus: vi.fn(getStatus ?? (() => ReputationStatuses.ok)),
-        decreaseUserOpSeenStatus: vi.fn()
+        decreaseUserOpSeenStatus: vi.fn(),
+        increaseUserOpSeenStatus: vi.fn(),
+        replaceUserOpSeenStatus: vi.fn()
     } as unknown as InterfaceReputationManager
 
     const validateUserOpMock = vi.fn(validateUserOp ?? defaultValidateUserOp)
@@ -220,11 +228,11 @@ const makeHarness = ({
     const mempool = new Mempool({
         config,
         metrics,
-        monitor: {} as unknown as Monitor,
+        monitor: monitorOverride ?? ({} as unknown as Monitor),
         reputationManager,
         validator,
         store,
-        eventManager: {} as unknown as EventManager
+        eventManager: eventManagerOverride ?? ({} as unknown as EventManager)
     })
 
     const storeSpies = {
@@ -955,6 +963,7 @@ describe("Mempool.getBundles", () => {
             )
             expect("reentered" in restored).toBe(false)
             expect("processingAt" in restored).toBe(false)
+            expect("bundledAt" in restored).toBe(false)
         })
 
         it("B: never resets reentered on the op restored by cleanup", async () => {
@@ -1010,6 +1019,63 @@ describe("Mempool.getBundles", () => {
             expect(accepted.referencedContracts).toStrictEqual(
                 referencedContracts
             )
+        })
+    })
+
+    describe("bundledAt stamped when a bundle completes", () => {
+        let nowSpy: MockInstance<typeof Date.now>
+        let counter: number
+
+        beforeEach(() => {
+            counter = 2000
+            nowSpy = vi.spyOn(Date, "now").mockImplementation(() => counter++)
+        })
+
+        afterEach(() => {
+            nowSpy.mockRestore()
+        })
+
+        it("stamps every op in a bundle alike, strictly increasing across bundles", async () => {
+            const { mempool } = await harnessSeededWith(sevenGasOps())
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3], [4, 5, 6], [7]])
+
+            const bundledAtByBundle = bundles.map((bundle) => {
+                const stamps = bundle.userOps.map(
+                    (userOpInfo) => userOpInfo.bundledAt
+                )
+                expect(new Set(stamps).size).toBe(1)
+                for (const userOpInfo of bundle.userOps) {
+                    expect(userOpInfo.bundledAt).toBeGreaterThanOrEqual(
+                        userOpInfo.processingAt as number
+                    )
+                }
+                return stamps[0] as number
+            })
+
+            expect(bundledAtByBundle[0]).toBeLessThan(bundledAtByBundle[1])
+            expect(bundledAtByBundle[1]).toBeLessThan(bundledAtByBundle[2])
+        })
+
+        it("overwrites a stale bundledAt with the fresh bundle timestamp", async () => {
+            const staleUserOps = sevenGasOps().map((userOpInfo) =>
+                userOpInfo.userOpHash === hash(1)
+                    ? { ...userOpInfo, bundledAt: 1 }
+                    : userOpInfo
+            )
+            const { mempool } = await harnessSeededWith(staleUserOps)
+
+            const bundles = await mempool.getBundles()
+
+            const restampedOp = findById(bundles[0].userOps, 1)
+            const restOfBundle = bundles[0].userOps.filter(
+                (userOpInfo) => userOpInfo.userOpHash !== hash(1)
+            )
+
+            expect(restampedOp.bundledAt).not.toBe(1)
+            expect(restampedOp.bundledAt).toBe(restOfBundle[0].bundledAt)
         })
     })
 
@@ -1996,5 +2062,84 @@ describe("Mempool.getBundles", () => {
             ).toBe(67)
             expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
         })
+    })
+})
+
+describe("userOpInfoSchema stage stamps", () => {
+    // Reproduces the Redis outstanding store's serializer, which is not
+    // exported (createRedisOutstandingStore.ts:19-23).
+    const serializeUserOpInfo = (userOpInfo: UserOpInfo): string =>
+        JSON.stringify(userOpInfo, (_, value) =>
+            typeof value === "bigint" ? toHex(value) : value
+        )
+
+    it("round-trips bundledAt, dispatchedAt and walletAcquiredAt", () => {
+        const userOpInfo: UserOpInfo = {
+            ...makeUserOpInfoV06(1),
+            processingAt: 1100,
+            bundledAt: 1130,
+            dispatchedAt: 1190,
+            walletAcquiredAt: 1290,
+            submittedAt: 1500
+        }
+
+        const parsed = userOpInfoSchema.parse(
+            JSON.parse(serializeUserOpInfo(userOpInfo))
+        )
+
+        expect(parsed.bundledAt).toBe(1130)
+        expect(parsed.dispatchedAt).toBe(1190)
+        expect(parsed.walletAcquiredAt).toBe(1290)
+    })
+
+    it("parses a legacy record without the new stamps, leaving them absent", () => {
+        const userOpInfo = makeUserOpInfoV06(1)
+
+        const parsed = userOpInfoSchema.parse(
+            JSON.parse(serializeUserOpInfo(userOpInfo))
+        )
+
+        expect("bundledAt" in parsed).toBe(false)
+        expect("dispatchedAt" in parsed).toBe(false)
+        expect("walletAcquiredAt" in parsed).toBe(false)
+    })
+})
+
+describe("Mempool.resubmitUserOps", () => {
+    it("re-adds through add() with processing-stage stamps cleared", async () => {
+        const monitor = { setUserOpStatus: vi.fn() } as unknown as Monitor
+        const eventManager = {
+            emitAddedToMempool: vi.fn()
+        } as unknown as EventManager
+        const { mempool, store } = makeHarness({
+            config: makeConfig(),
+            monitor,
+            eventManager
+        })
+
+        const userOpInfo: UserOpInfo = {
+            ...makeUserOpInfoV06(1),
+            processingAt: 1100,
+            bundledAt: 1130,
+            dispatchedAt: 1190,
+            walletAcquiredAt: 1290,
+            submittedAt: 1500
+        }
+
+        await mempool.resubmitUserOps({
+            userOps: [userOpInfo],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "test"
+        })
+
+        const [restored] = await store.dumpOutstanding(ENTRY_POINT_V06)
+
+        expect(restored.receivedAt).toBe(900)
+        expect(restored.reentered).toBe(true)
+        expect("processingAt" in restored).toBe(false)
+        expect("bundledAt" in restored).toBe(false)
+        expect("dispatchedAt" in restored).toBe(false)
+        expect("walletAcquiredAt" in restored).toBe(false)
+        expect("submittedAt" in restored).toBe(false)
     })
 })

@@ -4,6 +4,7 @@ import type {
     BundlingMode,
     HexData32,
     SubmittedBundleInfo,
+    UserOpInfo,
     UserOperationBundle
 } from "@alto/types"
 import type { GasPriceParameters } from "@alto/types"
@@ -12,6 +13,7 @@ import {
     type Metrics,
     runWithLogContext,
     scaleBigIntByPercent,
+    stampFirst,
     timed
 } from "@alto/utils"
 import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
@@ -25,6 +27,27 @@ import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
+// Pass timing is logged for every pass that produced a bundle; an empty pass
+// is logged only when it took at least this long, so idle ticks stay quiet.
+const EMPTY_PASS_LOG_THRESHOLD_MS = 50
+// Log timer-callback lateness. A slow previous pass delays timer arming
+// and is measured by bundling.getBundles, not by this threshold.
+const TICK_LATE_LOG_THRESHOLD_MS = 50
+
+const countUserOps = (bundles: UserOperationBundle[]): number =>
+    bundles.reduce((sum, bundle) => sum + bundle.userOps.length, 0)
+
+// Success-line fields for the bundling.getBundles timing, or undefined to
+// keep a fast empty pass quiet. ms is unrounded, so 49.999 stays quiet.
+export function summarizePass(
+    bundles: UserOperationBundle[],
+    ms: number
+): { bundleCount: number; userOpCount: number } | undefined {
+    if (bundles.length === 0 && ms < EMPTY_PASS_LOG_THRESHOLD_MS) {
+        return undefined
+    }
+    return { bundleCount: bundles.length, userOpCount: countUserOps(bundles) }
+}
 
 // While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
 // emit an error log every this-many reconcile ticks so a permanently wedged
@@ -157,15 +180,20 @@ export class ExecutorManager {
                 1,
                 Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
             )
-            const bundles = await this.mempool.getBundles(bundleBudget)
+
+            const bundles = await timed(
+                this.logger,
+                "bundling.getBundles",
+                { bundleBudget },
+                () => this.mempool.getBundles(bundleBudget),
+                { summarize: summarizePass }
+            )
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
-                const totalOps = bundles.reduce(
-                    (sum, bundle) => sum + bundle.userOps.length,
-                    0
+                this.opsCount.push(
+                    ...new Array(countUserOps(bundles)).fill(Date.now())
                 )
-                this.opsCount.push(...new Array(totalOps).fill(Date.now()))
             }
 
             // Send bundles to executor
@@ -182,9 +210,29 @@ export class ExecutorManager {
             )
 
             if (this.bundlingMode === "auto") {
-                setTimeout(this.autoScalingBundling.bind(this), nextInterval)
+                this.scheduleNextTick(nextInterval)
             }
         })
+    }
+
+    // Lateness is measured here, where the delay is created, on the
+    // monotonic clock.
+    private scheduleNextTick(interval: number) {
+        const dueAt = performance.now() + interval
+        setTimeout(() => {
+            this.logTickLateness(dueAt)
+            this.autoScalingBundling()
+        }, interval)
+    }
+
+    private logTickLateness(dueAt: number) {
+        const lateMs = performance.now() - dueAt
+        if (lateMs >= TICK_LATE_LOG_THRESHOLD_MS) {
+            this.logger.info(
+                { step: "bundling.tickLate", lateMs },
+                "[timing] bundling.tickLate"
+            )
+        }
     }
 
     startWatchingBlocks(): void {
@@ -289,6 +337,19 @@ export class ExecutorManager {
         return await this.gasPriceManager.getBaseFee()
     }
 
+    // Times the wallet wait and stamps walletAcquiredAt (first value wins;
+    // see the stamp rule on userOpInfoSchema).
+    private async acquireWallet(userOps: UserOpInfo[], entryPoint: Address) {
+        const wallet = await timed(
+            this.logger,
+            "bundle.getWallet",
+            { entryPoint, bundleSize: userOps.length },
+            () => this.senderManager.getWallet()
+        )
+        stampFirst(userOps, "walletAcquiredAt", Date.now())
+        return wallet
+    }
+
     async sendBundleToExecutor(
         userOpBundle: UserOperationBundle
     ): Promise<Hex | undefined> {
@@ -296,6 +357,9 @@ export class ExecutorManager {
         if (userOps.length === 0) {
             return undefined
         }
+
+        // First value wins; see the stamp rule on userOpInfoSchema.
+        stampFirst(userOps, "dispatchedAt", Date.now())
 
         return await runWithLogContext(
             {
@@ -308,7 +372,7 @@ export class ExecutorManager {
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await this.senderManager.getWallet()
+                const wallet = await this.acquireWallet(userOps, entryPoint)
                 let bundleSubmitted = false
                 try {
                     const bundleCtx = {
