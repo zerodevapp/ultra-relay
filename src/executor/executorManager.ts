@@ -21,7 +21,7 @@ import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import type { BundleTransactionReceipt } from "./getBundleStatus"
-import type { SenderManager } from "./senderManager"
+import { type SenderManager, WalletNotFoundError } from "./senderManager"
 import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
 
@@ -106,6 +106,10 @@ export class ExecutorManager {
     private cancelsInFlight = new Set<Address>()
     private quarantineTimer: NodeJS.Timeout | undefined
     private reconciling = false
+    // Starts the process's graceful shutdown. Called at most once, guarded
+    // by shutdownRequested.
+    private requestShutdown: (reason: string) => void
+    private shutdownRequested = false
 
     constructor({
         config,
@@ -114,7 +118,8 @@ export class ExecutorManager {
         metrics,
         gasPriceManager,
         senderManager,
-        bundleManager
+        bundleManager,
+        requestShutdown
     }: {
         config: AltoConfig
         executor: Executor
@@ -123,6 +128,7 @@ export class ExecutorManager {
         gasPriceManager: GasPriceManager
         senderManager: SenderManager
         bundleManager: BundleManager
+        requestShutdown: (reason: string) => void
     }) {
         this.config = config
         this.executor = executor
@@ -138,6 +144,7 @@ export class ExecutorManager {
         this.senderManager = senderManager
         this.bundlingMode = this.config.bundleMode
         this.bundleManager = bundleManager
+        this.requestShutdown = requestShutdown
 
         if (this.bundlingMode === "auto") {
             this.autoScalingBundling()
@@ -372,9 +379,14 @@ export class ExecutorManager {
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await this.acquireWallet(userOps, entryPoint)
+                // Wallet acquisition runs inside the guard too; acquiredWallet
+                // says whether there is a wallet to free.
+                let acquiredWallet: Account | undefined
                 let bundleSubmitted = false
                 try {
+                    const wallet = await this.acquireWallet(userOps, entryPoint)
+                    acquiredWallet = wallet
+
                     const bundleCtx = {
                         entryPoint,
                         bundleSize: userOps.length,
@@ -560,39 +572,89 @@ export class ExecutorManager {
 
                     return transactionHash
                 } catch (err) {
-                    this.logger.error(
-                        { err, executor: wallet.address },
-                        "unexpected error sending bundle to executor"
-                    )
-                    // Tx not submitted/tracked -> userOps are detached and unowned, so
-                    // free the wallet and requeue them rather than dropping them. If it
-                    // was already tracked, handleBlock owns recovery -> don't resubmit.
-                    if (!bundleSubmitted) {
-                        await this.senderManager
-                            .markWalletProcessed(wallet)
-                            .catch((e) =>
-                                this.logger.error(
-                                    { err: e },
-                                    "failed to free wallet after send error"
-                                )
-                            )
-                        await this.mempool
-                            .resubmitUserOps({
-                                userOps,
-                                entryPoint,
-                                reason: "send_bundle_unexpected_error"
-                            })
-                            .catch((e) =>
-                                this.logger.error(
-                                    { err: e },
-                                    "failed to resubmit userOps after send error"
-                                )
-                            )
-                    }
-                    return undefined
+                    return await this.recoverFailedSend({
+                        err,
+                        acquiredWallet,
+                        bundleSubmitted,
+                        userOps,
+                        entryPoint
+                    })
                 }
             }
         )
+    }
+
+    // Recovery for an unexpected throw in sendBundleToExecutor: free the
+    // wallet and requeue the ops unless the bundle was already tracked.
+    // Always resolves, so no caller's handling decides whether the process
+    // restarts.
+    private async recoverFailedSend({
+        err,
+        acquiredWallet,
+        bundleSubmitted,
+        userOps,
+        entryPoint
+    }: {
+        err: unknown
+        acquiredWallet: Account | undefined
+        bundleSubmitted: boolean
+        userOps: UserOpInfo[]
+        entryPoint: Address
+    }): Promise<undefined> {
+        this.logger.error(
+            { err, executor: acquiredWallet?.address },
+            "unexpected error sending bundle to executor"
+        )
+        // Tx not submitted/tracked -> userOps are detached and unowned, so
+        // free the wallet and requeue them rather than dropping them. If it
+        // was already tracked, handleBlock owns recovery -> don't resubmit.
+        if (!bundleSubmitted) {
+            // A failed getWallet left no wallet to free.
+            if (acquiredWallet) {
+                await this.senderManager
+                    .markWalletProcessed(acquiredWallet)
+                    .catch((e) =>
+                        this.logger.error(
+                            { err: e },
+                            "failed to free wallet after send error"
+                        )
+                    )
+            }
+            await this.mempool
+                .resubmitUserOps({
+                    userOps,
+                    entryPoint,
+                    // A reason of its own, so the resubmitted counter shows
+                    // a wallet pool that keeps failing.
+                    reason: acquiredWallet
+                        ? "send_bundle_unexpected_error"
+                        : "wallet_acquisition_failed"
+                })
+                .catch((e) =>
+                    this.logger.error(
+                        { err: e },
+                        "failed to resubmit userOps after send error"
+                    )
+                )
+        }
+        // The popped address was another instance's and is gone from the
+        // shared queue. Retrying would discard one per attempt until the pool
+        // is empty, so once the ops are requeued, shut down: the restart
+        // re-seeds the queue (ADR 0004).
+        if (!acquiredWallet && err instanceof WalletNotFoundError) {
+            this.logger.error(
+                {
+                    event: "executorWalletNotOwned",
+                    executor: err.address
+                },
+                "executor wallet from the shared queue is not one of this instance's keys; shutting down so a restart can re-seed the queue"
+            )
+            if (!this.shutdownRequested) {
+                this.shutdownRequested = true
+                this.requestShutdown("executorWalletNotOwned")
+            }
+        }
+        return undefined
     }
 
     stopWatchingBlocks(): void {

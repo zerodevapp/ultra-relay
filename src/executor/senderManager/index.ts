@@ -2,7 +2,12 @@ import type { Metrics } from "@alto/utils"
 import type { Account } from "viem"
 import type { AltoConfig } from "../../createConfig"
 import { createMemorySenderManager } from "./createMemorySenderManager"
-import { createRedisSenderManager } from "./createRedisSenderManager"
+import {
+    WalletNotFoundError,
+    createRedisSenderManager
+} from "./createRedisSenderManager"
+
+export { WalletNotFoundError }
 
 export const getAvailableWallets = (config: AltoConfig) => {
     let availableWallets: Account[] = []

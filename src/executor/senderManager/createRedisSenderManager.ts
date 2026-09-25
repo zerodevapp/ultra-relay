@@ -33,6 +33,19 @@ async function createRedisQueue({
     }
 }
 
+// The popped address is not one of this instance's keys: another instance
+// shares the queue (e.g. during an executor-key rotation). The address has
+// already been popped and is not pushed back.
+export class WalletNotFoundError extends Error {
+    readonly address: string
+
+    constructor(address: string) {
+        super(`wallet not found: ${address}`)
+        this.name = "WalletNotFoundError"
+        this.address = address
+    }
+}
+
 const delay = async (delay: number) => {
     await new Promise((resolve) => setTimeout(resolve, delay))
 }
@@ -88,9 +101,9 @@ export const createRedisSenderManager = async ({
 
             const wallet = wallets.find((w) => w.address === walletAddress)
 
-            // should never happen
+            // Only when another instance's keys share the queue.
             if (!wallet) {
-                throw new Error("wallet not found")
+                throw new WalletNotFoundError(walletAddress)
             }
 
             activeWallets.add(wallet)
