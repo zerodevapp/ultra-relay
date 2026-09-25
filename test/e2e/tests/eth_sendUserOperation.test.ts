@@ -276,7 +276,7 @@ describe.each([
                 privateKey
             })
 
-            const deployHash = await client.sendUserOperation({
+            const deploymentHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -287,9 +287,14 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
-            // Ops below are prepared against the deployed account, so the
-            // factory args must be gone before they are built, else AA10.
-            await client.waitForUserOperationReceipt({ hash: deployHash })
+
+            // Submission does not imply inclusion. Preparing the next operations
+            // too early can attach stale factory data and fail with AA10.
+            const deploymentReceipt = await client.waitForUserOperationReceipt({
+                hash: deploymentHash
+            })
+            expect(deploymentReceipt.success).toBe(true)
+            expect(await client.account.isDeployed()).toBe(true)
 
             const opHashes = await Promise.all(
                 nonceKeys.map((nonceKey) =>
@@ -375,7 +380,7 @@ describe.each([
                 privateKey
             })
 
-            const deployHash = await client.sendUserOperation({
+            const deploymentHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -386,9 +391,12 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
-            // Ops below are prepared against the deployed account, so the
-            // factory args must be gone before they are built, else AA10.
-            await client.waitForUserOperationReceipt({ hash: deployHash })
+
+            const deploymentReceipt = await client.waitForUserOperationReceipt({
+                hash: deploymentHash
+            })
+            expect(deploymentReceipt.success).toBe(true)
+            expect(await client.account.isDeployed()).toBe(true)
 
             const nonceKey = 100n
             const nonceValueDiffs = [0n, 1n, 2n]
@@ -632,7 +640,7 @@ describe.each([
             const receipt =
                 await smartAccountClient.waitForUserOperationReceipt({ hash })
 
-            expect(receipt.success)
+            expect(receipt.success).toBe(true)
         })
 
         test("Should AA25 throw when sending userOp with nonce + 1", async () => {
