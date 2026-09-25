@@ -1,7 +1,12 @@
 import { type Server, createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import type { Logger } from "pino"
-import { getAbiItem, toFunctionSelector } from "viem"
+import {
+    HttpRequestError,
+    MethodNotFoundRpcError,
+    getAbiItem,
+    toFunctionSelector
+} from "viem"
 import { formatAbiItem } from "viem/utils"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { EntryPointV06Abi } from "../types/contracts"
@@ -835,5 +840,165 @@ describe("customTransport log lines", () => {
 
         expect(result).toBe(null)
         expect(lines[0].obj.result).toBe(null)
+    })
+})
+
+describe("customTransport HTTP status retries", () => {
+    type Reply = {
+        status: number
+        headers?: Record<string, string>
+        body: Record<string, unknown>
+    }
+
+    let server: Server
+    let baseUrl: string
+    let replies: Reply[] = []
+    let requestCount = 0
+
+    beforeAll(async () => {
+        server = createServer((req, res) => {
+            req.on("data", () => {})
+            req.on("end", () => {
+                const reply = replies[requestCount++]
+                res.writeHead(reply.status, {
+                    "content-type": "application/json",
+                    ...reply.headers
+                })
+                res.end(
+                    JSON.stringify({ jsonrpc: "2.0", id: 1, ...reply.body })
+                )
+            })
+        })
+        await new Promise<void>((resolve) => {
+            server.listen(0, "127.0.0.1", resolve)
+        })
+        const { port } = server.address() as AddressInfo
+        baseUrl = `http://127.0.0.1:${port}`
+    })
+
+    afterAll(async () => {
+        await new Promise<void>((resolve) => {
+            server.close(() => resolve())
+        })
+    })
+
+    const logger = {
+        isLevelEnabled: () => false,
+        info: () => {},
+        error: () => {}
+    } as unknown as Logger
+
+    const serverError = { error: { code: -32000, message: "server error" } }
+
+    const callWith = async (scripted: Reply[], retryCount: number) => {
+        replies = scripted
+        requestCount = 0
+        const transport = customTransport(baseUrl, {
+            logger,
+            retryCount,
+            retryDelay: 1
+        })({})
+        const start = performance.now()
+        let result: unknown
+        let thrown: unknown
+        try {
+            result = await transport.request({ method: "eth_chainId" })
+        } catch (error) {
+            thrown = error
+        }
+        const elapsed = performance.now() - start
+        return { result, thrown, elapsed, requests: requestCount }
+    }
+
+    it.each([429, 503])(
+        "retries an HTTP %i that carries a JSON-RPC -32000 error",
+        async (status) => {
+            const { result, requests } = await callWith(
+                [
+                    { status, body: serverError },
+                    { status: 200, body: { result: "0x1" } }
+                ],
+                1
+            )
+
+            expect(result).toBe("0x1")
+            expect(requests).toBe(2)
+        }
+    )
+
+    it("throws HttpRequestError with the status and headers", async () => {
+        const { thrown, requests } = await callWith(
+            [
+                {
+                    status: 429,
+                    headers: { "retry-after": "7" },
+                    body: serverError
+                }
+            ],
+            0
+        )
+
+        expect(requests).toBe(1)
+        expect(thrown).toBeInstanceOf(HttpRequestError)
+        const error = thrown as HttpRequestError
+        expect(error.status).toBe(429)
+        expect(error.headers?.get("retry-after")).toBe("7")
+    })
+
+    it("waits for Retry-After before retrying", async () => {
+        const { result, requests, elapsed } = await callWith(
+            [
+                {
+                    status: 429,
+                    headers: { "retry-after": "1" },
+                    body: serverError
+                },
+                { status: 200, body: { result: "0x1" } }
+            ],
+            1
+        )
+
+        expect(result).toBe("0x1")
+        expect(requests).toBe(2)
+        expect(elapsed).toBeGreaterThanOrEqual(900)
+    })
+
+    it("accepts a response larger than viem's 10 MiB default cap", async () => {
+        const large = `0x${"ab".repeat(6 * 1024 * 1024)}`
+        const { result } = await callWith(
+            [{ status: 200, body: { result: large } }],
+            0
+        )
+
+        expect(result).toBe(large)
+    })
+
+    it("keeps the typed JSON-RPC error for a non-retryable status", async () => {
+        const { thrown, requests } = await callWith(
+            [
+                {
+                    status: 400,
+                    body: { error: { code: -32601, message: "not found" } }
+                },
+                { status: 200, body: { result: "0x1" } }
+            ],
+            1
+        )
+
+        expect(requests).toBe(1)
+        expect(thrown).toBeInstanceOf(MethodNotFoundRpcError)
+    })
+
+    it("does not retry a JSON-RPC error on HTTP 200", async () => {
+        const { thrown, requests } = await callWith(
+            [
+                { status: 200, body: serverError },
+                { status: 200, body: { result: "0x1" } }
+            ],
+            1
+        )
+
+        expect(requests).toBe(1)
+        expect(thrown).not.toBeInstanceOf(HttpRequestError)
     })
 })
