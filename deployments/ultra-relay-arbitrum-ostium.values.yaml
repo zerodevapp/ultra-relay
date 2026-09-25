@@ -37,6 +37,9 @@ application:
     enabled: true
     files:
       config:
+        # TODO: make send-transaction-rpc-url an optional secret. It stays in
+        # config.json for now because the Arbitrum sequencer endpoint is public.
+        # (JSON has no comments, so this note lives here.)
         config.json: |
           {
             "entrypoints": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789,0x0000000071727De22E5E9d8BAf0edAc6f37da032",
@@ -48,13 +51,16 @@ application:
             "max-block-range": 500,
             "json": true,
             "refilling-wallets": false,
+            "redis-events-queue-name": "ur-userop-events-queue",
             "gas-price-bump": "110",
             "enforce-unique-senders-per-bundle": false,
-            "max-bundle-interval": 200,
-            "max-gas-per-bundle": "27000000",
-            "redis-events-queue-name": "ur-userop-events-queue",
+            "min-bundle-interval": 50,
+            "max-bundle-interval": 50,
+            "max-gas-per-bundle": "15000000",
             "enable-horizontal-scaling": true,
-            "redis-key-prefix": "ostium"
+            "redis-key-prefix": "ostium",
+            "arbitrum-priority-fee-per-gas": "0.03",
+            "send-transaction-rpc-url": "https://arb1-sequencer.arbitrum.io/rpc"
           }
 
 # Secrets Manager secret "k8s__ultra-relay_arbitrum-ostium" is a JSON object
