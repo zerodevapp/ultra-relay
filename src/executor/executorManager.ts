@@ -192,7 +192,13 @@ export class ExecutorManager {
                 this.logger,
                 "bundling.getBundles",
                 { bundleBudget },
-                () => this.mempool.getBundles(bundleBudget),
+                // Each completed bundle starts executor work immediately.
+                // The returned array supplies counts, never a second dispatch.
+                () =>
+                    this.mempool.getBundles(bundleBudget, (bundle) => {
+                        // biome-ignore lint/complexity/noVoid: deliberately not awaited; sendBundleToExecutor recovers every failure itself and always resolves (ADR 0004)
+                        void this.sendBundleToExecutor(bundle)
+                    }),
                 { summarize: summarizePass }
             )
 
@@ -201,11 +207,6 @@ export class ExecutorManager {
                 this.opsCount.push(
                     ...new Array(countUserOps(bundles)).fill(Date.now())
                 )
-            }
-
-            // Send bundles to executor
-            for (const bundle of bundles) {
-                this.sendBundleToExecutor(bundle)
             }
 
             const rpm = this.opsCount.length
