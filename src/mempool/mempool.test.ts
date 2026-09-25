@@ -2118,6 +2118,635 @@ const collectUnhandledRejections = async (
     return unhandled
 }
 
+describe("Mempool.getBundles onBundle", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    // Records every hand-over as it happens: the bundle object, for identity,
+    // and a copy of its ids taken inside the callback, so a later mutation
+    // cannot rewrite what the callback was actually handed.
+    const recordHandOvers = (
+        onEach?: (bundle: UserOperationBundle) => void
+    ) => {
+        const ids: number[][] = []
+        const onBundle = vi.fn((bundle: UserOperationBundle) => {
+            ids.push(bundleIds([bundle])[0])
+            onEach?.(bundle)
+        })
+        const handed = () => onBundle.mock.calls.map(([bundle]) => bundle)
+        return { onBundle, ids, handed }
+    }
+
+    // getKnownEntities runs once per bundle setup, before that bundle pops
+    // anything, so it is where a test holds or fails a pass between two
+    // bundles. `hook` sees each entry point's own running setup count and may
+    // return a gate to wait on, or throw.
+    const hookSetups = (
+        mempool: Mempool,
+        hook: (entryPoint: Address, call: number) => Promise<void> | undefined
+    ): void => {
+        const realGetKnownEntities = mempool.getKnownEntities.bind(mempool)
+        const calls = new Map<Address, number>()
+        vi.spyOn(mempool, "getKnownEntities").mockImplementation(
+            async (entryPoint) => {
+                const call = (calls.get(entryPoint) ?? 0) + 1
+                calls.set(entryPoint, call)
+                await hook(entryPoint, call)
+                return await realGetKnownEntities(entryPoint)
+            }
+        )
+    }
+
+    // getBundles only exposes the combined result, and Promise.all settles on
+    // the first rejection, so each entry point's own pass is kept here: it is
+    // the only way to await a sibling that is still running.
+    const capturePasses = (mempool: Mempool) => {
+        const realProcess = mempool.process.bind(mempool)
+        const passes = new Map<Address, Promise<UserOperationBundle[]>>()
+        vi.spyOn(mempool, "process").mockImplementation((args) => {
+            const pass = realProcess(args)
+            passes.set(args.entryPoint, pass)
+            return pass
+        })
+        return (entryPoint: Address) => {
+            const pass = passes.get(entryPoint)
+            if (!pass) {
+                throw new Error(`no pass started for ${entryPoint}`)
+            }
+            return pass
+        }
+    }
+
+    const twoEntryPointHarness = async (
+        v06UserOps: UserOpInfo[],
+        v07UserOps: UserOpInfo[]
+    ) => {
+        const harness = makeHarness({
+            config: makeConfig({
+                entrypoints: [ENTRY_POINT_V06, ENTRY_POINT_V07]
+            })
+        })
+        await seedOutstanding(harness.store, ENTRY_POINT_V06, v06UserOps)
+        await seedOutstanding(harness.store, ENTRY_POINT_V07, v07UserOps)
+        vi.clearAllMocks()
+        return harness
+    }
+
+    const v07Ops = (count: number) =>
+        Array.from({ length: count }, (_, i) => makeUserOpInfoV07(i + 1))
+
+    it("hands each bundle over once, in order, as the object it returns", async () => {
+        const { mempool } = await harnessSeededWith(sevenGasOps())
+        const stampsAtHandOver: (number | undefined)[][] = []
+        const { onBundle, ids, handed } = recordHandOvers((bundle) => {
+            stampsAtHandOver.push(
+                bundle.userOps.map((userOpInfo) => userOpInfo.bundledAt)
+            )
+        })
+
+        const bundles = await mempool.getBundles(undefined, onBundle)
+
+        expect(onBundle).toHaveBeenCalledTimes(3)
+        expect(ids).toEqual([[1, 2, 3], [4, 5, 6], [7]])
+        expect(bundleIds(bundles)).toEqual(ids)
+        for (const [index, bundle] of handed().entries()) {
+            expect(bundle).toBe(bundles[index])
+        }
+
+        // Handed over complete: every op already carries its bundle's stamp.
+        for (const stamps of stampsAtHandOver) {
+            expect(stamps.every((stamp) => stamp !== undefined)).toBe(true)
+            expect(new Set(stamps).size).toBe(1)
+        }
+    })
+
+    it("hands a bundle over before the pass packs the next", async () => {
+        const { mempool, storeSpies } = await harnessSeededWith(sevenGasOps())
+        const processingWrites: number[] = []
+        const pops: number[] = []
+        const { onBundle } = recordHandOvers(() => {
+            processingWrites.push(storeSpies.addProcessing.mock.calls.length)
+            pops.push(storeSpies.popOutstanding.mock.calls.length)
+        })
+
+        await mempool.getBundles(undefined, onBundle)
+
+        expect(processingWrites).toEqual([3, 6, 7])
+        // Bundle 1 pops ids 1-4 and carries 4; bundle 2 takes 4 from the
+        // carry, pops 5-7 and carries 7; bundle 3 takes 7 and pops nothing.
+        // A hand-over after the next bundle's first pop would read 5 first.
+        expect(pops).toEqual([4, 7, 7])
+    })
+
+    it("hands the bundle over before the budget exit writes the carry back", async () => {
+        const { mempool, storeSpies } = await harnessSeededWith(sevenGasOps())
+        const writesAtHandOver: number[] = []
+        const { onBundle, ids, handed } = recordHandOvers(() => {
+            writesAtHandOver.push(storeSpies.addOutstanding.mock.calls.length)
+        })
+
+        const bundles = await mempool.getBundles(1, onBundle)
+
+        expect(ids).toEqual([[1, 2, 3]])
+        expect(handed()[0]).toBe(bundles[0])
+        expect(writesAtHandOver).toEqual([0])
+        expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+        expect(
+            storeSpies.addOutstanding.mock.calls[0][0].userOpInfo.userOpHash
+        ).toBe(hash(4))
+    })
+
+    describe("a callback that throws before accepting ownership", () => {
+        const handOffError = new Error("executor refused the bundle")
+
+        it("requeues that bundle once, restores the carry and rethrows", async () => {
+            const { mempool, storeSpies } = await harnessSeededWith(
+                sevenGasOps()
+            )
+            const resubmit = vi
+                .spyOn(mempool, "resubmitUserOps")
+                .mockResolvedValue(undefined)
+            const { onBundle, handed } = recordHandOvers(() => {
+                throw handOffError
+            })
+
+            await expect(mempool.getBundles(undefined, onBundle)).rejects.toBe(
+                handOffError
+            )
+
+            expect(onBundle).toHaveBeenCalledTimes(1)
+            const [refused] = handed()
+            expect(bundleIds([refused])).toEqual([[1, 2, 3]])
+
+            expect(silentLogger.error).toHaveBeenCalledTimes(1)
+            expect(silentLogger.error).toHaveBeenCalledWith(
+                {
+                    err: handOffError,
+                    userOpHashes: [hash(1), hash(2), hash(3)]
+                },
+                "onBundle callback threw"
+            )
+
+            expect(resubmit).toHaveBeenCalledTimes(1)
+            expect(resubmit).toHaveBeenCalledWith({
+                entryPoint: ENTRY_POINT_V06,
+                userOps: refused.userOps,
+                reason: "bundle_handoff_failed"
+            })
+
+            // The pass stopped at the failed hand-over: nothing more was
+            // packed, and the carried op went back exactly once.
+            expect(storeSpies.addProcessing).toHaveBeenCalledTimes(3)
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            expect(
+                storeSpies.addOutstanding.mock.calls[0][0].userOpInfo.userOpHash
+            ).toBe(hash(4))
+        })
+
+        it("requeues only the refused bundle when a later hand-over throws", async () => {
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                sevenGasOps()
+            )
+            const resubmit = vi
+                .spyOn(mempool, "resubmitUserOps")
+                .mockResolvedValue(undefined)
+            let handOvers = 0
+            const { onBundle, ids } = recordHandOvers(() => {
+                handOvers++
+                if (handOvers === 2) {
+                    throw handOffError
+                }
+            })
+
+            await expect(mempool.getBundles(undefined, onBundle)).rejects.toBe(
+                handOffError
+            )
+
+            // Bundle 1 was accepted, bundle 2 refused, and nothing after it
+            // was packed.
+            expect(ids).toEqual([
+                [1, 2, 3],
+                [4, 5, 6]
+            ])
+
+            expect(silentLogger.error).toHaveBeenCalledTimes(1)
+            expect(silentLogger.error).toHaveBeenCalledWith(
+                {
+                    err: handOffError,
+                    userOpHashes: [hash(4), hash(5), hash(6)]
+                },
+                "onBundle callback threw"
+            )
+
+            expect(resubmit).toHaveBeenCalledTimes(1)
+            const [[requeued]] = resubmit.mock.calls
+            expect(requeued).toMatchObject({
+                entryPoint: ENTRY_POINT_V06,
+                reason: "bundle_handoff_failed"
+            })
+            expect(
+                requeued.userOps.map((userOpInfo) =>
+                    idOf(userOpInfo.userOpHash)
+                )
+            ).toEqual([4, 5, 6])
+
+            // The accepted bundle keeps its processing records. The refused
+            // one's are still here only because resubmitUserOps is stubbed.
+            expect(await processingIds(store, ENTRY_POINT_V06)).toEqual([
+                1, 2, 3, 4, 5, 6
+            ])
+
+            // Bundle 2 took 4 from the carry and carried 7, which went back
+            // exactly once.
+            expect(storeSpies.addProcessing).toHaveBeenCalledTimes(6)
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            expect(
+                storeSpies.addOutstanding.mock.calls[0][0].userOpInfo.userOpHash
+            ).toBe(hash(7))
+        })
+
+        it("surfaces a failed requeue instead of passing it as handed over", async () => {
+            const { mempool, storeSpies } = await harnessSeededWith(
+                sevenGasOps()
+            )
+            const recoveryError = new Error("requeue failed")
+            const resubmit = vi
+                .spyOn(mempool, "resubmitUserOps")
+                .mockRejectedValue(recoveryError)
+            const { onBundle } = recordHandOvers(() => {
+                throw handOffError
+            })
+
+            await expect(mempool.getBundles(undefined, onBundle)).rejects.toBe(
+                recoveryError
+            )
+
+            expect(onBundle).toHaveBeenCalledTimes(1)
+            expect(resubmit).toHaveBeenCalledTimes(1)
+            expect(silentLogger.error).toHaveBeenCalledWith(
+                expect.objectContaining({ err: handOffError }),
+                "onBundle callback threw"
+            )
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            expect(
+                storeSpies.addOutstanding.mock.calls[0][0].userOpInfo.userOpHash
+            ).toBe(hash(4))
+        })
+    })
+
+    it("never calls back for an empty queue", async () => {
+        const { mempool } = makeHarness({ config: makeConfig() })
+        const { onBundle } = recordHandOvers()
+
+        expect(await mempool.getBundles(undefined, onBundle)).toEqual([])
+        expect(onBundle).not.toHaveBeenCalled()
+    })
+
+    it("never calls back for a bundle every candidate skipped", async () => {
+        const { mempool, store } = await harnessSeededWith(
+            [1, 2, 3].map((id) => makeUserOpInfoV06(id))
+        )
+        withStoreCallBudget(store, 50)
+        vi.spyOn(mempool, "shouldSkip").mockImplementation(
+            ({
+                paymasterDeposit,
+                stakedEntityCount,
+                knownEntities,
+                senders,
+                storageMap
+            }) =>
+                Promise.resolve({
+                    skip: true,
+                    paymasterDeposit,
+                    stakedEntityCount,
+                    knownEntities,
+                    senders,
+                    storageMap
+                })
+        )
+        const { onBundle } = recordHandOvers()
+
+        expect(await mempool.getBundles(undefined, onBundle)).toEqual([])
+        expect(onBundle).not.toHaveBeenCalled()
+    })
+
+    describe("streaming regressions", () => {
+        it("hands bundle 1 over while bundle 2 is still being packed", async () => {
+            const { mempool } = await harnessSeededWith(sevenGasOps())
+            const secondSetup = deferred()
+            const release = deferred()
+            hookSetups(mempool, (_, call) => {
+                if (call !== 2) {
+                    return undefined
+                }
+                secondSetup.resolve()
+                return release.promise
+            })
+            const { onBundle, ids } = recordHandOvers()
+
+            const pass = mempool.getBundles(undefined, onBundle)
+            const isSettled = trackSettled(pass)
+            await secondSetup.promise
+
+            expect(ids).toEqual([[1, 2, 3]])
+            expect(isSettled()).toBe(false)
+
+            release.resolve()
+            const bundles = await pass
+
+            expect(ids).toEqual([[1, 2, 3], [4, 5, 6], [7]])
+            expect(onBundle).toHaveBeenCalledTimes(bundles.length)
+        })
+
+        it("streams each entry point on its own and still returns them in configured order", async () => {
+            const { mempool, store } = await twoEntryPointHarness(
+                sevenGasOps(),
+                v07Ops(7)
+            )
+            const release = deferred()
+            hookSetups(mempool, (entryPoint, call) =>
+                entryPoint === ENTRY_POINT_V06 && call === 1
+                    ? release.promise
+                    : undefined
+            )
+            const passFor = capturePasses(mempool)
+            const { onBundle, handed } = recordHandOvers()
+
+            const pass = mempool.getBundles(2, onBundle)
+            const isSettled = trackSettled(pass)
+
+            // The second configured entry point finishes while the first is
+            // held before its first bundle, and its hand-overs come first.
+            const v07Bundles = await passFor(ENTRY_POINT_V07)
+
+            expect(isSettled()).toBe(false)
+            expect(handed()).toHaveLength(2)
+            expect(handed()[0]).toBe(v07Bundles[0])
+            expect(handed()[1]).toBe(v07Bundles[1])
+
+            release.resolve()
+            const bundles = await pass
+
+            expect(handed().map((bundle) => bundle.entryPoint)).toEqual([
+                ENTRY_POINT_V07,
+                ENTRY_POINT_V07,
+                ENTRY_POINT_V06,
+                ENTRY_POINT_V06
+            ])
+            expect(bundles.map((bundle) => bundle.entryPoint)).toEqual([
+                ENTRY_POINT_V06,
+                ENTRY_POINT_V06,
+                ENTRY_POINT_V07,
+                ENTRY_POINT_V07
+            ])
+
+            // Identity by bundle, not by index: every returned bundle is one
+            // hand-over, and there are no others.
+            expect(handed()).toHaveLength(bundles.length)
+            for (const bundle of bundles) {
+                expect(
+                    handed().filter((other) => other === bundle)
+                ).toHaveLength(1)
+            }
+
+            // The budget of 2 applies to each entry point, not to the pass.
+            for (const entryPoint of [ENTRY_POINT_V06, ENTRY_POINT_V07]) {
+                expect(
+                    bundleIds(
+                        bundles.filter(
+                            (bundle) => bundle.entryPoint === entryPoint
+                        )
+                    )
+                ).toEqual([
+                    [1, 2, 3],
+                    [4, 5, 6]
+                ])
+                expect(await outstandingIds(store, entryPoint)).toEqual([7])
+            }
+        })
+
+        // The Redis outstanding queue stores JSON and parses it back through
+        // userOpInfoSchema (createRedisOutstandingStore.ts), so the record it
+        // pops is a fresh object sharing only the hash with the one handed
+        // over. The memory queue hands back the very object it was given.
+        const serializedCopyOf = (userOpInfo: UserOpInfo): UserOpInfo =>
+            userOpInfoSchema.parse(
+                JSON.parse(
+                    JSON.stringify(userOpInfo, (_, value) =>
+                        typeof value === "bigint" ? toHex(value) : value
+                    )
+                )
+            )
+
+        it.each([
+            {
+                record: "an in-memory record",
+                toStored: (userOpInfo: UserOpInfo) => userOpInfo,
+                sameObject: true
+            },
+            {
+                record: "a serialized copy",
+                toStored: serializedCopyOf,
+                sameObject: false
+            }
+        ])(
+            "never hands a hash over twice when $record of it re-enters mid-pass",
+            async ({ toStored, sameObject }) => {
+                const { mempool, store } = await harnessSeededWith(
+                    sevenGasOps()
+                )
+                let requeued: UserOpInfo | undefined
+                let requeue: Promise<void> | undefined
+                // Bundle 2's setup waits for the requeue, so the pass cannot
+                // reach its next pop before op 1 is back in outstanding.
+                hookSetups(mempool, (_, call) =>
+                    call === 2 ? requeue : undefined
+                )
+                const { onBundle, ids } = recordHandOvers((bundle) => {
+                    if (requeue) {
+                        return
+                    }
+                    // As its executor would after a failed attempt: out of
+                    // processing, back to outstanding, flagged reentered.
+                    const [first] = bundle.userOps
+                    first.reentered = true
+                    const record = toStored(first)
+                    requeued = record
+                    requeue = (async () => {
+                        await store.removeProcessing({
+                            entryPoint: ENTRY_POINT_V06,
+                            userOpHash: record.userOpHash
+                        })
+                        await store.addOutstanding({
+                            entryPoint: ENTRY_POINT_V06,
+                            userOpInfo: record
+                        })
+                    })()
+                })
+
+                const bundles = await mempool.getBundles(undefined, onBundle)
+
+                // Bundle 2 takes the carried op 4, then re-pops op 1, which
+                // trips the repeat guard and ends the pass.
+                expect(ids).toEqual([[1, 2, 3], [4]])
+                expect(bundleIds(bundles)).toEqual(ids)
+                expect(ids.flat().filter((id) => id === 1)).toHaveLength(1)
+
+                const outstanding = await store.dumpOutstanding(ENTRY_POINT_V06)
+                const stored = outstanding.filter(
+                    (userOpInfo) => userOpInfo.userOpHash === hash(1)
+                )
+                expect(stored).toHaveLength(1)
+                expect(stored[0].reentered).toBe(true)
+                expect(stored[0] === requeued).toBe(true)
+                expect(stored[0] === bundles[0].userOps[0]).toBe(sameObject)
+                expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                    1, 5, 6, 7
+                ])
+                expect(await processingIds(store, ENTRY_POINT_V06)).toEqual([
+                    2, 3, 4
+                ])
+            }
+        )
+
+        it("still hands a same-slot successor back instead of into a second bundle", async () => {
+            // One sender, nonces 0-6: the chain pops in nonce order.
+            const chain = Array.from({ length: 7 }, (_, i) =>
+                makeUserOpInfoV06(i + 1, {
+                    sender: senderOf(1),
+                    nonce: BigInt(i)
+                })
+            )
+            const { mempool, store, storeSpies } =
+                await harnessSeededWith(chain)
+            const writesAtHandOver: number[] = []
+            const { onBundle, ids } = recordHandOvers(() => {
+                writesAtHandOver.push(
+                    storeSpies.addOutstanding.mock.calls.length
+                )
+            })
+
+            const bundles = await mempool.getBundles(undefined, onBundle)
+
+            // Bundle 1 was already handed over when the carried nonce 3 met
+            // the guard, and the guard still sent it back and ended the pass.
+            expect(ids).toEqual([[1, 2, 3]])
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+            expect(writesAtHandOver).toEqual([0])
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            const [[written]] = storeSpies.addOutstanding.mock.calls
+            expect(written.userOpInfo.userOpHash).toBe(hash(4))
+            expect(written.userOpInfo.reentered).toBe(true)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                4, 5, 6, 7
+            ])
+        })
+
+        it("keeps a handed bundle with its owner when later packing fails", async () => {
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                sevenGasOps()
+            )
+            throwOnSetupCall(mempool, 2, "entities unavailable")
+            const resubmit = vi
+                .spyOn(mempool, "resubmitUserOps")
+                .mockResolvedValue(undefined)
+            const { onBundle, ids } = recordHandOvers()
+
+            await expect(
+                mempool.getBundles(undefined, onBundle)
+            ).rejects.toThrow("entities unavailable")
+
+            // Handed over once and left with its owner: not requeued, not
+            // handed over again.
+            expect(ids).toEqual([[1, 2, 3]])
+            expect(resubmit).not.toHaveBeenCalled()
+            expect(await processingIds(store, ENTRY_POINT_V06)).toEqual([
+                1, 2, 3
+            ])
+
+            // The carried op went back exactly once.
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            expect(
+                storeSpies.addOutstanding.mock.calls[0][0].userOpInfo.userOpHash
+            ).toBe(hash(4))
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                4, 5, 6, 7
+            ])
+        })
+
+        it("lets a held sibling hand over after getBundles rejects, once per bundle", async () => {
+            const { mempool, store, storeSpies } = await twoEntryPointHarness(
+                sevenGasOps(),
+                v07Ops(4)
+            )
+            const siblingHeld = deferred()
+            const release = deferred()
+            hookSetups(mempool, (entryPoint, call) => {
+                if (entryPoint === ENTRY_POINT_V06 && call === 2) {
+                    throw new Error("entities unavailable")
+                }
+                if (entryPoint === ENTRY_POINT_V07 && call === 1) {
+                    siblingHeld.resolve()
+                    return release.promise
+                }
+                return undefined
+            })
+            const passFor = capturePasses(mempool)
+            const resubmit = vi
+                .spyOn(mempool, "resubmitUserOps")
+                .mockResolvedValue(undefined)
+            const { onBundle, handed } = recordHandOvers()
+
+            const unhandled = await collectUnhandledRejections(async () => {
+                await expect(
+                    mempool.getBundles(undefined, onBundle)
+                ).rejects.toThrow("entities unavailable")
+                await siblingHeld.promise
+
+                // Only the failed entry point's first bundle so far.
+                expect(handed().map((bundle) => bundle.entryPoint)).toEqual([
+                    ENTRY_POINT_V06
+                ])
+
+                // getBundles has rejected, but the sibling pass was never
+                // cancelled: released now, it packs and hands over as usual.
+                release.resolve()
+                const siblingBundles = await passFor(ENTRY_POINT_V07)
+
+                expect(bundleIds(siblingBundles)).toEqual([[1, 2, 3], [4]])
+                expect(handed()).toHaveLength(3)
+                expect(handed()[1]).toBe(siblingBundles[0])
+                expect(handed()[2]).toBe(siblingBundles[1])
+            })
+
+            expect(unhandled).toEqual([])
+
+            // Each op handed over once across both entry points, and none of
+            // them requeued: every hand-over kept its owner.
+            const handedKeys = handed().flatMap((bundle) =>
+                bundle.userOps.map(
+                    (userOpInfo) =>
+                        `${bundle.entryPoint}:${userOpInfo.userOpHash}`
+                )
+            )
+            expect(new Set(handedKeys).size).toBe(handedKeys.length)
+            expect(resubmit).not.toHaveBeenCalled()
+
+            // The failed entry point's carry went back once; the sibling had
+            // nothing to write back.
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            const [[written]] = storeSpies.addOutstanding.mock.calls
+            expect(written.entryPoint).toBe(ENTRY_POINT_V06)
+            expect(written.userOpInfo.userOpHash).toBe(hash(4))
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([
+                4, 5, 6, 7
+            ])
+            expect(await outstandingIds(store, ENTRY_POINT_V07)).toEqual([])
+        })
+    })
+})
+
 describe("userOpInfoSchema stage stamps", () => {
     // Reproduces the Redis outstanding store's serializer, which is not
     // exported (createRedisOutstandingStore.ts:19-23).

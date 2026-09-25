@@ -759,8 +759,15 @@ export class Mempool {
         }
     }
 
+    // onBundle, when given, is called with each bundle the moment it is
+    // complete, while the pass goes on packing. It must be synchronous and
+    // return void: do not pass an async function. Normal return hands the
+    // bundle's ownership to the callback; it may throw only before accepting
+    // it. The returned array still lists every bundle, but for such a caller
+    // it is informational only and must not be dispatched again.
     public async getBundles(
-        maxBundleCount?: number
+        maxBundleCount?: number,
+        onBundle?: (bundle: UserOperationBundle) => void
     ): Promise<UserOperationBundle[]> {
         const bundlePromises = this.config.entrypoints.map(
             async (entryPoint) => {
@@ -768,7 +775,8 @@ export class Mempool {
                     entryPoint,
                     maxGasLimit: this.config.maxGasPerBundle,
                     minOpsPerBundle: 1,
-                    maxBundleCount
+                    maxBundleCount,
+                    onBundle
                 })
             }
         )
@@ -784,12 +792,14 @@ export class Mempool {
         maxGasLimit,
         entryPoint,
         minOpsPerBundle,
-        maxBundleCount
+        maxBundleCount,
+        onBundle
     }: {
         maxGasLimit: bigint
         entryPoint: Address
         minOpsPerBundle: number
         maxBundleCount?: number
+        onBundle?: (bundle: UserOperationBundle) => void
     }): Promise<UserOperationBundle[]> {
         // Check if there are any operations in the store
         const firstOp = await this.store.peekOutstanding(entryPoint)
@@ -803,11 +813,13 @@ export class Mempool {
         let breakLoop = false
 
         // Sender-and-nonce-key slots already placed in an EARLIER bundle of
-        // this pass. The executor dispatches every bundle from one pass
-        // concurrently and simulates each on its own, so a later nonce for one
-        // of these slots would fail AA25 before its predecessor lands and be
-        // dropped as not-found. Such an op is handed back and the pass ends;
-        // the next tick picks it up once the predecessor has had a block.
+        // this pass. Dispatch and execution can overlap across the bundles of
+        // one pass (with onBundle, an earlier bundle is already in flight
+        // while later ones are packed) and each is simulated on its own, so a
+        // later nonce for one of these slots would fail AA25 before its
+        // predecessor lands and be dropped as not-found. Such an op is handed
+        // back and the pass ends; the next tick picks it up once the
+        // predecessor has had a block.
         const slotsInPriorBundles = new Set<string>()
 
         // A userOp deferred by a bundle cap is held here rather than written
@@ -1088,6 +1100,35 @@ export class Mempool {
                     bundles.push(currentBundle)
                     for (const slot of currentBundleSlots) {
                         slotsInPriorBundles.add(slot)
+                    }
+
+                    // Hand the bundle over now, while the pass goes on to the
+                    // next one, so its executor work (wallet, gas, simulate,
+                    // broadcast) does not wait for the rest of the pass. The
+                    // callback owns the bundle on normal return. A callback
+                    // may throw only before accepting ownership. Requeue that
+                    // bundle and let the existing finally restore the carry.
+                    // Async executor recovery belongs to sendBundleToExecutor.
+                    if (onBundle) {
+                        try {
+                            onBundle(currentBundle)
+                        } catch (err) {
+                            this.logger.error(
+                                {
+                                    err,
+                                    userOpHashes: currentBundle.userOps.map(
+                                        (userOpInfo) => userOpInfo.userOpHash
+                                    )
+                                },
+                                "onBundle callback threw"
+                            )
+                            await this.resubmitUserOps({
+                                entryPoint,
+                                userOps: currentBundle.userOps,
+                                reason: "bundle_handoff_failed"
+                            })
+                            throw err
+                        }
                     }
                 }
             }
