@@ -725,7 +725,7 @@ describe("Mempool.getBundles", () => {
 
         expect(bundleIds(bundles)).toEqual([[1, 2, 3], [4, 5, 6], [7]])
         expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
-        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(7)
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(8)
         expect(storeSpies.addOutstanding).not.toHaveBeenCalled()
     })
 
@@ -747,7 +747,7 @@ describe("Mempool.getBundles", () => {
             [3, 4]
         ])
         expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
-        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(4)
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(5)
         expect(storeSpies.addOutstanding).not.toHaveBeenCalled()
 
         const capCall = debugMock.mock.calls.find(isCapEvent)
@@ -817,7 +817,7 @@ describe("Mempool.getBundles", () => {
 
         expect(bundleIds(bundles)).toEqual([[1, 2, 3], [4]])
         expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
-        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(4)
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(5)
         expect(storeSpies.addOutstanding).not.toHaveBeenCalled()
 
         // Deferring ID 4 empties the store, so a carry that leaked back into
@@ -2234,9 +2234,10 @@ describe("Mempool.getBundles onBundle", () => {
 
         expect(processingWrites).toEqual([3, 6, 7])
         // Bundle 1 pops ids 1-4 and carries 4; bundle 2 takes 4 from the
-        // carry, pops 5-7 and carries 7; bundle 3 takes 7 and pops nothing.
+        // carry, pops 5-7 and carries 7; bundle 3 takes 7, then one more pop
+        // finds the queue empty.
         // A hand-over after the next bundle's first pop would read 5 first.
-        expect(pops).toEqual([4, 7, 7])
+        expect(pops).toEqual([4, 7, 8])
     })
 
     it("hands the bundle over before the budget exit writes the carry back", async () => {
@@ -2868,5 +2869,54 @@ describe("Mempool.resubmitUserOps", () => {
             { err: dropError, userOpHash: hash(1) },
             `failed to drop userOp ${hash(1)} after its re-add was refused`
         )
+    })
+})
+
+describe("Redis round-trip pass contract", () => {
+    it("uses one peek across all bundles", async () => {
+        const { mempool, storeSpies } = await harnessSeededWith(sevenGasOps())
+        vi.clearAllMocks()
+
+        expect(bundleIds(await mempool.getBundles())).toEqual([
+            [1, 2, 3],
+            [4, 5, 6],
+            [7]
+        ])
+        expect(storeSpies.peekOutstanding).toHaveBeenCalledTimes(1)
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(8)
+    })
+
+    it("stops after an empty pop and retries on the next pass", async () => {
+        const { mempool, storeSpies } = await harnessSeededWith([
+            makeUserOpInfoV06(1)
+        ])
+        storeSpies.popOutstanding.mockResolvedValueOnce(undefined)
+        storeSpies.peekOutstanding
+            .mockResolvedValueOnce(makeUserOpInfoV06(1))
+            .mockRejectedValue(new Error("unexpected second peek"))
+
+        expect(await mempool.getBundles()).toEqual([])
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(1)
+        expect(storeSpies.peekOutstanding).toHaveBeenCalledTimes(1)
+
+        storeSpies.peekOutstanding.mockRestore()
+        expect(bundleIds(await mempool.getBundles())).toEqual([[1]])
+    })
+
+    it("hands over a partial bundle after an empty pop", async () => {
+        const { mempool, storeSpies } = await harnessSeededWith([
+            makeUserOpInfoV06(1),
+            makeUserOpInfoV06(2)
+        ])
+        storeSpies.popOutstanding
+            .mockResolvedValueOnce(makeUserOpInfoV06(1))
+            .mockResolvedValueOnce(undefined)
+        const onBundle = vi.fn()
+
+        expect(
+            bundleIds(await mempool.getBundles(undefined, onBundle))
+        ).toEqual([[1]])
+        expect(onBundle).toHaveBeenCalledTimes(1)
+        expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(2)
     })
 })

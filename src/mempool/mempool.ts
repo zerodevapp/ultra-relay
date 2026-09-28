@@ -811,6 +811,10 @@ export class Mempool {
         const bundles: UserOperationBundle[] = []
         const seenOps = new Set()
         let breakLoop = false
+        // Set by the first pop that finds nothing ready. The loops used to
+        // re-check with a peek before every pop, which on the Redis queue
+        // cost two extra round trips per op; the pop already reports empty.
+        let outstandingEmpty = false
 
         // Sender-and-nonce-key slots already placed in an EARLIER bundle of
         // this pass. Dispatch and execution can overlap across the bundles of
@@ -833,10 +837,7 @@ export class Mempool {
 
         try {
             // Process operations until no more are available or we hit maxBundleCount
-            while (
-                carriedUserOpInfo ||
-                (await this.store.peekOutstanding(entryPoint))
-            ) {
+            while (carriedUserOpInfo || !outstandingEmpty) {
                 // If maxBundles is set and we reached the limit, break
                 if (maxBundleCount && bundles.length >= maxBundleCount) {
                     break
@@ -910,10 +911,7 @@ export class Mempool {
                 }
 
                 // Keep adding ops to current bundle
-                while (
-                    carriedUserOpInfo ||
-                    (await this.store.peekOutstanding(entryPoint))
-                ) {
+                while (carriedUserOpInfo || !outstandingEmpty) {
                     let userOpInfo: UserOpInfo
                     let fromCarry = false
 
@@ -930,6 +928,7 @@ export class Mempool {
                         const poppedUserOpInfo =
                             await this.store.popOutstanding(entryPoint)
                         if (!poppedUserOpInfo) {
+                            outstandingEmpty = true
                             break
                         }
 
