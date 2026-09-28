@@ -1,0 +1,333 @@
+{
+    "versions": {
+        "node": "v22.21.1",
+        "ioredis": "5.4.1",
+        "baselineCommit": "ba8d4cf29d15e09350f7363261734fe468badac7",
+        "redis": "8.6.1"
+    },
+    "counts": [
+        {
+            "n": 1,
+            "mode": "old",
+            "writes": 12,
+            "commands": [
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange"
+            ]
+        },
+        {
+            "n": 1,
+            "mode": "lua",
+            "writes": 4,
+            "commands": ["zrange", "zrange", "eval", "evalsha"]
+        },
+        {
+            "n": 4,
+            "mode": "old",
+            "writes": 30,
+            "commands": [
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange"
+            ]
+        },
+        {
+            "n": 4,
+            "mode": "lua",
+            "writes": 7,
+            "commands": [
+                "zrange",
+                "zrange",
+                "eval",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha"
+            ]
+        },
+        {
+            "n": 12,
+            "mode": "old",
+            "writes": 78,
+            "commands": [
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange",
+                "zmpop",
+                "zrange",
+                "multi",
+                "zrem",
+                "hdel",
+                "exec",
+                "del",
+                "zrange",
+                "zrange"
+            ]
+        },
+        {
+            "n": 12,
+            "mode": "lua",
+            "writes": 15,
+            "commands": [
+                "zrange",
+                "zrange",
+                "eval",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha",
+                "evalsha"
+            ]
+        }
+    ],
+    "fees": [
+        {
+            "hex": "0xfffffffffffff7b",
+            "old": 1152921504606846800,
+            "proposed": 1152921504606846800,
+            "corrected": 1152921504606846800
+        },
+        {
+            "hex": "0x20000000000000001",
+            "old": 36893488147419103000,
+            "proposed": 18446744073709552000,
+            "corrected": 36893488147419103000
+        },
+        {
+            "hex": "0x100000000000000000000",
+            "old": 1.2089258196146292e24,
+            "proposed": 18446744073709552000,
+            "corrected": 1.2089258196146292e24
+        },
+        {
+            "hex": "0xffffffffffffffffffffffffffffffff",
+            "old": 3.402823669209385e38,
+            "proposed": 18446744073709552000,
+            "corrected": 3.402823669209385e38
+        },
+        {
+            "hex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "old": 1.157920892373162e77,
+            "proposed": 18446744073709552000,
+            "corrected": 1.157920892373162e77
+        }
+    ],
+    "cache": {
+        "cold": {
+            "writes": 1,
+            "commands": ["eval"]
+        },
+        "warm": {
+            "writes": 1,
+            "commands": ["evalsha"]
+        },
+        "afterFlush": {
+            "writes": 2,
+            "commands": ["evalsha", "eval"]
+        }
+    },
+    "races": [
+        {
+            "boundary": "beforeExec",
+            "indexed": true,
+            "members": 0,
+            "ready": null
+        },
+        {
+            "boundary": "afterExec",
+            "indexed": true,
+            "members": 0,
+            "ready": "10"
+        }
+    ],
+    "remainingAddRace": {
+        "indexed": true,
+        "members": 1,
+        "ready": null
+    },
+    "equivalence": {
+        "seeds": 40,
+        "steps": 3296,
+        "pops": 1689
+    },
+    "concurrent": {
+        "consumers": 2,
+        "popped": 40,
+        "unique": 40,
+        "remainingKeys": 0
+    },
+    "invalid": [
+        {
+            "mode": "old",
+            "indexed": true,
+            "members": 1
+        },
+        {
+            "mode": "lua",
+            "indexed": false,
+            "members": 0
+        }
+    ],
+    "completed": true
+}
