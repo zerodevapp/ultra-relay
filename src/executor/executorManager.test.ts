@@ -570,7 +570,12 @@ const tickMethods = ExecutorManager.prototype as unknown as {
 const autoScalingBundling = tickMethods.autoScalingBundling
 
 const makeTick = (config: Record<string, unknown>, wallets = 10) => {
-    const getBundles = vi.fn(async (): Promise<unknown[]> => [])
+    const getBundles = vi.fn(
+        async (
+            _budget: number,
+            _onBundle: (bundle: unknown) => void
+        ): Promise<unknown[]> => []
+    )
     const sendBundleToExecutor = vi.fn()
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
@@ -608,7 +613,7 @@ describe("autoScalingBundling", () => {
         await autoScalingBundling.call(manager)
 
         expect(getBundles).toHaveBeenCalledTimes(1)
-        expect(getBundles).toHaveBeenCalledWith(10)
+        expect(getBundles).toHaveBeenCalledWith(10, expect.any(Function))
     })
 
     it("lets max-bundle-count lower the budget below the wallet count", async () => {
@@ -616,7 +621,7 @@ describe("autoScalingBundling", () => {
 
         await autoScalingBundling.call(manager)
 
-        expect(getBundles).toHaveBeenCalledWith(4)
+        expect(getBundles).toHaveBeenCalledWith(4, expect.any(Function))
     })
 
     it("clamps max-bundle-count to the wallet count, since extra bundles only queue", async () => {
@@ -624,7 +629,7 @@ describe("autoScalingBundling", () => {
 
         await autoScalingBundling.call(manager)
 
-        expect(getBundles).toHaveBeenCalledWith(10)
+        expect(getBundles).toHaveBeenCalledWith(10, expect.any(Function))
     })
 
     it("still bounds the pass to one bundle when no wallets are configured", async () => {
@@ -634,23 +639,32 @@ describe("autoScalingBundling", () => {
 
         // getBundles(0) would mean unbounded, which is the failure this
         // budget exists to prevent.
-        expect(getBundles).toHaveBeenCalledWith(1)
+        expect(getBundles).toHaveBeenCalledWith(1, expect.any(Function))
     })
 
-    it("hands every returned bundle to the executor", async () => {
+    it("hands each bundle to the executor as the pass reports it", async () => {
         const { manager, getBundles, sendBundleToExecutor } = makeTick({
             maxBundleCount: 10
         })
         const bundleA = { userOps: [{}] }
         const bundleB = { userOps: [{}, {}] }
-        getBundles.mockResolvedValue([bundleA, bundleB])
+        getBundles.mockImplementation(async (_budget, onBundle) => {
+            // A synchronous callback: nothing for the pass to await.
+            expect(onBundle(bundleA)).toBeUndefined()
+            await Promise.resolve()
+            expect(sendBundleToExecutor).toHaveBeenCalledTimes(1)
+            onBundle(bundleB)
+            return [bundleA, bundleB]
+        })
 
         await autoScalingBundling.call(manager)
 
+        // Once each, from the callback; none again from the returned array.
         expect(sendBundleToExecutor.mock.calls.map(([b]) => b)).toEqual([
             bundleA,
             bundleB
         ])
+        expect(sendBundleToExecutor).toHaveBeenCalledTimes(2)
     })
 
     it("logs the pass duration with its bundle and userOp counts", async () => {
@@ -1255,10 +1269,11 @@ const dispatchDirectly: Dispatch = async (send, bundle) => [
     realSendBundleToExecutor.call(send.manager, bundle)
 ]
 
-// Through the real tick: the mocked pass returns the bundle and the tick starts
-// the real sendBundleToExecutor on it without awaiting, on the same stand-in
-// (not makeTick's stub). The stand-in returns that promise as the real method
-// would, so any handler the tick attached would run against it.
+// Through the real tick: the mocked pass hands the bundle to the callback the
+// tick supplies, which starts the real sendBundleToExecutor detached on the
+// same stand-in (not makeTick's stub). The stand-in returns that promise as
+// the real method would, so a handler the callback attaches runs against it;
+// returning it attaches none.
 const dispatchThroughTick: Dispatch = async (send, bundle) => {
     const dispatched: Promise<unknown>[] = []
     const tick = {
@@ -1271,7 +1286,13 @@ const dispatchThroughTick: Dispatch = async (send, bundle) => {
         },
         mempool: {
             ...send.manager.mempool,
-            getBundles: () => Promise.resolve([bundle])
+            getBundles: (
+                _budget: number,
+                onBundle: (bundle: UserOperationBundle) => void
+            ) => {
+                onBundle(bundle)
+                return Promise.resolve([bundle])
+            }
         },
         senderManager: {
             ...send.manager.senderManager,
@@ -1326,7 +1347,7 @@ describe("sendBundleToExecutor failure recovery", () => {
 
     describe.each([
         ["called directly", dispatchDirectly],
-        ["dispatched by the tick", dispatchThroughTick]
+        ["streamed by the tick", dispatchThroughTick]
     ] as const)("%s", (_via, dispatch) => {
         // Dispatches one bundle and waits a turn for its detached work,
         // recording any rejection nobody handled. Only then are the executor
