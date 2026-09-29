@@ -60,6 +60,14 @@ const QUARANTINE_ALERT_INTERVAL_TICKS = 30
 // flight on another node.
 const QUARANTINE_CLEAR_OBSERVATIONS_TO_RELEASE = 2
 
+type BlockRunSummary = {
+    pending: number
+    mined: number
+    reverted: number
+    notMined: number
+    opsClosed: number
+}
+
 export class ExecutorManager {
     private senderManager: SenderManager
     private config: AltoConfig
@@ -555,16 +563,26 @@ export class ExecutorManager {
                         lastReplaced: Date.now()
                     }
 
-                    // Track bundle and start loop to watch blocks
-                    this.bundleManager.trackBundle(submittedBundle)
+                    // Sent: from here a failure must not requeue the userOps,
+                    // so recoverFailedSend leaves recovery to handleBlock.
                     bundleSubmitted = true
-                    this.startWatchingBlocks()
 
-                    await this.mempool.markUserOpsAsSubmitted({
-                        userOps: submittedBundle.bundle.userOps,
-                        entryPoint: submittedBundle.bundle.entryPoint,
-                        transactionHash: submittedBundle.transactionHash
-                    })
+                    // Track only once the submitted bookkeeping has settled. A
+                    // block run that saw the bundle earlier could free it and
+                    // write "included", then this late bookkeeping would
+                    // re-add it as submitted. finally: a failed write still
+                    // leaves the bundle tracked, so handleBlock owns it.
+                    try {
+                        await this.mempool.markUserOpsAsSubmitted({
+                            userOps: submittedBundle.bundle.userOps,
+                            entryPoint: submittedBundle.bundle.entryPoint,
+                            transactionHash: submittedBundle.transactionHash
+                        })
+                    } finally {
+                        // Track bundle and start loop to watch blocks
+                        this.bundleManager.trackBundle(submittedBundle)
+                        this.startWatchingBlocks()
+                    }
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
                     this.metrics.bundlesSubmitted
@@ -730,7 +748,8 @@ export class ExecutorManager {
                     this.logger,
                     "handleBlock",
                     { blockNumber: block ? Number(block.number) : undefined },
-                    () => this.handleBlockInner(block)
+                    () => this.handleBlockInner(block),
+                    { summarize: (summary) => summary }
                 )
             )
         } finally {
@@ -738,32 +757,43 @@ export class ExecutorManager {
         }
     }
 
-    private async handleBlockInner(block?: Block) {
+    private async handleBlockInner(block?: Block): Promise<BlockRunSummary> {
         const blockReceivedTimestamp = Date.now()
         this.lastReconcileAt = blockReceivedTimestamp
 
         const pendingBundles = this.bundleManager.getPendingBundles()
 
-        if (pendingBundles.length === 0) {
-            this.stopWatchingBlocks()
-            return
+        const summary: BlockRunSummary = {
+            pending: pendingBundles.length,
+            mined: 0,
+            reverted: 0,
+            notMined: 0,
+            opsClosed: 0
         }
 
-        const [bundleStatuses, networkGasPrice, networkBaseFee] =
-            await Promise.all([
-                this.bundleManager.getBundleStatuses(pendingBundles),
-                this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
-                    maxFeePerGas: 0n,
-                    maxPriorityFeePerGas: 0n
-                })),
-                this.getBaseFee().catch(() => 0n)
-            ])
+        if (pendingBundles.length === 0) {
+            this.stopWatchingBlocks()
+            return summary
+        }
 
-        await Promise.all(
+        // Start fees once, but only unresolved bundles depend on them.
+        const networkFees = Promise.all([
+            this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
+                maxFeePerGas: 0n,
+                maxPriorityFeePerGas: 0n
+            })),
+            this.getBaseFee().catch(() => 0n)
+        ])
+        const bundleStatuses =
+            await this.bundleManager.getBundleStatuses(pendingBundles)
+
+        const results = await Promise.allSettled(
             bundleStatuses.map(async (bundleStatus, index) => {
                 const submittedBundle = pendingBundles[index]
 
                 if (bundleStatus.status === "included") {
+                    summary.mined++
+                    summary.opsClosed += submittedBundle.bundle.userOps.length
                     await this.bundleManager.processIncludedBundle({
                         submittedBundle,
                         bundleReceipt: bundleStatus,
@@ -781,6 +811,8 @@ export class ExecutorManager {
                 }
 
                 if (bundleStatus.status === "reverted") {
+                    summary.reverted++
+                    summary.opsClosed += submittedBundle.bundle.userOps.length
                     await this.bundleManager.processRevertedBundle({
                         blockReceivedTimestamp,
                         submittedBundle,
@@ -798,8 +830,9 @@ export class ExecutorManager {
                     )
                 }
 
-                // can be potentially resubmitted - so we first submit it again to optimize for the speed
                 if (bundleStatus.status === "not_found") {
+                    summary.notMined++
+                    const [networkGasPrice, networkBaseFee] = await networkFees
                     this.potentiallyResubmitBundle({
                         blockReceivedTimestamp,
                         submittedBundle,
@@ -809,6 +842,15 @@ export class ExecutorManager {
                 }
             })
         )
+        // Keep the run guard until every started branch has settled.
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
+        return summary
     }
 
     potentiallyResubmitBundle({

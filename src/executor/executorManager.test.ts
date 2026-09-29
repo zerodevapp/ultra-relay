@@ -60,25 +60,34 @@ const createBundle = (overrides: Record<string, unknown> = {}) => ({
     ...overrides
 })
 
-const createHarness = (bundles: unknown[] = [createBundle()]) => {
+const createHarness = (
+    bundles: unknown[] = [createBundle()],
+    configOverrides: Record<string, unknown> = {}
+) => {
     // Captured so a test can emit a block the way watchBlocks would.
     let onBlock: ((block: unknown) => Promise<void>) | undefined
     const unwatch = vi.fn()
+    // One logger for the manager, so tests can read its [timing] lines.
+    const logger = noopLogger()
 
     let pendingBundles = [...bundles]
+    const removePending = (bundle: unknown) => {
+        pendingBundles = pendingBundles.filter((b) => b !== bundle)
+    }
 
     const getBundleStatuses = vi.fn().mockResolvedValue([])
     const processIncludedBundle = vi.fn(
         ({ submittedBundle }: { submittedBundle: unknown }) => {
-            pendingBundles = pendingBundles.filter((b) => b !== submittedBundle)
+            removePending(submittedBundle)
         }
     )
+    const processRevertedBundle = vi.fn()
 
     const bundleManager = {
         getPendingBundles: vi.fn(() => pendingBundles),
         getBundleStatuses,
         processIncludedBundle,
-        processRevertedBundle: vi.fn(),
+        processRevertedBundle,
         stopTrackingBundle: vi.fn()
     }
 
@@ -100,11 +109,17 @@ const createHarness = (bundles: unknown[] = [createBundle()]) => {
         legacyTransactions: true,
         logLevel: "info",
         executorLogLevel: "info",
-        getLogger: () => noopLogger(),
+        getLogger: () => logger,
         publicClient: {
             watchBlocks
-        }
+        },
+        ...configOverrides
     }
+
+    const tryGetNetworkGasPrice = vi.fn().mockResolvedValue({
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n
+    })
 
     const executorManager = new ExecutorManager({
         // Narrow stubs: only the block-reconcile path is under test.
@@ -112,12 +127,7 @@ const createHarness = (bundles: unknown[] = [createBundle()]) => {
         executor: {} as any,
         mempool: {} as any,
         metrics: { transactionCosts: { set: vi.fn() } } as any,
-        gasPriceManager: {
-            tryGetNetworkGasPrice: vi.fn().mockResolvedValue({
-                maxFeePerGas: 1n,
-                maxPriorityFeePerGas: 1n
-            })
-        } as any,
+        gasPriceManager: { tryGetNetworkGasPrice } as any,
         senderManager: { getAllWallets: () => [] } as any,
         bundleManager: bundleManager as any,
         requestShutdown: vi.fn()
@@ -129,16 +139,42 @@ const createHarness = (bundles: unknown[] = [createBundle()]) => {
         .spyOn(executorManager as any, "replaceTransaction")
         .mockImplementation(() => undefined)
 
+    // All three call through. Legacy mode resolves getBaseFee to 0n; tests
+    // defer it with mockReturnValueOnce.
+    const getBaseFee = vi.spyOn(executorManager, "getBaseFee")
+    const potentiallyResubmitBundle = vi.spyOn(
+        executorManager,
+        "potentiallyResubmitBundle"
+    )
+    const updateTransactionCostMetrics = vi.spyOn(
+        executorManager as any,
+        "updateTransactionCostMetrics"
+    )
+
     return {
         executorManager,
+        logger,
         getBundleStatuses,
         processIncludedBundle,
+        processRevertedBundle,
+        tryGetNetworkGasPrice,
+        getBaseFee,
+        potentiallyResubmitBundle,
+        updateTransactionCostMetrics,
         replaceTransaction,
         watchBlocks,
         unwatch,
         getPending: () => pendingBundles,
-        emitBlock: async (number = 1n) => {
-            await onBlock?.({ number, baseFeePerGas: 1n })
+        removePending,
+        // A bundle tracked mid-run, as a concurrent submission would.
+        addPending: (bundle: unknown) => {
+            pendingBundles = [...pendingBundles, bundle]
+        },
+        emitBlock: async (
+            number = 1n,
+            block: unknown = { number, baseFeePerGas: 1n }
+        ) => {
+            await onBlock?.(block)
         }
     }
 }
@@ -405,6 +441,690 @@ describe("ExecutorManager stale block watchdog", () => {
         // Two timers would reconcile twice in one window.
         await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT + BLOCK_TIME)
         expect(getBundleStatuses).toHaveBeenCalledTimes(1)
+    })
+})
+
+type GasPrice = { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }
+
+const deferred = <T>() => {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res
+        reject = rej
+    })
+    return { promise, resolve, reject }
+}
+
+type Harness = ReturnType<typeof createHarness>
+
+// Fields of each successful [timing] handleBlock line, in order.
+const timingSummaries = (logger: Harness["logger"]) =>
+    logger.info.mock.calls
+        .filter(([, msg]) => msg === "[timing] handleBlock")
+        .map(([fields]) => fields)
+
+const failedTimingLines = (logger: Harness["logger"]) =>
+    logger.warn.mock.calls.filter(
+        ([, msg]) => msg === "[timing] handleBlock failed"
+    )
+
+const runSummary = (counts: {
+    pending: number
+    mined: number
+    reverted: number
+    notMined: number
+    opsClosed: number
+}) => expect.objectContaining(counts)
+
+const notFoundStatus = { status: "not_found" }
+
+// Own receipt object, so identity checks can tell it from includedStatus's.
+const revertedStatus = {
+    status: "reverted",
+    transactionHash: "0xtx",
+    blockNumber: 2n,
+    receipt: { ...includedStatus.receipt }
+}
+
+const bundleWithOps = (uid: string, count: number) =>
+    createBundle({
+        uid,
+        bundle: {
+            entryPoint: "0xentrypoint",
+            version: "0.7",
+            userOps: Array.from({ length: count }, (_, i) => ({
+                userOpHash: `${uid}-${i}`
+            })),
+            submissionAttempts: 1
+        }
+    })
+
+describe("handleBlock fee and branch dependencies", () => {
+    let harness: Harness | undefined
+    // Settles every promise a test held open, so a failed assertion can't
+    // leave a run, fee leg or handler pending into the next test.
+    let releases: (() => void)[] = []
+
+    const setup = (...args: Parameters<typeof createHarness>) => {
+        harness = createHarness(...args)
+        return harness
+    }
+
+    // A deferred that cleanup resolves with `fallback` if the test didn't
+    // settle it. Resolving a settled promise is a no-op.
+    const hold = <T>(fallback: T) => {
+        const d = deferred<T>()
+        releases.push(() => d.resolve(fallback))
+        return d
+    }
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+    })
+
+    afterEach(async () => {
+        for (const release of releases) {
+            release()
+        }
+        releases = []
+        // Let released runs finish while fake timers are still installed.
+        await flush()
+        harness?.executorManager.stopWatchingBlocks()
+        harness = undefined
+        vi.restoreAllMocks()
+        vi.useRealTimers()
+    })
+
+    // Runs queued promise callbacks without reaching the watchdog deadline.
+    const flush = () => vi.advanceTimersByTimeAsync(0)
+
+    // Defers both fee legs of the next run.
+    const deferFees = (h: Harness) => {
+        const gas = hold<GasPrice>({
+            maxFeePerGas: 0n,
+            maxPriorityFeePerGas: 0n
+        })
+        const baseFee = hold<bigint>(0n)
+        h.tryGetNetworkGasPrice.mockReturnValueOnce(gas.promise)
+        h.getBaseFee.mockReturnValueOnce(baseFee.promise)
+        return { gas, baseFee }
+    }
+
+    // Emits a block and records when the run settles. The rejection
+    // observer is attached at once, so a failing run is never unhandled.
+    const startRun = (h: Harness, number = 1n, block?: unknown) => {
+        const state: { settled: boolean; error?: unknown } = {
+            settled: false
+        }
+        const done = h.emitBlock(number, block).then(
+            () => {
+                state.settled = true
+            },
+            (error: unknown) => {
+                state.settled = true
+                state.error = error
+            }
+        )
+        return { state, done }
+    }
+
+    it("E1: an empty run stops the watcher, fetches nothing and logs zero counts", async () => {
+        const h = setup([])
+        h.executorManager.startWatchingBlocks()
+
+        await h.emitBlock()
+
+        expect(h.unwatch).toHaveBeenCalled()
+        expect(h.getBundleStatuses).not.toHaveBeenCalled()
+        expect(h.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+        expect(h.getBaseFee).not.toHaveBeenCalled()
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 0,
+                mined: 0,
+                reverted: 0,
+                notMined: 0,
+                opsClosed: 0
+            })
+        ])
+    })
+
+    it("E2: an included bundle and its run finish while both fees are pending", async () => {
+        const h = setup()
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([includedStatus])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+
+        expect(h.processIncludedBundle).toHaveBeenCalledTimes(1)
+        expect(run.state).toEqual({ settled: true })
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 1,
+                mined: 1,
+                reverted: 0,
+                notMined: 0,
+                opsClosed: 1
+            })
+        ])
+
+        // Late fee failures stay caught; vitest fails on an unhandled one.
+        gas.reject(new Error("gas down"))
+        baseFee.reject(new Error("base fee down"))
+        await flush()
+        await run.done
+    })
+
+    it("E3: a reverted bundle gets the block, not the shared fees", async () => {
+        const h = setup()
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([revertedStatus])
+        h.processRevertedBundle.mockResolvedValueOnce(undefined)
+        const block = { number: 7n, baseFeePerGas: 3n }
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h, 7n, block)
+        await flush()
+
+        expect(h.processRevertedBundle).toHaveBeenCalledTimes(1)
+        const [args] = h.processRevertedBundle.mock.calls[0]
+        expect(args.block).toBe(block)
+        expect(Object.keys(args).sort()).toEqual([
+            "block",
+            "blockReceivedTimestamp",
+            "bundleReceipt",
+            "submittedBundle"
+        ])
+        expect(run.state).toEqual({ settled: true })
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 1,
+                mined: 0,
+                reverted: 1,
+                notMined: 0,
+                opsClosed: 1
+            })
+        ])
+
+        gas.reject(new Error("gas down"))
+        baseFee.reject(new Error("base fee down"))
+        await flush()
+        await run.done
+    })
+
+    it("E4: unmined bundles share one fee fetch and wait for both legs", async () => {
+        const first = createBundle({ uid: "0xfirst" })
+        const second = createBundle({ uid: "0xsecond" })
+        const h = setup([first, second])
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([
+            notFoundStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+
+        const gasValue = { maxFeePerGas: 1n, maxPriorityFeePerGas: 1n }
+        gas.resolve(gasValue)
+        await flush()
+
+        expect(h.potentiallyResubmitBundle).not.toHaveBeenCalled()
+        expect(run.state.settled).toBe(false)
+
+        baseFee.resolve(9n)
+        await flush()
+        await run.done
+
+        const calls = h.potentiallyResubmitBundle.mock.calls.map(
+            ([args]) => args
+        )
+        expect(calls.map((args) => args.submittedBundle)).toEqual([
+            first,
+            second
+        ])
+        for (const args of calls) {
+            expect(args.networkGasPrice).toBe(gasValue)
+            expect(args.networkBaseFee).toBe(9n)
+        }
+        expect(h.tryGetNetworkGasPrice).toHaveBeenCalledTimes(1)
+        expect(h.getBaseFee).toHaveBeenCalledTimes(1)
+        expect(run.state).toEqual({ settled: true })
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 2,
+                mined: 0,
+                reverted: 0,
+                notMined: 2,
+                opsClosed: 0
+            })
+        ])
+    })
+
+    it("E5: a mixed run starts mined branches early and ends after fees", async () => {
+        const included = bundleWithOps("0xincluded", 2)
+        const reverted = bundleWithOps("0xreverted", 3)
+        const stuckA = bundleWithOps("0xstuck-a", 1)
+        const stuckB = bundleWithOps("0xstuck-b", 1)
+        const h = setup([included, reverted, stuckA, stuckB])
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            revertedStatus,
+            notFoundStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+
+        expect(h.processIncludedBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ submittedBundle: included })
+        )
+        expect(h.processRevertedBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ submittedBundle: reverted })
+        )
+        expect(h.potentiallyResubmitBundle).not.toHaveBeenCalled()
+        expect(run.state.settled).toBe(false)
+
+        gas.resolve({ maxFeePerGas: 1n, maxPriorityFeePerGas: 1n })
+        baseFee.resolve(0n)
+        await flush()
+        await run.done
+
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(2)
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 4,
+                mined: 1,
+                reverted: 1,
+                notMined: 2,
+                opsClosed: 5
+            })
+        ])
+    })
+
+    it.each([
+        { gasFails: true, baseFails: false },
+        { gasFails: false, baseFails: true },
+        { gasFails: true, baseFails: true }
+    ])(
+        "E6: gas fails $gasFails / base fee fails $baseFails falls back per leg",
+        async ({ gasFails, baseFails }) => {
+            const h = setup()
+            h.getBundleStatuses.mockResolvedValueOnce([notFoundStatus])
+            h.tryGetNetworkGasPrice.mockImplementationOnce(() =>
+                gasFails
+                    ? Promise.reject(new Error("gas down"))
+                    : Promise.resolve({
+                          maxFeePerGas: 1n,
+                          maxPriorityFeePerGas: 1n
+                      })
+            )
+            h.getBaseFee.mockImplementationOnce(() =>
+                baseFails
+                    ? Promise.reject(new Error("base fee down"))
+                    : Promise.resolve(9n)
+            )
+            h.executorManager.startWatchingBlocks()
+
+            await h.emitBlock()
+
+            expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+            expect(h.potentiallyResubmitBundle).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    networkGasPrice: gasFails
+                        ? { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }
+                        : { maxFeePerGas: 1n, maxPriorityFeePerGas: 1n },
+                    networkBaseFee: baseFails ? 0n : 9n
+                })
+            )
+        }
+    )
+
+    it("E7: a receipt lookup failure starts no branch and propagates unchanged", async () => {
+        const h = setup()
+        const { gas, baseFee } = deferFees(h)
+        const error = new Error("receipts down")
+        h.getBundleStatuses.mockRejectedValueOnce(error)
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+        await run.done
+
+        expect(run.state.error).toBe(error)
+        expect(h.processIncludedBundle).not.toHaveBeenCalled()
+        expect(h.processRevertedBundle).not.toHaveBeenCalled()
+        expect(h.potentiallyResubmitBundle).not.toHaveBeenCalled()
+        expect(timingSummaries(h.logger)).toEqual([])
+        expect(failedTimingLines(h.logger)).toHaveLength(1)
+
+        gas.reject(new Error("gas down"))
+        baseFee.reject(new Error("base fee down"))
+        await flush()
+    })
+
+    it("E8: the guard holds until fees and awaited handlers settle", async () => {
+        const included = createBundle({ uid: "0xincluded" })
+        const stuck = createBundle({ uid: "0xstuck" })
+        const h = setup([included, stuck])
+        const { gas, baseFee } = deferFees(h)
+        const includedWork = hold<void>(undefined)
+        h.processIncludedBundle.mockImplementationOnce(
+            () => includedWork.promise
+        )
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h, 1n)
+        await flush()
+        expect(h.processIncludedBundle).toHaveBeenCalledTimes(1)
+
+        await h.emitBlock(2n)
+
+        expect(h.getBundleStatuses).toHaveBeenCalledTimes(1)
+        expect(h.tryGetNetworkGasPrice).toHaveBeenCalledTimes(1)
+        expect(h.getBaseFee).toHaveBeenCalledTimes(1)
+        expect(timingSummaries(h.logger)).toEqual([])
+        expect(run.state.settled).toBe(false)
+
+        // Fees arrive first while the included handler is still running.
+        gas.resolve({ maxFeePerGas: 1n, maxPriorityFeePerGas: 1n })
+        baseFee.resolve(0n)
+        await flush()
+
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+        expect(run.state.settled).toBe(false)
+
+        // Still guarded: releasing after fees alone would let this run.
+        await h.emitBlock(3n)
+        expect(h.getBundleStatuses).toHaveBeenCalledTimes(1)
+        expect(timingSummaries(h.logger)).toEqual([])
+
+        includedWork.resolve()
+        await flush()
+        await run.done
+
+        expect(run.state).toEqual({ settled: true })
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+        expect(timingSummaries(h.logger)).toHaveLength(1)
+    })
+
+    it("E9: a mined failure holds the guard until the deferred decision runs", async () => {
+        const included = createBundle({ uid: "0xincluded" })
+        const stuck = createBundle({ uid: "0xstuck" })
+        const h = setup([included, stuck])
+        const { gas, baseFee } = deferFees(h)
+        const error = new Error("status write failed")
+        h.processIncludedBundle.mockImplementationOnce(
+            ({ submittedBundle }) => {
+                h.removePending(submittedBundle)
+                return Promise.reject(error)
+            }
+        )
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h, 1n)
+        await flush()
+
+        expect(h.getPending()).toEqual([stuck])
+        expect(h.potentiallyResubmitBundle).not.toHaveBeenCalled()
+        expect(run.state.settled).toBe(false)
+
+        // Guard still held: this block must not decide on `stuck` again.
+        await h.emitBlock(2n)
+        expect(h.getBundleStatuses).toHaveBeenCalledTimes(1)
+
+        gas.resolve({ maxFeePerGas: 1n, maxPriorityFeePerGas: 1n })
+        baseFee.resolve(0n)
+        await flush()
+        await run.done
+
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ submittedBundle: stuck })
+        )
+        expect(run.state.error).toBe(error)
+
+        // Guard released after the failure: a later block runs.
+        h.getBundleStatuses.mockResolvedValueOnce([notFoundStatus])
+        await h.emitBlock(3n)
+        expect(h.getBundleStatuses).toHaveBeenCalledTimes(2)
+    })
+
+    it("E10: several failures reject with the lowest input index after all settle", async () => {
+        const first = createBundle({ uid: "0xfirst" })
+        const second = createBundle({ uid: "0xsecond" })
+        const h = setup([first, second])
+        const firstWork = hold<void>(undefined)
+        const secondWork = hold<void>(undefined)
+        h.processIncludedBundle
+            .mockImplementationOnce(() => firstWork.promise)
+            .mockImplementationOnce(() => secondWork.promise)
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            includedStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+
+        const laterError = new Error("second bundle failed")
+        const earlierError = new Error("first bundle failed")
+        secondWork.reject(laterError)
+        await flush()
+        expect(run.state.settled).toBe(false)
+
+        firstWork.reject(earlierError)
+        await flush()
+        await run.done
+
+        expect(run.state.error).toBe(earlierError)
+        expect(timingSummaries(h.logger)).toEqual([])
+    })
+
+    it("E11: records costs only after each handler fulfills", async () => {
+        const included = bundleWithOps("0xincluded", 2)
+        const failing = createBundle({ uid: "0xfailing" })
+        const reverted = bundleWithOps("0xreverted", 1)
+        const h = setup([included, failing, reverted])
+        const includedWork = hold<void>(undefined)
+        const revertedWork = hold<void>(undefined)
+        const error = new Error("status write failed")
+        h.processIncludedBundle
+            .mockImplementationOnce(() => includedWork.promise)
+            .mockImplementationOnce(() => Promise.reject(error))
+        h.processRevertedBundle.mockImplementationOnce(
+            () => revertedWork.promise
+        )
+        const failingStatus = {
+            ...includedStatus,
+            receipt: { ...includedStatus.receipt }
+        }
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            failingStatus,
+            revertedStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+        expect(h.updateTransactionCostMetrics).not.toHaveBeenCalled()
+
+        includedWork.resolve()
+        await flush()
+        expect(h.updateTransactionCostMetrics.mock.calls).toEqual([
+            [
+                includedStatus.receipt,
+                ["0xincluded-0", "0xincluded-1"],
+                "included"
+            ]
+        ])
+        expect(h.updateTransactionCostMetrics.mock.calls[0][0]).toBe(
+            includedStatus.receipt
+        )
+
+        revertedWork.resolve()
+        await flush()
+        await run.done
+
+        expect(h.updateTransactionCostMetrics).toHaveBeenCalledTimes(2)
+        expect(h.updateTransactionCostMetrics.mock.calls[1]).toEqual([
+            revertedStatus.receipt,
+            ["0xreverted-0"],
+            "reverted"
+        ])
+        expect(h.updateTransactionCostMetrics.mock.calls[1][0]).toBe(
+            revertedStatus.receipt
+        )
+        expect(run.state.error).toBe(error)
+    })
+
+    it("E12: every branch gets the timestamp captured before the waits", async () => {
+        const included = createBundle({ uid: "0xincluded" })
+        const reverted = createBundle({ uid: "0xreverted" })
+        const stuck = createBundle({ uid: "0xstuck" })
+        const h = setup([included, reverted, stuck])
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            revertedStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const startedAt = Date.now()
+        const run = startRun(h)
+        await flush()
+
+        // Wall clock moves while fees wait; no timer fires.
+        vi.setSystemTime(startedAt + 500)
+        gas.resolve({ maxFeePerGas: 1n, maxPriorityFeePerGas: 1n })
+        baseFee.resolve(0n)
+        await flush()
+        await run.done
+
+        const stamped = expect.objectContaining({
+            blockReceivedTimestamp: startedAt
+        })
+        expect(h.processIncludedBundle).toHaveBeenCalledWith(stamped)
+        expect(h.processRevertedBundle).toHaveBeenCalledWith(stamped)
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledWith(stamped)
+    })
+
+    it("E12: a watchdog run passes no block and logs its counts", async () => {
+        const h = setup()
+        h.getBundleStatuses.mockResolvedValue([revertedStatus])
+        h.executorManager.startWatchingBlocks()
+
+        await vi.advanceTimersByTimeAsync(RESUBMIT_STUCK_TIMEOUT + BLOCK_TIME)
+
+        expect(h.processRevertedBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ block: undefined })
+        )
+        expect(timingSummaries(h.logger)[0]).toEqual(
+            expect.objectContaining({
+                blockNumber: undefined,
+                pending: 1,
+                reverted: 1
+            })
+        )
+    })
+
+    it("E12: flashblocks polling runs without a block", async () => {
+        const h = setup([createBundle()], {
+            flashblocksPreconfirmationTime: 200
+        })
+        h.getBundleStatuses.mockResolvedValue([revertedStatus])
+        h.executorManager.startWatchingBlocks()
+
+        await vi.advanceTimersByTimeAsync(200)
+
+        expect(h.watchBlocks).not.toHaveBeenCalled()
+        expect(h.processRevertedBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ block: undefined })
+        )
+        expect(timingSummaries(h.logger)).toEqual([
+            expect.objectContaining({ pending: 1, reverted: 1 })
+        ])
+    })
+
+    it("E13: a bundle tracked while fees wait is left for the next run", async () => {
+        const stuck = createBundle({ uid: "0xstuck" })
+        const late = createBundle({ uid: "0xlate" })
+        const h = setup([stuck])
+        const { gas, baseFee } = deferFees(h)
+        h.getBundleStatuses.mockResolvedValueOnce([notFoundStatus])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+        h.addPending(late)
+
+        gas.resolve({ maxFeePerGas: 1n, maxPriorityFeePerGas: 1n })
+        baseFee.resolve(0n)
+        await flush()
+        await run.done
+
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledWith(
+            expect.objectContaining({ submittedBundle: stuck })
+        )
+        expect(timingSummaries(h.logger)).toEqual([
+            runSummary({
+                pending: 1,
+                mined: 0,
+                reverted: 0,
+                notMined: 1,
+                opsClosed: 0
+            })
+        ])
+    })
+
+    it("E14: a throwing resend decision rejects only after mined siblings settle", async () => {
+        const included = createBundle({ uid: "0xincluded" })
+        const stuck = createBundle({ uid: "0xstuck" })
+        const h = setup([included, stuck])
+        const includedWork = hold<void>(undefined)
+        const error = new Error("resend decision failed")
+        h.processIncludedBundle.mockImplementationOnce(
+            () => includedWork.promise
+        )
+        h.potentiallyResubmitBundle.mockImplementationOnce(() => {
+            throw error
+        })
+        h.getBundleStatuses.mockResolvedValueOnce([
+            includedStatus,
+            notFoundStatus
+        ])
+        h.executorManager.startWatchingBlocks()
+
+        const run = startRun(h)
+        await flush()
+
+        expect(h.potentiallyResubmitBundle).toHaveBeenCalledTimes(1)
+        expect(run.state.settled).toBe(false)
+
+        includedWork.resolve()
+        await flush()
+        await run.done
+
+        expect(run.state.error).toBe(error)
     })
 })
 
@@ -1129,17 +1849,29 @@ describe("sendBundleToExecutor stage stamps", () => {
     })
 
     it("carries every stamp through the executor's copy so the stages sum to processingMs", async () => {
-        const { manager, getWallet, trackBundle, markUserOpsAsSubmitted } =
-            makeSend()
+        const {
+            manager,
+            getWallet,
+            bundle,
+            trackBundle,
+            markUserOpsAsSubmitted
+        } = makeSend()
         let now = 1190
         vi.spyOn(Date, "now").mockImplementation(() => now)
-        // The wallet arrives at 1290; the broadcast is tracked at 1500.
+        // The wallet arrives at 1290; the broadcast returns at 1500.
         getWallet.mockImplementationOnce(() => {
             now = 1290
             return Promise.resolve({ address: EXECUTOR })
         })
-        trackBundle.mockImplementationOnce(() => {
+        bundle.mockImplementationOnce(async ({ userOpBundle }) => {
             now = 1500
+            return {
+                success: true,
+                userOpsBundled: userOpBundle.userOps,
+                rejectedUserOps: [],
+                transactionRequest: {},
+                transactionHash: TX_HASH
+            }
         })
         const userOps = [
             makeUserOpInfo(USER_OP_A, { processingAt: 1100, bundledAt: 1130 }),
@@ -1596,6 +2328,76 @@ describe("sendBundleToExecutor failure recovery", () => {
         // Both bundles are requeued; the shutdown starts once.
         expect(send.resubmitUserOps).toHaveBeenCalledTimes(2)
         expect(send.requestShutdown).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe("sendBundleToExecutor submission order", () => {
+    const sendBundleToExecutor = (
+        ExecutorManager.prototype as unknown as {
+            sendBundleToExecutor: (bundle: unknown) => Promise<unknown>
+        }
+    ).sendBundleToExecutor
+
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it("R1: tracks the bundle only after its submitted bookkeeping settles", async () => {
+        const send = makeSend()
+        let finishBookkeeping: () => void = () => undefined
+        send.markUserOpsAsSubmitted.mockImplementationOnce(
+            ({ userOps }: { userOps: UserOpInfo[] }) => {
+                for (const userOpInfo of userOps) {
+                    userOpInfo.submittedAt ??= Date.now()
+                }
+                return new Promise<void>((resolve) => {
+                    finishBookkeeping = resolve
+                })
+            }
+        )
+        const userOps = [makeUserOpInfo(USER_OP_A), makeUserOpInfo(USER_OP_B)]
+
+        const sent = sendBundleToExecutor.call(
+            send.manager,
+            makeBundle(userOps)
+        )
+        await new Promise((resolve) => setImmediate(resolve))
+
+        // Invisible to block processing while bookkeeping is in flight.
+        expect(send.markUserOpsAsSubmitted).toHaveBeenCalledTimes(1)
+        expect(send.trackBundle).not.toHaveBeenCalled()
+        expect(send.manager.startWatchingBlocks).not.toHaveBeenCalled()
+
+        finishBookkeeping()
+        await expect(sent).resolves.toBe(TX_HASH)
+
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.startWatchingBlocks).toHaveBeenCalledTimes(1)
+        const [tracked] = send.trackBundle.mock.calls[0]
+        expect(
+            tracked.bundle.userOps.map(
+                (userOpInfo: UserOpInfo) => typeof userOpInfo.submittedAt
+            )
+        ).toEqual(["number", "number"])
+    })
+
+    it("R2: a failed bookkeeping write still tracks and watches the bundle, requeueing nothing", async () => {
+        const send = makeSend()
+        send.markUserOpsAsSubmitted.mockRejectedValueOnce(
+            new Error("submitted write failed")
+        )
+
+        await expect(
+            sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+        ).resolves.toBeUndefined()
+
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.startWatchingBlocks).toHaveBeenCalledTimes(1)
+        expect(send.trackBundle.mock.invocationCallOrder[0]).toBeGreaterThan(
+            send.markUserOpsAsSubmitted.mock.invocationCallOrder[0]
+        )
+        expect(send.resubmitUserOps).not.toHaveBeenCalled()
+        expect(send.markWalletProcessed).not.toHaveBeenCalled()
     })
 })
 
