@@ -1,5 +1,6 @@
 export * from "./logger"
 export * from "./metrics"
+export * from "./eventLoopMonitor"
 export * from "./bigInt"
 export * from "./preVerificationGasCalulator"
 export * from "./userop"
