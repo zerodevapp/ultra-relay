@@ -10,6 +10,7 @@ import { toHex } from "viem/utils"
 import type { OutstandingStore } from "."
 import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
+import { REDIS_OPTIONS } from "../utils/redis-options"
 import {
     getNonceKeyAndSequence,
     isVersion06,
@@ -188,7 +189,7 @@ class RedisOutstandingQueue implements OutstandingStore {
         entryPoint,
         redisEndpoint
     }: { config: AltoConfig; entryPoint: Address; redisEndpoint: string }) {
-        this.redis = new Redis(redisEndpoint, {})
+        this.redis = new Redis(redisEndpoint, REDIS_OPTIONS)
         this.storePrefix = getRedisStorePrefix(config)
         this.entryPoint = entryPoint
 

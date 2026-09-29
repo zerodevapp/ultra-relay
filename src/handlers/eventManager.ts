@@ -6,6 +6,7 @@ import { type Hex, toHex } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { OpEventType } from "../types/schemas"
 import { AsyncTimeoutError, asyncCallWithTimeout } from "../utils/asyncTimeout"
+import { REDIS_OPTIONS } from "../utils/redis-options"
 
 type QueueMessage = OpEventType & {
     userOperationHash: Hex
@@ -41,7 +42,10 @@ export class EventManager {
             this.logger.info(
                 `Using redis with queue name ${queueName} for userOp event queue`
             )
-            const redis = new Redis(config.redisEventsQueueEndpoint)
+            const redis = new Redis(
+                config.redisEventsQueueEndpoint,
+                REDIS_OPTIONS
+            )
 
             this.redisEventManagerQueue = new Queue<QueueMessage>(queueName, {
                 createClient: () => {
