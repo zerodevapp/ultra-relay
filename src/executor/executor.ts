@@ -34,6 +34,10 @@ import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
+    isSyncSubmissionSupported,
+    sendTransactionSyncOrFallback
+} from "./sendTransactionSync"
+import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
     getUserOpHashes,
@@ -231,7 +235,8 @@ export class Executor {
             walletClients,
             publicClient,
             privateEndpointSubmissionAttempts,
-            maxBundlingGasPrice
+            maxBundlingGasPrice,
+            sendTransactionSync: useSyncSubmission
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -300,6 +305,10 @@ export class Executor {
                     }
                 }
 
+                // Same span name either way so the submit step stays comparable;
+                // `sync` says which call produced it. The sync call only returns
+                // once the transaction is included, so this span covers inclusion
+                // too -- latency the async path pays later, on the block watcher.
                 transactionHash = await timed(
                     childLogger,
                     "walletClient.sendTransaction",
@@ -307,9 +316,19 @@ export class Executor {
                         attempt: attempts,
                         isPrivate: usePrivateEndpoint,
                         executor: account.address,
-                        entryPoint
+                        entryPoint,
+                        sync:
+                            useSyncSubmission &&
+                            isSyncSubmissionSupported(walletClient)
                     },
-                    () => walletClient.sendTransaction(request)
+                    () =>
+                        useSyncSubmission
+                            ? sendTransactionSyncOrFallback(
+                                  walletClient,
+                                  request,
+                                  childLogger
+                              )
+                            : walletClient.sendTransaction(request)
                 )
 
                 childLogger.info(

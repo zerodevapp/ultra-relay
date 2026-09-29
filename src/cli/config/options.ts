@@ -443,6 +443,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: 3
     },
+    "send-transaction-sync": {
+        description:
+            "Submit the bundle with eth_sendRawTransactionSync, so the node returns the receipt at inclusion instead of the bundler polling for it. Falls back to eth_sendRawTransaction per endpoint when the node lacks the method",
+        type: "boolean",
+        require: false,
+        default: false
+    },
     "bundler-initial-commission": {
         description:
             "Initial commission percentage the bundler retains (10 = retain 10% of margin)",
