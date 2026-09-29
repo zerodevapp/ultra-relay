@@ -2920,3 +2920,120 @@ describe("Redis round-trip pass contract", () => {
         expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(2)
     })
 })
+
+describe("Mempool.markUserOpsAsSubmitted", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    // Narrow stubs: markUserOpsAsSubmitted touches only these.
+    const makeSubmitHarness = () => {
+        const removeProcessing = vi.fn(
+            (_args: { entryPoint: Address; userOpHash: Hex }) =>
+                Promise.resolve()
+        )
+        const addSubmitted = vi.fn(
+            (_args: { entryPoint: Address; userOpInfo: UserOpInfo }) =>
+                Promise.resolve()
+        )
+        const setUserOpStatus = vi.fn((_userOpHash: Hex, _status: unknown) =>
+            Promise.resolve()
+        )
+        const inc = vi.fn()
+        const labels = vi.fn(() => ({ inc }))
+
+        const mempool = new Mempool({
+            config: makeConfig(),
+            metrics: {
+                userOperationsSubmitted: { labels }
+            } as unknown as Metrics,
+            monitor: { setUserOpStatus } as unknown as Monitor,
+            reputationManager: {} as unknown as InterfaceReputationManager,
+            validator: {} as unknown as InterfaceValidator,
+            store: {
+                removeProcessing,
+                addSubmitted
+            } as unknown as MempoolStore,
+            eventManager: {} as unknown as EventManager
+        })
+
+        return {
+            mempool,
+            removeProcessing,
+            addSubmitted,
+            setUserOpStatus,
+            inc,
+            labels
+        }
+    }
+
+    it("M1: rethrows the lowest-index failure only after every op's writes settle", async () => {
+        const h = makeSubmitHarness()
+        const userOps = [1, 2, 3].map((id) => makeUserOpInfoV06(id))
+        const secondError = new Error("op 2 processing removal failed")
+        const thirdError = new Error("op 3 processing removal failed")
+        const firstStatus = deferred()
+        const secondRemoval = deferred()
+        const thirdRemoval = deferred()
+        h.removeProcessing
+            .mockImplementationOnce(() => Promise.resolve())
+            .mockImplementationOnce(() => secondRemoval.promise)
+            .mockImplementationOnce(() => thirdRemoval.promise)
+        h.setUserOpStatus.mockImplementationOnce(() => firstStatus.promise)
+
+        const marked = h.mempool.markUserOpsAsSubmitted({
+            userOps,
+            entryPoint: ENTRY_POINT_V06,
+            transactionHash: hash(99)
+        })
+        const isSettled = trackSettled(marked)
+        await nextTurn()
+
+        // Op 3 fails first, then op 2: the reason must still be op 2's.
+        thirdRemoval.reject(thirdError)
+        await nextTurn()
+        secondRemoval.reject(secondError)
+        await nextTurn()
+
+        // Two ops failed, but op 1's status write is still in flight.
+        expect(h.setUserOpStatus).toHaveBeenCalledTimes(1)
+        expect(isSettled()).toBe(false)
+
+        firstStatus.resolve()
+        await expect(marked).rejects.toBe(secondError)
+        expect(h.inc).not.toHaveBeenCalled()
+    })
+
+    it("M2: marks every op submitted and counts them once", async () => {
+        const h = makeSubmitHarness()
+        vi.spyOn(Date, "now").mockReturnValue(7000)
+        const userOps = [1, 2].map((id) => makeUserOpInfoV06(id))
+
+        await h.mempool.markUserOpsAsSubmitted({
+            userOps,
+            entryPoint: ENTRY_POINT_V06,
+            transactionHash: hash(99)
+        })
+
+        expect(h.removeProcessing.mock.calls).toEqual(
+            userOps.map((userOpInfo) => [
+                {
+                    entryPoint: ENTRY_POINT_V06,
+                    userOpHash: userOpInfo.userOpHash
+                }
+            ])
+        )
+        expect(h.addSubmitted).toHaveBeenCalledTimes(2)
+        expect(h.setUserOpStatus.mock.calls).toEqual(
+            userOps.map((userOpInfo) => [
+                userOpInfo.userOpHash,
+                { status: "submitted", transactionHash: hash(99) }
+            ])
+        )
+        expect(userOps.map((userOpInfo) => userOpInfo.submittedAt)).toEqual([
+            7000, 7000
+        ])
+        expect(h.labels).toHaveBeenCalledWith({ status: "success" })
+        expect(h.inc.mock.calls).toEqual([[2]])
+    })
+})
