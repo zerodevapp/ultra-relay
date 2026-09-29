@@ -8,6 +8,12 @@ import {
 import type { Logger } from "pino"
 import { Counter, Histogram, type Registry } from "prom-client"
 import type { AltoConfig } from "../createConfig"
+import {
+    type ReadFile,
+    cpuFields,
+    createCpuCounters,
+    readFileOrUndefined
+} from "./cpuCounters"
 
 const RESOLUTION_MS = 10
 const WINDOW_MS = 1_000
@@ -41,6 +47,7 @@ export type EventLoopSources = {
     heapUsedBytes: () => number
     setInterval: (callback: () => void, ms: number) => IntervalHandle
     clearInterval: (handle: IntervalHandle) => void
+    readFile: ReadFile
 }
 
 const defaultSources: EventLoopSources = {
@@ -69,7 +76,8 @@ const defaultSources: EventLoopSources = {
     heapUsedBytes: () => process.memoryUsage().heapUsed,
     setInterval: (callback, ms) => setInterval(callback, ms),
     clearInterval: (handle) =>
-        clearInterval(handle as ReturnType<typeof setInterval>)
+        clearInterval(handle as ReturnType<typeof setInterval>),
+    readFile: readFileOrUndefined
 }
 
 type GcTotals = { gcMs: number; gcMaxMs: number; gcCount: number }
@@ -152,6 +160,10 @@ export function startEventLoopMonitor({
         addGc(gcMinute, durationMs)
     })
 
+    const cpu = createCpuCounters(sources.readFile)
+    let cpuSecond = cpu.snapshot()
+    let cpuMinute = cpuSecond
+
     let lastTick = sources.now()
     let lastSummary = lastTick
     let eluSecond = eventLoopUtilization()
@@ -180,6 +192,7 @@ export function startEventLoopMonitor({
         const now = sources.now()
         const elu = eventLoopUtilization()
         const second = eventLoopUtilization(elu, eluSecond)
+        const cpuNow = cpu.snapshot()
         eluSecond = elu
         active.inc(second.active / 1000)
         idle.inc(second.idle / 1000)
@@ -198,6 +211,7 @@ export function startEventLoopMonitor({
                         second.utilization,
                         gcSecond
                     ),
+                    ...cpuFields(cpuSecond, cpuNow),
                     thresholdMs
                 },
                 "[timing] eventLoop.blocked"
@@ -210,6 +224,7 @@ export function startEventLoopMonitor({
         secondSampler.reset()
         resetGc(gcSecond)
         lastTick = now
+        cpuSecond = cpuNow
 
         if (now - lastSummary >= SUMMARY_MS) {
             const minute = eventLoopUtilization(elu, eluMinute)
@@ -223,11 +238,13 @@ export function startEventLoopMonitor({
                         minute.utilization,
                         gcMinute
                     ),
+                    ...cpuFields(cpuMinute, cpuNow),
                     blockedWindows,
                     thresholdMs
                 },
                 "[timing] eventLoop.summary"
             )
+            cpuMinute = cpuNow
             minuteSampler.reset()
             resetGc(gcMinute)
             blockedWindows = 0
@@ -243,7 +260,8 @@ export function startEventLoopMonitor({
             thresholdMs,
             resolutionMs: RESOLUTION_MS,
             windowMs: WINDOW_MS,
-            summaryMs: SUMMARY_MS
+            summaryMs: SUMMARY_MS,
+            ...cpu.info
         },
         "event-loop monitor enabled"
     )
