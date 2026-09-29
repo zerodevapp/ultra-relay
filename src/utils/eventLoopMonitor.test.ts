@@ -105,6 +105,7 @@ function setup({
             return handle
         }),
         clearInterval: vi.fn(),
+        readFile: () => undefined,
         ...overrides
     }
 
@@ -184,6 +185,37 @@ async function bucketCounts(registry: Registry) {
     )
 }
 
+// A cgroup v2 container (limit 1 CPU, one machine CPU) whose cumulative
+// counters the test advances between checks.
+function fakeCgroupFs() {
+    const counters = {
+        usageUs: 0,
+        throttledPeriods: 0,
+        throttledUs: 0,
+        waitUs: 0,
+        busyTicks: 0,
+        stealTicks: 0
+    }
+    const files: Record<string, () => string> = {
+        "/proc/self/cgroup": () => "0::/\n",
+        "/sys/fs/cgroup/cgroup.controllers": () => "cpu memory\n",
+        "/sys/fs/cgroup/cpu.max": () => "100000 100000\n",
+        "/sys/fs/cgroup/cpu.stat": () =>
+            `usage_usec ${counters.usageUs}\nnr_periods 0\nnr_throttled ${counters.throttledPeriods}\nthrottled_usec ${counters.throttledUs}\n`,
+        "/sys/fs/cgroup/cpu.pressure": () =>
+            `some avg10=0.00 avg60=0.00 avg300=0.00 total=${counters.waitUs}\n`,
+        "/proc/stat": () =>
+            `cpu  ${counters.busyTicks} 0 0 1000 0 0 0 ${counters.stealTicks} 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\n`
+    }
+    const readFile = (path: string) => files[path]?.()
+    const advance = (delta: Partial<typeof counters>) => {
+        for (const key of Object.keys(delta) as (keyof typeof counters)[]) {
+            counters[key] += delta[key] ?? 0
+        }
+    }
+    return { readFile, advance }
+}
+
 describe("startEventLoopMonitor", () => {
     it("starts both samplers, an unref'd 1s interval and logs the startup line", () => {
         const h = setup()
@@ -201,7 +233,12 @@ describe("startEventLoopMonitor", () => {
                 thresholdMs: 50,
                 resolutionMs: 10,
                 windowMs: 1000,
-                summaryMs: 60000
+                summaryMs: 60000,
+                cgroup: "none",
+                cpuLimit: null,
+                cpuPressure: false,
+                steal: false,
+                nodeCpus: null
             },
             "event-loop monitor enabled"
         )
@@ -465,6 +502,93 @@ describe("startEventLoopMonitor", () => {
         } finally {
             monitor?.stop()
         }
+    })
+
+    it("puts the stalled second's own CPU counters on its line", () => {
+        const cgroup = fakeCgroupFs()
+        const h = setup({ sources: { readFile: cgroup.readFile } })
+        expect(h.info).toHaveBeenCalledWith(
+            expect.objectContaining({
+                cgroup: "v2",
+                cpuLimit: 1,
+                cpuPressure: true,
+                steal: true,
+                nodeCpus: 1
+            }),
+            "event-loop monitor enabled"
+        )
+
+        cgroup.advance({ usageUs: 10_000, waitUs: 2_000, busyTicks: 100 })
+        h.tick()
+        cgroup.advance({ usageUs: 10_000, waitUs: 2_000, busyTicks: 100 })
+        h.tick()
+        cgroup.advance({
+            usageUs: 30_000,
+            throttledPeriods: 2,
+            throttledUs: 50_000,
+            waitUs: 61_000,
+            busyTicks: 95,
+            stealTicks: 5
+        })
+        h.second.set({ maxMs: 120 })
+        h.tick()
+
+        const blocked = h.lines("eventLoop.blocked")
+        expect(blocked).toHaveLength(1)
+        expect(blocked[0]).toMatchObject({
+            cpuMs: 30,
+            throttledPeriods: 2,
+            throttledMs: 50,
+            cpuWaitMs: 61,
+            stealPct: 5,
+            thresholdMs: 50
+        })
+    })
+
+    it("puts the whole minute's CPU counters on the summary, then starts over", () => {
+        const cgroup = fakeCgroupFs()
+        const h = setup({ sources: { readFile: cgroup.readFile } })
+
+        for (let i = 0; i < 60; i++) {
+            cgroup.advance({
+                usageUs: 10_000,
+                throttledPeriods: 1,
+                throttledUs: 2_000,
+                waitUs: 1_000,
+                busyTicks: 99,
+                stealTicks: 1
+            })
+            h.tick()
+        }
+        // 60 steal ticks of 6,000 total = 1%.
+        expect(h.lines("eventLoop.summary")[0]).toMatchObject({
+            cpuMs: 600,
+            throttledPeriods: 60,
+            throttledMs: 120,
+            cpuWaitMs: 60,
+            stealPct: 1,
+            blockedWindows: 0
+        })
+
+        for (let i = 0; i < 60; i++) {
+            cgroup.advance({
+                usageUs: 5_000,
+                throttledPeriods: 2,
+                throttledUs: 500,
+                waitUs: 3_000,
+                busyTicks: 96,
+                stealTicks: 4
+            })
+            h.tick()
+        }
+        // Counts only the second minute: 240 steal ticks of 6,000 = 4%.
+        expect(h.lines("eventLoop.summary")[1]).toMatchObject({
+            cpuMs: 300,
+            throttledPeriods: 120,
+            throttledMs: 30,
+            cpuWaitMs: 180,
+            stealPct: 4
+        })
     })
 })
 
