@@ -1,5 +1,6 @@
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
+import type { Logger } from "@alto/utils"
 import {
     http,
     type Hex,
@@ -8,7 +9,6 @@ import {
     custom,
     keccak256
 } from "viem"
-import type { Logger } from "@alto/utils"
 import { privateKeyToAccount } from "viem/accounts"
 import { foundry } from "viem/chains"
 import { describe, expect, it, vi } from "vitest"
