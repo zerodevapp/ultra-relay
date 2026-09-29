@@ -241,7 +241,9 @@ export const logArgsSchema = z.object({
     "mempool-log-level": logLevel.optional(),
     "executor-log-level": logLevel.optional(),
     "reputation-manager-log-level": logLevel.optional(),
-    "nonce-queuer-log-level": logLevel.optional()
+    "nonce-queuer-log-level": logLevel.optional(),
+    "enable-event-loop-metrics": z.boolean().default(false),
+    "event-loop-block-threshold-ms": z.number().int().min(25).default(50)
 })
 
 export const debugArgsSchema = z.object({
