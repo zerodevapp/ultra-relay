@@ -1,68 +1,116 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AltoConfig } from "../../createConfig"
-import {
-    WalletNotFoundError,
-    createRedisSenderManager
-} from "./createRedisSenderManager"
+import { createRedisSenderManager } from "./createRedisSenderManager"
 
-// Minimal in-memory stand-in for the four list commands the sender manager
-// uses. Hand-rolled (not ioredis-mock) so fake timers can't interfere with
-// command completion and so llen can be made to fail on demand. Wrapped in
-// vi.hoisted because vi.mock factories run before module-level statements.
-const { lists, calls, state, FakeRedis } = vi.hoisted(() => {
-    const lists = new Map<string, string[]>()
-    const calls = { rpop: 0, llen: 0 }
-    const state = { failLlen: false }
+type ReconcileReply = [number, string[], number, number, number]
+
+// Minimal stand-in for the manager's Redis client: the three pool scripts
+// over one array, plus the connection surface the manager touches.
+// Hand-rolled (not ioredis-mock) so fake timers can't interfere with command
+// completion. Script correctness is covered against a real Redis in
+// createRedisSenderManager.script.test.ts. Wrapped in vi.hoisted because
+// vi.mock factories run before module-level statements.
+const { pool, calls, state, FakeRedis } = vi.hoisted(() => {
+    const pool: string[] = []
+    const calls = {
+        takeWallet: 0,
+        returnWallet: 0,
+        reconcileWallets: 0,
+        disconnect: 0
+    }
+    const state = {
+        options: undefined as unknown,
+        client: undefined as
+            | { disconnect(): void; emitReady(): void }
+            | undefined,
+        seeded: false,
+        // Overrides for the next reconcile replies, oldest first.
+        reconcileReplies: [] as (() => Promise<ReconcileReply>)[],
+        returnFailures: [] as Error[]
+    }
 
     class FakeRedis {
-        llen(name: string) {
-            calls.llen++
-            if (state.failLlen) return Promise.reject(new Error("llen boom"))
-            return Promise.resolve(lists.get(name)?.length ?? 0)
+        status = "wait"
+        private endListeners: (() => void)[] = []
+        private readyListeners: (() => void)[] = []
+
+        constructor(_url: string, options: unknown) {
+            state.options = options
+            state.client = this
         }
-        rpop(name: string) {
-            calls.rpop++
-            return Promise.resolve(lists.get(name)?.pop() ?? null)
+        defineCommand() {}
+        connect() {
+            this.status = "ready"
+            return Promise.resolve()
         }
-        lpush(name: string, value: string) {
-            const list = lists.get(name) ?? []
-            list.unshift(value)
-            lists.set(name, list)
-            return Promise.resolve(list.length)
+        disconnect() {
+            calls.disconnect++
+            this.status = "end"
+            const listeners = this.endListeners
+            this.endListeners = []
+            for (const listener of listeners) listener()
         }
-        multi() {
-            const ops: (() => void)[] = []
-            const chain = {
-                del: (name: string) => {
-                    ops.push(() => lists.delete(name))
-                    return chain
-                },
-                rpush: (name: string, ...values: string[]) => {
-                    ops.push(() =>
-                        lists.set(name, [...(lists.get(name) ?? []), ...values])
-                    )
-                    return chain
-                },
-                exec: () => {
-                    for (const op of ops) op()
-                    return Promise.resolve([])
-                }
-            }
-            return chain
+        once(event: string, listener: () => void) {
+            if (event === "end") this.endListeners.push(listener)
+            return this
+        }
+        on(event: string, listener: () => void) {
+            if (event === "ready") this.readyListeners.push(listener)
+            return this
+        }
+        emitReady() {
+            for (const listener of this.readyListeners) listener()
+        }
+        reconcileWallets(
+            _pool: string,
+            _inUse: string,
+            _armed: string,
+            ...addresses: string[]
+        ): Promise<ReconcileReply> {
+            calls.reconcileWallets++
+            const override = state.reconcileReplies.shift()
+            if (override) return override()
+            // The first reconcile seeds an empty armed pool; later ones find
+            // nothing missing.
+            const added = state.seeded ? [] : addresses
+            state.seeded = true
+            pool.unshift(...added)
+            return Promise.resolve([1, added, pool.length, 0, 0])
+        }
+        takeWallet() {
+            calls.takeWallet++
+            const address = pool.pop() ?? null
+            return Promise.resolve([address, pool.length])
+        }
+        returnWallet(_pool: string, _inUse: string, address: string) {
+            calls.returnWallet++
+            const failure = state.returnFailures.shift()
+            if (failure) return Promise.reject(failure)
+            pool.unshift(address)
+            return Promise.resolve([1, pool.length])
         }
     }
 
-    return { lists, calls, state, FakeRedis }
+    return { pool, calls, state, FakeRedis }
 })
 
 vi.mock("ioredis", () => ({ default: FakeRedis, Redis: FakeRedis }))
 
+const SYNC_MS = 5 * 60 * 1000
+const NOT_SENT =
+    "Stream isn't writeable and enableOfflineQueue options is false"
 const redisEndpoint = "redis://fake"
 const wallets = [
     { address: "0x1111111111111111111111111111111111111111" },
     { address: "0x2222222222222222222222222222222222222222" }
 ]
-const logger = { info() {}, warn() {}, error() {}, debug() {}, trace() {} }
+const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    trace: vi.fn()
+}
 const config = {
     chainId: 42161,
     redisKeyPrefix: "test",
@@ -75,55 +123,67 @@ const metrics = {
 } as never
 
 const flush = () => new Promise<void>((r) => queueMicrotask(r))
+const createManager = () =>
+    createRedisSenderManager({ config, metrics, redisEndpoint })
 
-// Existing log queries match on this prefix.
-const WALLET_NOT_FOUND_MESSAGE = /^wallet not found/
-
-describe("createRedisSenderManager.getWallet", () => {
+describe("createRedisSenderManager", () => {
     beforeEach(() => {
-        lists.clear()
-        calls.rpop = 0
-        calls.llen = 0
-        state.failLlen = false
-        // Only fake setTimeout: if getWallet awaited delay() on a successful
-        // pop, the promise below could never settle and the test would hang.
-        vi.useFakeTimers({ toFake: ["setTimeout"] })
+        pool.length = 0
+        calls.takeWallet = 0
+        calls.returnWallet = 0
+        calls.reconcileWallets = 0
+        calls.disconnect = 0
+        state.options = undefined
+        state.client = undefined
+        state.seeded = false
+        state.reconcileReplies = []
+        state.returnFailures = []
+        for (const fn of Object.values(logger)) fn.mockClear()
+        // Only fake the timeout pair: if getWallet awaited delay() on a
+        // successful take, the promise below could never settle and the test
+        // would hang. clearTimeout must be faked too, or the manager's
+        // cleanup could not cancel its fake sync timer.
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
     })
     afterEach(() => vi.useRealTimers())
 
-    it("resolves without any timer when a wallet is available", async () => {
-        const manager = await createRedisSenderManager({
-            config,
-            metrics,
-            redisEndpoint
+    it("connects without an offline queue and never resends commands", async () => {
+        await createManager()
+
+        expect(state.options).toEqual({
+            lazyConnect: true,
+            enableOfflineQueue: false,
+            autoResendUnfulfilledCommands: false,
+            maxRetriesPerRequest: 0
         })
+    })
+
+    it("resolves without any poll delay when a wallet is available", async () => {
+        const manager = await createManager()
 
         const wallet = await manager.getWallet()
 
         expect(wallets.map((w) => w.address)).toContain(wallet.address)
-        expect(calls.rpop).toBe(1)
-        expect(vi.getTimerCount()).toBe(0)
+        expect(calls.takeWallet).toBe(1)
+        // Only the 5-minute sync is pending.
+        expect(vi.getTimerCount()).toBe(1)
     })
 
-    it("backs off 100ms between polls while the pool is empty, then resolves", async () => {
-        const manager = await createRedisSenderManager({
-            config,
-            metrics,
-            redisEndpoint
-        })
+    it("backs off 100ms between polls while none of this instance's wallets is free, then resolves", async () => {
+        const manager = await createManager()
         const first = await manager.getWallet()
         await manager.getWallet()
-        calls.rpop = 0
+        calls.takeWallet = 0
 
         const pending = manager.getWallet()
         await flush()
-        expect(calls.rpop).toBe(1) // first poll, empty
+        expect(calls.takeWallet).toBe(1) // first poll, empty
 
         await vi.advanceTimersByTimeAsync(99)
-        expect(calls.rpop).toBe(1) // still sleeping, no busy loop
+        expect(calls.takeWallet).toBe(1) // still sleeping, no busy loop
 
         await vi.advanceTimersByTimeAsync(1)
-        expect(calls.rpop).toBe(2) // one retry exactly at 100ms
+        expect(calls.takeWallet).toBe(2) // one retry exactly at 100ms
 
         await manager.markWalletProcessed(first)
         await vi.advanceTimersByTimeAsync(100)
@@ -131,46 +191,189 @@ describe("createRedisSenderManager.getWallet", () => {
         expect(third.address).toBe(first.address)
     })
 
-    it("still returns the wallet when the metrics llen read fails", async () => {
-        const manager = await createRedisSenderManager({
-            config,
-            metrics,
-            redisEndpoint
-        })
-        state.failLlen = true
-        const unhandled = vi.fn()
-        process.on("unhandledRejection", unhandled)
+    it("rejects startup on an unarmed pool and closes the client", async () => {
+        state.reconcileReplies.push(() => Promise.resolve([0, [], 0, 0, 0]))
 
-        const wallet = await manager.getWallet()
-        await flush()
-        await new Promise((r) => setImmediate(r))
-        process.off("unhandledRejection", unhandled)
-
-        expect(wallets.map((w) => w.address)).toContain(wallet.address)
-        expect(unhandled).not.toHaveBeenCalled()
+        await expect(createManager()).rejects.toThrow(
+            "executor wallet pool test:42161:sender-manager is not armed; rebuild it with every pod stopped (ADR 0006)"
+        )
+        expect(calls.disconnect).toBe(1)
+        expect(vi.getTimerCount()).toBe(0)
     })
 
-    it("rejects with WalletNotFoundError for an address it does not own, and does not push it back", async () => {
-        const manager = await createRedisSenderManager({
-            config,
-            metrics,
-            redisEndpoint
-        })
-        // Another instance's key sharing the queue, next in line for the pop.
-        const foreign = "0x3333333333333333333333333333333333333333"
-        const [[queueName, queue]] = [...lists.entries()]
-        queue.push(foreign)
+    it("syncs every 5 minutes and stays quiet when nothing is missing", async () => {
+        await createManager()
+        expect(calls.reconcileWallets).toBe(1)
 
-        const popped = manager.getWallet()
+        await vi.advanceTimersByTimeAsync(SYNC_MS - 1)
+        expect(calls.reconcileWallets).toBe(1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(calls.reconcileWallets).toBe(2)
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+        expect(calls.reconcileWallets).toBe(3)
 
-        await expect(popped).rejects.toBeInstanceOf(WalletNotFoundError)
-        await expect(popped).rejects.toMatchObject({
-            name: "WalletNotFoundError",
-            address: foreign,
-            message: expect.stringMatching(WALLET_NOT_FOUND_MESSAGE)
-        })
-        expect(calls.rpop).toBe(1)
-        // Current behaviour: the foreign address is discarded.
-        expect(lists.get(queueName)).toEqual(wallets.map((w) => w.address))
+        expect(logger.warn).not.toHaveBeenCalled()
+        expect(logger.error).not.toHaveBeenCalled()
+    })
+
+    it("never starts a sync while the previous one is still running", async () => {
+        await createManager()
+        let finish: (reply: ReconcileReply) => void = () => {}
+        state.reconcileReplies.push(
+            () =>
+                new Promise<ReconcileReply>((resolve) => {
+                    finish = resolve
+                })
+        )
+
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+        expect(calls.reconcileWallets).toBe(2)
+        await vi.advanceTimersByTimeAsync(3 * SYNC_MS)
+        expect(calls.reconcileWallets).toBe(2)
+
+        finish([1, [], 2, 0, 0])
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+        expect(calls.reconcileWallets).toBe(3)
+    })
+
+    it("logs a failed sync and keeps syncing", async () => {
+        await createManager()
+        const error = new Error("redis down")
+        state.reconcileReplies.push(() => Promise.reject(error))
+
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+        expect(logger.error).toHaveBeenCalledWith(
+            { err: error },
+            "executor wallet sync failed"
+        )
+
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+        expect(calls.reconcileWallets).toBe(3)
+    })
+
+    it("logs an unarmed pool during a sync and adds nothing", async () => {
+        await createManager()
+        state.reconcileReplies.push(() => Promise.resolve([0, [], 2, 0, 0]))
+
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+
+        expect(logger.error).toHaveBeenCalledWith(
+            { poolSize: 2, inUseCount: 0 },
+            "executor wallet pool is not armed; added no wallets"
+        )
+        expect(logger.warn).not.toHaveBeenCalled()
+    })
+
+    it("warns when a sync re-adds wallets", async () => {
+        await createManager()
+        const [lost] = wallets
+        state.reconcileReplies.push(() =>
+            Promise.resolve([1, [lost.address], 2, 0, 0])
+        )
+
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+            {
+                added: [lost.address],
+                addedCount: 1,
+                poolSize: 2,
+                inUseCount: 0,
+                foreignCount: 0
+            },
+            "re-added missing executor wallets"
+        )
+    })
+
+    it("stops syncing once the client closes", async () => {
+        await createManager()
+
+        state.client?.disconnect()
+
+        expect(vi.getTimerCount()).toBe(0)
+        await vi.advanceTimersByTimeAsync(2 * SYNC_MS)
+        expect(calls.reconcileWallets).toBe(1)
+    })
+
+    it("schedules no next sync when the client closes during a run", async () => {
+        await createManager()
+        let finish: (reply: ReconcileReply) => void = () => {}
+        state.reconcileReplies.push(
+            () =>
+                new Promise<ReconcileReply>((resolve) => {
+                    finish = resolve
+                })
+        )
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+
+        state.client?.disconnect()
+        finish([1, [], 2, 0, 0])
+        // Lets the run finish, then gives any wrongly scheduled sync time to fire.
+        await vi.advanceTimersByTimeAsync(SYNC_MS)
+
+        expect(vi.getTimerCount()).toBe(0)
+        expect(calls.reconcileWallets).toBe(2)
+    })
+
+    it("defers a return Redis never received and sends it once the client is ready", async () => {
+        const manager = await createManager()
+        const wallet = await manager.getWallet()
+        state.returnFailures.push(new Error(NOT_SENT))
+        calls.returnWallet = 0
+
+        await manager.markWalletProcessed(wallet)
+
+        expect(calls.returnWallet).toBe(1)
+        expect(logger.warn).toHaveBeenCalledWith(
+            { executor: wallet.address },
+            "wallet return deferred until Redis reconnects"
+        )
+        expect(logger.error).not.toHaveBeenCalled()
+        expect(manager.getActiveWallets()).toEqual([wallet])
+
+        state.client?.emitReady()
+        await flush()
+
+        expect(calls.returnWallet).toBe(2)
+        expect(manager.getActiveWallets()).toEqual([])
+        expect(pool).toContain(wallet.address)
+    })
+
+    it("sends a deferred return only once, even if the caller releases it again", async () => {
+        const manager = await createManager()
+        const wallet = await manager.getWallet()
+        state.returnFailures.push(new Error(NOT_SENT))
+        calls.returnWallet = 0
+        await manager.markWalletProcessed(wallet)
+
+        await manager.markWalletProcessed(wallet)
+
+        expect(calls.returnWallet).toBe(1)
+        expect(logger.warn).toHaveBeenCalledWith(
+            { executor: wallet.address },
+            "Attempted to mark a wallet as processed that wasn't active"
+        )
+        state.client?.emitReady()
+        await flush()
+        expect(calls.returnWallet).toBe(2)
+    })
+
+    it("still rejects, and never resends, a return whose outcome is unknown", async () => {
+        const manager = await createManager()
+        const wallet = await manager.getWallet()
+        const lost = new Error("Connection is closed.")
+        state.returnFailures.push(lost)
+        calls.returnWallet = 0
+
+        await expect(manager.markWalletProcessed(wallet)).rejects.toBe(lost)
+        state.client?.emitReady()
+        await flush()
+
+        expect(calls.returnWallet).toBe(1)
+        expect(manager.getActiveWallets()).toEqual([])
+        expect(logger.error).toHaveBeenCalledWith(
+            { err: lost, executor: wallet.address },
+            "wallet return failed; reservation requires inspection"
+        )
     })
 })

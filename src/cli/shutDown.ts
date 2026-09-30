@@ -8,6 +8,7 @@ import Queue from "bull"
 import Redis from "ioredis"
 import type { Logger } from "pino"
 import type { AltoConfig } from "../createConfig"
+import { usesRedisSenderManager } from "../executor/senderManager"
 
 // Default prefix keeps the legacy `alto:` queue name; an explicit prefix
 // namespaces the queue like every other key.
@@ -200,6 +201,40 @@ export function persistShutdownState({
 
     // No queue configured, drop all operations.
     return dropAllOperationsOnShutdown({ mempool, logger, config })
+}
+
+// Redis checkouts stay in use at shutdown: this process has not settled
+// their bundles, sends or quarantines, so returning them could let another
+// pod sign with a wallet whose transaction is still pending (ADR 0006).
+// They need the stopped-pool recovery runbook. Short read-only checkouts
+// (SafeValidator's code-hash call) stay in use too; this helper cannot
+// tell them apart. The in-memory pool dies with the process, so its
+// wallets are still returned as before.
+export async function releaseWalletsOnShutdown({
+    config,
+    senderManager,
+    logger
+}: {
+    config: AltoConfig
+    senderManager: SenderManager
+    logger: Logger
+}) {
+    const active = senderManager.getActiveWallets()
+    if (usesRedisSenderManager(config)) {
+        if (active.length > 0) {
+            logger.warn(
+                {
+                    count: active.length,
+                    executors: active.map((wallet) => wallet.address)
+                },
+                "leaving unresolved executor wallets in use at shutdown"
+            )
+        }
+        return
+    }
+    for (const account of active) {
+        await senderManager.markWalletProcessed(account)
+    }
 }
 
 export async function restoreShutdownState({

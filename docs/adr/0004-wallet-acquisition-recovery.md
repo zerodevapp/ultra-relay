@@ -32,6 +32,8 @@ sustained for a few minutes.
 
 ## A wallet this instance does not own shuts the process down
 
+*Superseded by ADR 0006: pods now leave other pods' wallets in the pool and never shut down for them.*
+
 The Redis sender manager pops an address from the queue shared by all pods and
 throws `WalletNotFoundError` when it is not one of this instance's keys. The
 popped address is not pushed back, and the queue is only seeded at startup when
@@ -57,18 +59,19 @@ was refused; that drop was never awaited and could shut the process down.
 
 ## Known follow-ups
 
-- **Executor-key rotation on a shared wallet queue** still only converges by
-  restarting: a new pod does not seed its addresses while old ones remain,
-  and each restart discards one old address. It needs first-class support
-  (seed missing own addresses safely, return or quarantine foreign ones,
-  re-seed at runtime), and a runbook until then.
+- *Startup and periodic membership repair and foreign-wallet handling: resolved
+  by ADR 0006. Automatic recovery of in-use reservations and of Redis data loss
+  remains deferred; retirement, uncertain checkouts and data loss require its
+  runbooks.*
 - **A failed requeue write can lose a userOp silently**: `resubmitUserOps`
   removes the processing/submitted records before re-adding, and the store
   logs and swallows a failed outstanding write. The fix must keep the userOp
   recoverable, not just rethrow.
 - **The gas/nonce failure branch can release a wallet twice** if its requeue
   rejects; the second release can free a wallet another bundle has since
-  acquired.
+  acquired. Fresh Redis checkout handles (ADR 0006) stop that old release from
+  freeing a newer checkout; the caller bug itself and the in-memory path remain
+  follow-up work.
 - **Other paths still end in an unhandled rejection**: a failed bundling pass
   stops the tick, `replaceTransaction` is launched without a catch, and block
   watcher failures are not consumed.

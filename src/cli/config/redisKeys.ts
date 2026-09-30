@@ -29,6 +29,12 @@ export const getRedisKeys = (config: AltoConfig) => {
         gasPriceQueue: `${prefix}:gas-price`,
 
         // Sender manager queue
-        senderManagerQueue: `${prefix}:sender-manager`
+        senderManagerQueue: `${prefix}:sender-manager`,
+
+        // Executor wallets currently taken from the sender manager queue
+        senderManagerInUse: `${prefix}:sender-manager:in-use`,
+
+        // Set by an operator's stopped-pool rebuild; pods add wallets only while it exists
+        senderManagerArmed: `${prefix}:sender-manager:armed`
     }
 }

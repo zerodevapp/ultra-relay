@@ -517,21 +517,42 @@ describe("BundleManager.processIncludedBundle", () => {
         expect(h.emitIncludedOnChain).toHaveBeenCalledTimes(1)
     })
 
-    it("B6: a wallet release failure rejects before any op work", async () => {
+    it("B6: a wallet release failure is logged and the bundle's ops are still processed", async () => {
         const h = createHarness()
+        // Status writes otherwise stay pending until a test releases them.
+        h.setUserOpStatus.mockResolvedValue(undefined)
         const error = new Error("wallet release failed")
         h.markWalletProcessed.mockRejectedValueOnce(error)
 
         const run = h.runBundle([makeUserOpInfo(1)])
         await run.done
 
-        expect(run.state.error).toBe(error)
-        // Tracking was already dropped; nothing is rolled back.
+        expect(run.state.error).toBeUndefined()
         expect(h.bundleManager.getPendingBundles()).toEqual([])
-        expect(h.removeSubmittedUserOps).not.toHaveBeenCalled()
-        expect(h.cacheSet).not.toHaveBeenCalled()
-        expect(h.setUserOpStatus).not.toHaveBeenCalled()
-        expect(h.inclusionLogs()).toEqual([])
+        expect(h.removeSubmittedUserOps).toHaveBeenCalledTimes(1)
+        expect(h.setUserOpStatus).toHaveBeenCalledTimes(1)
+        expect(h.logger.error).toHaveBeenCalledWith(
+            expect.objectContaining({ err: error }),
+            "failed to release the wallet of a finished bundle"
+        )
+    })
+
+    it("B6: a mined bundle releases the exact executor object it was submitted with", async () => {
+        const h = createHarness()
+        h.setUserOpStatus.mockResolvedValue(undefined)
+        const userOps = [makeUserOpInfo(1)]
+        const submittedBundle = makeSubmittedBundle(userOps)
+        h.bundleManager.trackBundle(submittedBundle)
+
+        await h.bundleManager.processIncludedBundle({
+            submittedBundle,
+            bundleReceipt: makeIncludedStatus(userOps),
+            blockReceivedTimestamp: 5000
+        })
+
+        const released = h.markWalletProcessed.mock.calls as unknown[][]
+        expect(released).toHaveLength(1)
+        expect(released[0][0]).toBe(submittedBundle.executor)
     })
 
     it("B6: a submitted-store removal failure rejects before any op work", async () => {

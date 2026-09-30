@@ -2,12 +2,7 @@ import type { Metrics } from "@alto/utils"
 import type { Account } from "viem"
 import type { AltoConfig } from "../../createConfig"
 import { createMemorySenderManager } from "./createMemorySenderManager"
-import {
-    WalletNotFoundError,
-    createRedisSenderManager
-} from "./createRedisSenderManager"
-
-export { WalletNotFoundError }
+import { createRedisSenderManager } from "./createRedisSenderManager"
 
 export const getAvailableWallets = (config: AltoConfig) => {
     let availableWallets: Account[] = []
@@ -35,11 +30,17 @@ export type SenderManager = {
     getActiveWallets: () => Account[]
 }
 
+// The Redis sender manager shares one wallet pool across instances.
+export const usesRedisSenderManager = (
+    config: AltoConfig
+): config is AltoConfig & { redisEndpoint: string } =>
+    config.enableHorizontalScaling && !!config.redisEndpoint
+
 export const getSenderManager = async ({
     config,
     metrics
 }: { config: AltoConfig; metrics: Metrics }): Promise<SenderManager> => {
-    if (config.enableHorizontalScaling && config.redisEndpoint) {
+    if (usesRedisSenderManager(config)) {
         return await createRedisSenderManager({
             config,
             metrics,

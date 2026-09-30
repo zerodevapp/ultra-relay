@@ -16,7 +16,11 @@ import { BundleManager } from "../executor/bundleManager"
 import { flushOnStartUp } from "../executor/senderManager/flushOnStartUp"
 import { validateAndRefillWallets } from "../executor/senderManager/validateAndRefill"
 import { createMempoolStore } from "../store/createMempoolStore"
-import { persistShutdownState, restoreShutdownState } from "./shutDown"
+import {
+    persistShutdownState,
+    releaseWalletsOnShutdown,
+    restoreShutdownState
+} from "./shutDown"
 
 const getReputationManager = (
     config: AltoConfig
@@ -113,8 +117,7 @@ const getExecutorManager = ({
     senderManager,
     metrics,
     gasPriceManager,
-    bundleManager,
-    requestShutdown
+    bundleManager
 }: {
     config: AltoConfig
     executor: Executor
@@ -123,7 +126,6 @@ const getExecutorManager = ({
     metrics: Metrics
     gasPriceManager: GasPriceManager
     bundleManager: BundleManager
-    requestShutdown: (reason: string) => void
 }) => {
     return new ExecutorManager({
         config,
@@ -132,8 +134,7 @@ const getExecutorManager = ({
         mempool,
         senderManager,
         metrics,
-        gasPriceManager,
-        requestShutdown
+        gasPriceManager
     })
 }
 
@@ -293,15 +294,7 @@ export const setupServer = async ({
         mempool,
         senderManager,
         metrics,
-        gasPriceManager,
-        // gracefulShutdown and rootLogger are defined below. Nothing calls
-        // this before setupServer returns: bundling awaits the store first.
-        requestShutdown: (reason) => {
-            gracefulShutdown(reason).catch((err) => {
-                rootLogger.error({ err }, `Error during ${reason} shutdown`)
-                process.exit(1)
-            })
-        }
+        gasPriceManager
     })
 
     const rpcEndpoint = getRpcHandler({
@@ -374,10 +367,11 @@ export const setupServer = async ({
             logger: shutdownLogger
         })
 
-        // mark all executors as processed
-        for (const account of senderManager.getActiveWallets()) {
-            await senderManager.markWalletProcessed(account)
-        }
+        await releaseWalletsOnShutdown({
+            config,
+            senderManager,
+            logger: shutdownLogger
+        })
 
         process.exit(0)
     }

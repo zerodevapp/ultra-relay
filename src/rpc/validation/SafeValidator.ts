@@ -124,7 +124,9 @@ export class SafeValidator
             hash = (error.walk() as any).data
         }
 
-        this.senderManager.markWalletProcessed(wallet)
+        // Not awaited, as before. The sender manager logs a failed return;
+        // left unhandled, the rejection would shut the process down.
+        this.senderManager.markWalletProcessed(wallet).catch(() => undefined)
 
         return {
             hash,

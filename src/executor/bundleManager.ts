@@ -266,7 +266,16 @@ export class BundleManager {
         const { userOps, entryPoint } = bundle
 
         this.stopTrackingBundle(submittedBundle)
-        await this.senderManager.markWalletProcessed(executor)
+        // A failed release leaves the wallet unavailable; the finished
+        // bundle's userOperations still need their cleanup and receipts.
+        await this.senderManager
+            .markWalletProcessed(executor)
+            .catch((err) =>
+                this.logger.error(
+                    { err, executor: executor.address },
+                    "failed to release the wallet of a finished bundle"
+                )
+            )
         await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
     }
 

@@ -7,7 +7,6 @@ import type { Address, Hex } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ExecutorManager, summarizePass } from "./executorManager"
 import { computeInclusionTimings } from "./inclusionTimings"
-import { WalletNotFoundError } from "./senderManager"
 
 // Importing ExecutorManager reaches utils/logger, which builds a Logtail
 // transport at module load when BETTER_STACK_TOKEN is set. vi.hoisted runs
@@ -129,8 +128,7 @@ const createHarness = (
         metrics: { transactionCosts: { set: vi.fn() } } as any,
         gasPriceManager: { tryGetNetworkGasPrice } as any,
         senderManager: { getAllWallets: () => [] } as any,
-        bundleManager: bundleManager as any,
-        requestShutdown: vi.fn()
+        bundleManager: bundleManager as any
     })
 
     // Stops at the replacement decision: everything past it needs a real
@@ -1653,7 +1651,6 @@ const makeSend = () => {
     )
     const markWalletProcessed = vi.fn().mockResolvedValue(undefined)
     const resubmitUserOps = vi.fn().mockResolvedValue(undefined)
-    const requestShutdown = vi.fn()
     const tryGetNetworkGasPrice = vi.fn(async () => ({
         maxFeePerGas: 1n,
         maxPriorityFeePerGas: 1n
@@ -1684,7 +1681,6 @@ const makeSend = () => {
         getWallet,
         markWalletProcessed,
         resubmitUserOps,
-        requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
         bundle,
@@ -1692,8 +1688,6 @@ const makeSend = () => {
         markUserOpsAsSubmitted,
         manager: {
             logger,
-            requestShutdown,
-            shutdownRequested: false,
             config: {
                 legacyTransactions: true,
                 publicClient: { getTransactionCount }
@@ -2064,14 +2058,6 @@ const RESOLVED_QUIETLY = {
     outcomes: [{ status: "fulfilled", value: undefined }]
 }
 
-// Another instance's key, popped from the shared Redis wallet queue.
-const FOREIGN_WALLET = "0x000000000000000000000000000000000000beef"
-
-const NOT_OWNED_LINE = [
-    { event: "executorWalletNotOwned", executor: FOREIGN_WALLET },
-    "executor wallet from the shared queue is not one of this instance's keys; shutting down so a restart can re-seed the queue"
-]
-
 describe("sendBundleToExecutor failure recovery", () => {
     afterEach(() => {
         vi.restoreAllMocks()
@@ -2121,91 +2107,9 @@ describe("sendBundleToExecutor failure recovery", () => {
             ])
             // No wallet was acquired, so there is none to free.
             expect(send.markWalletProcessed).not.toHaveBeenCalled()
-            expect(send.requestShutdown).not.toHaveBeenCalled()
             expect(send.tryGetNetworkGasPrice).not.toHaveBeenCalled()
             expect(send.getTransactionCount).not.toHaveBeenCalled()
             expect(send.bundle).not.toHaveBeenCalled()
-        })
-
-        it("requeues a popped wallet this instance does not own, then requests shutdown", async () => {
-            const send = makeSend()
-            const error = new WalletNotFoundError(FOREIGN_WALLET)
-            send.getWallet.mockRejectedValueOnce(error)
-            const userOps = makeUserOps()
-
-            // Resolves on every path: the restart is requested explicitly,
-            // not left to an unhandled rejection (ADR 0004).
-            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
-
-            expect(send.requestShutdown.mock.calls).toEqual([
-                ["executorWalletNotOwned"]
-            ])
-            expect(send.resubmitUserOps.mock.calls).toEqual([
-                [requeueArgs(userOps, WALLET_FAILED)]
-            ])
-            expect(
-                send.resubmitUserOps.mock.invocationCallOrder[0]
-            ).toBeLessThan(send.requestShutdown.mock.invocationCallOrder[0])
-            expect(send.logger.error.mock.calls).toEqual([
-                [
-                    { err: error, executor: undefined },
-                    "unexpected error sending bundle to executor"
-                ],
-                NOT_OWNED_LINE
-            ])
-            expect(send.markWalletProcessed).not.toHaveBeenCalled()
-            expect(send.tryGetNetworkGasPrice).not.toHaveBeenCalled()
-            expect(send.getTransactionCount).not.toHaveBeenCalled()
-            expect(send.bundle).not.toHaveBeenCalled()
-        })
-
-        it("requests shutdown for a wallet it does not own only after the requeue settles", async () => {
-            const send = makeSend()
-            send.getWallet.mockRejectedValueOnce(
-                new WalletNotFoundError(FOREIGN_WALLET)
-            )
-            let settleRequeue: (value: undefined) => void = () => undefined
-            send.resubmitUserOps.mockReturnValueOnce(
-                new Promise((resolve) => {
-                    settleRequeue = resolve
-                })
-            )
-
-            let dispatched: Promise<unknown>[] = []
-            const unhandled = await collectUnhandledRejections(async () => {
-                dispatched = await dispatch(send, makeBundle(makeUserOps()))
-                await nextTurn()
-                expect(send.resubmitUserOps).toHaveBeenCalledTimes(1)
-                expect(send.requestShutdown).not.toHaveBeenCalled()
-                settleRequeue(undefined)
-            })
-
-            expect(unhandled).toEqual([])
-            expect(send.requestShutdown).toHaveBeenCalledTimes(1)
-            expect(await Promise.allSettled(dispatched)).toEqual([
-                { status: "fulfilled", value: undefined }
-            ])
-        })
-
-        it("still resolves when a step after wallet acquisition throws WalletNotFoundError", async () => {
-            const send = makeSend()
-            const error = new WalletNotFoundError(FOREIGN_WALLET)
-            send.bundle.mockRejectedValueOnce(error)
-            const userOps = makeUserOps()
-
-            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
-
-            expect(send.markWalletProcessed).toHaveBeenCalledTimes(1)
-            expect(send.resubmitUserOps.mock.calls).toEqual([
-                [requeueArgs(userOps)]
-            ])
-            expect(send.logger.error.mock.calls).toEqual([
-                [
-                    { err: error, executor: EXECUTOR },
-                    "unexpected error sending bundle to executor"
-                ]
-            ])
-            expect(send.requestShutdown).not.toHaveBeenCalled()
         })
 
         it("frees the acquired wallet, then requeues, when a pre-submit step throws", async () => {
@@ -2310,24 +2214,54 @@ describe("sendBundleToExecutor failure recovery", () => {
         })
     })
 
-    it("requests shutdown once however many popped wallets it does not own", async () => {
+    it("releases only its own checkout when its requeue fails after freeing the wallet", async () => {
         const send = makeSend()
+        const first: { address: Address } = { address: EXECUTOR }
+        const second: { address: Address } = { address: EXECUTOR }
         send.getWallet
-            .mockRejectedValueOnce(new WalletNotFoundError(FOREIGN_WALLET))
-            .mockRejectedValueOnce(new WalletNotFoundError(FOREIGN_WALLET))
+            .mockResolvedValueOnce(first)
+            .mockResolvedValueOnce(second)
+        // The first bundle's nonce read fails, so it frees `first` and requeues.
+        send.getTransactionCount.mockRejectedValueOnce(new Error("rpc down"))
+        // Before that requeue fails, another bundle acquires the same
+        // address as a new checkout.
+        send.resubmitUserOps.mockImplementationOnce(async () => {
+            await realSendBundleToExecutor.call(
+                send.manager,
+                makeBundle(makeUserOps())
+            )
+            throw new Error("requeue failed")
+        })
 
         await realSendBundleToExecutor.call(
             send.manager,
             makeBundle(makeUserOps())
         )
+
+        // The branch's own release, then recoverFailedSend's repeat: both
+        // name the first checkout, which the Redis manager ignores the second
+        // time. The second checkout is never released.
+        const released = send.markWalletProcessed.mock.calls.map(
+            ([wallet]) => wallet
+        )
+        expect(released).toHaveLength(2)
+        for (const wallet of released) {
+            expect(wallet).toBe(first)
+        }
+        expect(send.trackBundle.mock.calls[0][0].executor).toBe(second)
+    })
+
+    it("tracks a submitted bundle with the exact checkout it acquired", async () => {
+        const send = makeSend()
+        const wallet: { address: Address } = { address: EXECUTOR }
+        send.getWallet.mockResolvedValueOnce(wallet)
+
         await realSendBundleToExecutor.call(
             send.manager,
             makeBundle(makeUserOps())
         )
 
-        // Both bundles are requeued; the shutdown starts once.
-        expect(send.resubmitUserOps).toHaveBeenCalledTimes(2)
-        expect(send.requestShutdown).toHaveBeenCalledTimes(1)
+        expect(send.trackBundle.mock.calls[0][0].executor).toBe(wallet)
     })
 })
 
@@ -2445,5 +2379,113 @@ describe("potentiallyResubmitBundle underpricing on arbitrum", () => {
 
     it("keeps comparing tips on other chains", () => {
         expect(run("default", 100_000_000n)).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe("quarantined wallet release", () => {
+    it("releases the exact checkout it quarantined", async () => {
+        const markWalletProcessed = vi.fn((_wallet: unknown) =>
+            Promise.resolve()
+        )
+        const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+        const manager = new ExecutorManager({
+            config: {
+                getLogger: () => logger,
+                bundleMode: "manual",
+                blockTime: 1000,
+                publicClient: {
+                    // latest (6) is past the stuck nonce (5): buried on-chain.
+                    getTransactionCount: vi.fn(async () => 6)
+                }
+            } as never,
+            executor: {} as never,
+            mempool: {} as never,
+            metrics: { executorWalletsQuarantined: { set: vi.fn() } } as never,
+            gasPriceManager: {} as never,
+            senderManager: { markWalletProcessed } as never,
+            bundleManager: {} as never
+        })
+        const internals = manager as unknown as {
+            quarantineWallet: (wallet: unknown, stuckNonce: number) => void
+            reconcileQuarantinedWalletsInner: () => Promise<void>
+            quarantineTimer: NodeJS.Timeout | undefined
+        }
+        const wallet: { address: Address } = { address: EXECUTOR }
+
+        internals.quarantineWallet(wallet, 5)
+        // Drive one tick by hand instead of the background poll.
+        clearInterval(internals.quarantineTimer)
+        await internals.reconcileQuarantinedWalletsInner()
+
+        expect(markWalletProcessed).toHaveBeenCalledTimes(1)
+        expect(markWalletProcessed.mock.calls[0][0]).toBe(wallet)
+    })
+})
+
+describe("replaceTransaction wallet release", () => {
+    it("logs a failed wallet release instead of rejecting", async () => {
+        const releaseError = new Error("redis down")
+        const logger = {
+            info: vi.fn(),
+            warn: vi.fn(),
+            error: vi.fn(),
+            debug: vi.fn()
+        }
+        const executor: { address: Address } = { address: EXECUTOR }
+        const markWalletProcessed = vi.fn((_wallet: unknown) =>
+            Promise.reject(releaseError)
+        )
+        const context = {
+            logger,
+            executor: {
+                bundle: vi.fn(async () => ({
+                    success: false,
+                    rejectedUserOps: [],
+                    recoverableOps: [],
+                    reason: "filterops_failed"
+                }))
+            },
+            mempool: {
+                resubmitUserOps: vi.fn(async () => undefined),
+                dropUserOps: vi.fn(async () => undefined)
+            },
+            senderManager: { markWalletProcessed },
+            metrics: {
+                replacedTransactions: { labels: () => ({ inc: vi.fn() }) }
+            }
+        }
+        const submittedBundle = {
+            bundle: {
+                userOps: [],
+                entryPoint: ENTRY_POINT,
+                submissionAttempts: 1
+            },
+            executor,
+            transactionRequest: { nonce: 1 },
+            transactionHash: TX_HASH,
+            previousTransactionHashes: []
+        }
+
+        await expect(
+            ExecutorManager.prototype.replaceTransaction.call(
+                context as never,
+                {
+                    blockReceivedTimestamp: 0,
+                    submittedBundle: submittedBundle as never,
+                    networkGasPrice: {
+                        maxFeePerGas: 1n,
+                        maxPriorityFeePerGas: 1n
+                    },
+                    networkBaseFee: 0n,
+                    reason: "stuck"
+                }
+            )
+        ).resolves.toBeUndefined()
+
+        expect(markWalletProcessed.mock.calls[0][0]).toBe(executor)
+        expect(logger.error).toHaveBeenCalledWith(
+            { err: releaseError, executor: EXECUTOR },
+            "failed to free wallet after failed replacement"
+        )
     })
 })

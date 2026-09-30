@@ -21,7 +21,7 @@ import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import type { BundleTransactionReceipt } from "./getBundleStatus"
-import { type SenderManager, WalletNotFoundError } from "./senderManager"
+import type { SenderManager } from "./senderManager"
 import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
 
@@ -114,10 +114,6 @@ export class ExecutorManager {
     private cancelsInFlight = new Set<Address>()
     private quarantineTimer: NodeJS.Timeout | undefined
     private reconciling = false
-    // Starts the process's graceful shutdown. Called at most once, guarded
-    // by shutdownRequested.
-    private requestShutdown: (reason: string) => void
-    private shutdownRequested = false
 
     constructor({
         config,
@@ -126,8 +122,7 @@ export class ExecutorManager {
         metrics,
         gasPriceManager,
         senderManager,
-        bundleManager,
-        requestShutdown
+        bundleManager
     }: {
         config: AltoConfig
         executor: Executor
@@ -136,7 +131,6 @@ export class ExecutorManager {
         gasPriceManager: GasPriceManager
         senderManager: SenderManager
         bundleManager: BundleManager
-        requestShutdown: (reason: string) => void
     }) {
         this.config = config
         this.executor = executor
@@ -152,7 +146,6 @@ export class ExecutorManager {
         this.senderManager = senderManager
         this.bundlingMode = this.config.bundleMode
         this.bundleManager = bundleManager
-        this.requestShutdown = requestShutdown
 
         if (this.bundlingMode === "auto") {
             this.autoScalingBundling()
@@ -628,7 +621,8 @@ export class ExecutorManager {
         // free the wallet and requeue them rather than dropping them. If it
         // was already tracked, handleBlock owns recovery -> don't resubmit.
         if (!bundleSubmitted) {
-            // A failed getWallet left no wallet to free.
+            // A failed getWallet left no local handle to free (a lost take
+            // reply can still leave a reservation in Redis; see ADR 0006).
             if (acquiredWallet) {
                 await this.senderManager
                     .markWalletProcessed(acquiredWallet)
@@ -655,23 +649,6 @@ export class ExecutorManager {
                         "failed to resubmit userOps after send error"
                     )
                 )
-        }
-        // The popped address was another instance's and is gone from the
-        // shared queue. Retrying would discard one per attempt until the pool
-        // is empty, so once the ops are requeued, shut down: the restart
-        // re-seeds the queue (ADR 0004).
-        if (!acquiredWallet && err instanceof WalletNotFoundError) {
-            this.logger.error(
-                {
-                    event: "executorWalletNotOwned",
-                    executor: err.address
-                },
-                "executor wallet from the shared queue is not one of this instance's keys; shutting down so a restart can re-seed the queue"
-            )
-            if (!this.shutdownRequested) {
-                this.shutdownRequested = true
-                this.requestShutdown("executorWalletNotOwned")
-            }
         }
         return undefined
     }
@@ -1472,8 +1449,17 @@ export class ExecutorManager {
                         )
                     }
 
-                    // Free wallet as no bundle was sent.
-                    await this.senderManager.markWalletProcessed(executor)
+                    // Free wallet as no bundle was sent. Callers do not await
+                    // this method, so a failed release must not escape as an
+                    // unhandled rejection: that would shut the process down.
+                    await this.senderManager
+                        .markWalletProcessed(executor)
+                        .catch((err) =>
+                            this.logger.error(
+                                { err, executor: executor.address },
+                                "failed to free wallet after failed replacement"
+                            )
+                        )
 
                     this.metrics.replacedTransactions
                         .labels({ reason, status: "failed" })

@@ -17,6 +17,10 @@ export default defineConfig({
         }
     },
     test: {
-        environment: "node"
+        environment: "node",
+        // The real-Redis script tests share one server's script cache, and
+        // SCRIPT FLUSH clears it for every client. Run files one at a time
+        // so one file's flush cannot break another's command counts.
+        fileParallelism: false
     }
 })
