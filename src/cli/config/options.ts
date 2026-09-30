@@ -464,6 +464,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "0"
     },
+    "arbitrum-skip-network-gas-price": {
+        description:
+            "Skip the unused network fee quote for initial Arbitrum EIP-1559 sends. Requires a status listener accepting absent network fee quote fields",
+        type: "boolean",
+        require: false,
+        default: false
+    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",

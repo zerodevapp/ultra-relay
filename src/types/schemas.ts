@@ -747,8 +747,8 @@ const OpEventType = z.union([
             submissionAttempts: z.number(),
             bundlerMaxFeePerGas: hexDataSchema,
             bundlerMaxPriorityFeePerGas: hexDataSchema,
-            networkMaxFeePerGas: hexDataSchema,
-            networkMaxPriorityFeePerGas: hexDataSchema,
+            networkMaxFeePerGas: hexDataSchema.optional(),
+            networkMaxPriorityFeePerGas: hexDataSchema.optional(),
             networkBaseFee: hexDataSchema
         })
     }),

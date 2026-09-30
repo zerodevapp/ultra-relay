@@ -153,6 +153,7 @@ export const executorArgsSchema = z.object({
         .string()
         .transform((val) => parseGwei(val))
         .default("0"),
+    "arbitrum-skip-network-gas-price": z.boolean().default(false),
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3),
     "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5),

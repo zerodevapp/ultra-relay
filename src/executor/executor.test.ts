@@ -153,6 +153,54 @@ const call = (submissionAttempts: number, arbitrumPriorityFeePerGas = 0n) =>
     )
 
 describe("getBundleGasPrice on arbitrum", () => {
+    it.each([0n, 1n, 30_000_000n, 200_000_000n])(
+        "does not depend on a network quote for configured tip %s",
+        (arbitrumPriorityFeePerGas) => {
+            const config = {
+                chainType: "arbitrum",
+                arbitrumGasBidMultiplier: 5n,
+                arbitrumPriorityFeePerGas
+            }
+            for (const submissionAttempts of [0, 1, 7]) {
+                const input = {
+                    bundle: { submissionAttempts } as never,
+                    networkBaseFee: 20_000_000n,
+                    totalBeneficiaryFees: 0n,
+                    bundleGasUsed: 1n
+                }
+                const context = { config } as unknown as Executor
+                const quoted = getBundleGasPrice.call(context, {
+                    ...input,
+                    networkGasPrice: {
+                        maxFeePerGas: 999_000_000n,
+                        maxPriorityFeePerGas: 111_000_000n
+                    }
+                })
+                expect(
+                    getBundleGasPrice.call(context, {
+                        ...input,
+                        networkGasPrice: undefined
+                    })
+                ).toEqual(quoted)
+            }
+        }
+    )
+
+    it("rejects a missing network quote outside Arbitrum", () => {
+        expect(() =>
+            getBundleGasPrice.call(
+                { config: { chainType: "default" } } as unknown as Executor,
+                {
+                    bundle: { submissionAttempts: 0 } as never,
+                    networkGasPrice: undefined,
+                    networkBaseFee: 20_000_000n,
+                    totalBeneficiaryFees: 0n,
+                    bundleGasUsed: 1n
+                }
+            )
+        ).toThrow("Network gas price is required outside Arbitrum")
+    })
+
     it("bids no priority fee so the bundle pays baseFee", () => {
         expect(call(0)).toEqual({
             maxFeePerGas: 100_000_000n,

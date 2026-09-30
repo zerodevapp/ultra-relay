@@ -2401,6 +2401,82 @@ describe("sendBundleToExecutor submission order", () => {
     })
 })
 
+describe("initial Arbitrum sends without the unused network quote", () => {
+    it.each([
+        ["arbitrum", false, true, 0, false],
+        ["arbitrum", false, false, 0, true],
+        ["arbitrum", true, true, 0, true],
+        ["arbitrum", false, true, 2, true],
+        ["default", false, true, 0, true]
+    ] as const)(
+        "chain=%s legacy=%s optIn=%s attempts=%s queriesQuote=%s",
+        async (chainType, legacy, optIn, attempts, queriesQuote) => {
+            const send = makeSend()
+            Object.assign(send.manager.config, {
+                chainType,
+                legacyTransactions: legacy,
+                arbitrumSkipNetworkGasPrice: optIn
+            })
+            const getBaseFee = vi.fn(async () => 20_000_000n)
+            send.manager.getBaseFee = getBaseFee
+            const bundle = makeBundle(makeUserOps())
+            bundle.submissionAttempts = attempts
+
+            await realSendBundleToExecutor.call(send.manager, bundle)
+
+            expect(send.tryGetNetworkGasPrice).toHaveBeenCalledTimes(
+                queriesQuote ? 1 : 0
+            )
+            expect(getBaseFee).toHaveBeenCalledTimes(1)
+            expect(send.getTransactionCount).toHaveBeenCalledTimes(1)
+            expect(send.bundle).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    networkBaseFee: 20_000_000n,
+                    networkGasPrice: queriesQuote
+                        ? { maxFeePerGas: 1n, maxPriorityFeePerGas: 1n }
+                        : undefined,
+                    userOpBundle: bundle,
+                    nonce: 0
+                })
+            )
+        }
+    )
+
+    it.each(["baseFee", "nonce"] as const)(
+        "still requeues when the required %s read fails",
+        async (failed) => {
+            const send = makeSend()
+            Object.assign(send.manager.config, {
+                chainType: "arbitrum",
+                legacyTransactions: false,
+                arbitrumSkipNetworkGasPrice: true
+            })
+            send.manager.getBaseFee = async () => {
+                if (failed === "baseFee") {
+                    throw new Error("base fee failed")
+                }
+                return 20_000_000n
+            }
+            if (failed === "nonce") {
+                send.getTransactionCount.mockRejectedValueOnce(
+                    new Error("nonce failed")
+                )
+            }
+
+            expect(
+                await realSendBundleToExecutor.call(
+                    send.manager,
+                    makeBundle(makeUserOps())
+                )
+            ).toBeUndefined()
+            expect(send.bundle).not.toHaveBeenCalled()
+            expect(send.tryGetNetworkGasPrice).not.toHaveBeenCalled()
+            expect(send.markWalletProcessed).toHaveBeenCalledTimes(1)
+            expect(send.resubmitUserOps).toHaveBeenCalledTimes(1)
+        }
+    )
+})
+
 describe("potentiallyResubmitBundle underpricing on arbitrum", () => {
     const potentiallyResubmitBundle = (
         ExecutorManager.prototype as unknown as {
