@@ -124,7 +124,7 @@ application:
 
     resources:
       requests:
-        cpu: 1
+        cpu: 2
         memory: 2Gi
       limits:
         # No CPU limit on purpose: it only throttles a latency-sensitive process.

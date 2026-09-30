@@ -61,7 +61,8 @@ application:
             "redis-key-prefix": "ostium",
             "arbitrum-priority-fee-per-gas": "0.03",
             "send-transaction-rpc-url": "https://arb1-sequencer.arbitrum.io/rpc",
-            "enable-event-loop-metrics": true
+            "enable-event-loop-metrics": true,
+            "arbitrum-skip-network-gas-price": true
           }
 
 # Secrets Manager secret "k8s__ultra-relay_arbitrum-ostium" is a JSON object
