@@ -16,7 +16,7 @@ application:
   deployment:
     # Horizontal scaling (config.json below): the pods share the mempool and
     # executor wallets through Redis at REDIS_ENDPOINT.
-    replicas: 2
+    replicas: 3
 
     image:
       # Rewritten by deploy-pr.yml; never hand-edit. Placeholder until the
@@ -60,7 +60,8 @@ application:
             "enable-horizontal-scaling": true,
             "redis-key-prefix": "ostium",
             "arbitrum-priority-fee-per-gas": "0.03",
-            "send-transaction-rpc-url": "https://arb1-sequencer.arbitrum.io/rpc"
+            "send-transaction-rpc-url": "https://arb1-sequencer.arbitrum.io/rpc",
+            "enable-event-loop-metrics": true
           }
 
 # Secrets Manager secret "k8s__ultra-relay_arbitrum-ostium" is a JSON object
