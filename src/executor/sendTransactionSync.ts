@@ -8,23 +8,44 @@ import {
     type SendTransactionParameters,
     type Transport,
     type WalletClient,
-    keccak256
+    keccak256,
+    shouldThrow
 } from "viem"
 import { parseAccount } from "viem/accounts"
 
-type SyncWalletClient = WalletClient<Transport, Chain, Account | undefined>
+// EIP-7966 code 4, older nodes' wording, or viem giving up client-side.
+const SYNC_TIMEOUT = /timeout|timed out|wasn't processed|not processed in time/i
 
-// viem's sendTransactionSync throws on a receipt timeout without the hash, and a
-// timeout means the node accepted the transaction but hadn't included it yet.
-// Throwing would make the bundle look failed and requeue its userOps while the
-// original lands untracked. So the account records what it signs, and a timeout
-// returns that hash for the block watcher to track as pending, the same state the
-// async path leaves a bundle in.
-async function sendTransactionSync(
-    client: SyncWalletClient,
+export const isSyncTimeout = (e: unknown) =>
+    e instanceof BaseError &&
+    e.walk((node) => {
+        const { name, code, message, details } = node as {
+            name?: string
+            code?: unknown
+            message?: string
+            details?: string
+        }
+        return (
+            code === 4 ||
+            name === "TimeoutError" ||
+            SYNC_TIMEOUT.test(`${message} ${details}`)
+        )
+    }) !== null
+
+// A timed-out tx was accepted; resending it elsewhere fails as a duplicate.
+export const syncShouldThrow = (e: Error) => shouldThrow(e) || isSyncTimeout(e)
+
+// viem drops the hash on timeout; record the signed tx so a timeout stays pending.
+export async function sendTransactionSync({
+    walletClient,
+    request,
+    logger
+}: {
+    walletClient: WalletClient<Transport, Chain, Account | undefined>
     request: SendTransactionParameters<Chain, Account | undefined>
-): Promise<{ transactionHash: Hex; timedOut: boolean }> {
-    const account_ = request.account ?? client.account
+    logger: Logger
+}): Promise<Hex> {
+    const account_ = request.account ?? walletClient.account
     const account = account_ ? parseAccount(account_) : undefined
     if (account?.type !== "local") {
         throw new Error("sync submission requires a local executor account")
@@ -43,107 +64,21 @@ async function sendTransactionSync(
     }
 
     try {
-        const receipt = await client.sendTransactionSync({
+        const receipt = await walletClient.sendTransactionSync({
             ...request,
             account: recordingAccount
         })
-        return { transactionHash: receipt.transactionHash, timedOut: false }
+        return receipt.transactionHash
     } catch (e) {
-        // Unsigned means nothing reached the node, so a timeout there is a failure.
+        // Unsigned means nothing was sent.
         if (!signedTransaction || !isSyncTimeout(e)) {
             throw e
         }
-        return {
-            transactionHash: keccak256(signedTransaction),
-            timedOut: true
-        }
-    }
-}
-
-type ErrorNode = {
-    name?: string
-    code?: unknown
-    message?: string
-    details?: string
-}
-
-const walkError = (e: unknown, match: (node: ErrorNode) => boolean) =>
-    e instanceof BaseError &&
-    e.walk((node) => match(node as ErrorNode)) !== null
-
-// EIP-7966 reports a receipt wait that ran out with code 4 ("added to the mempool
-// but wasn't processed in time"); nodes that predate the final code say so in the
-// message. viem's own TimeoutError means the client gave up waiting, which is just
-// as ambiguous about whether the node accepted the transaction.
-const SYNC_TIMEOUT = /timeout|timed out|wasn't processed|not processed in time/i
-
-const isSyncTimeout = (e: unknown) =>
-    walkError(
-        e,
-        (node) =>
-            node.code === 4 ||
-            node.name === "TimeoutError" ||
-            SYNC_TIMEOUT.test(`${node.message} ${node.details}`)
-    )
-
-// Same try-then-latch viem's own sendTransaction uses for wallet_sendTransaction:
-// the first real send is the probe, and an endpoint that lacks the method costs one
-// extra round trip per process. Keyed by client uid because the private and public
-// wallet clients are different nodes.
-const syncUnsupported = new Set<string>()
-
-export const isSyncSubmissionSupported = (client: { uid: string }) =>
-    !syncUnsupported.has(client.uid)
-
-// Name and code both, because some providers answer an unknown method with an
-// error viem never wrapped. Not InvalidInputRpcError: viem maps every -32000 to it,
-// and nodes also use -32000 for underpriced and nonce-too-low. The message match is
-// for Alchemy, which reports the method as unavailable per network with -32600
-// ("eth_sendRawTransactionSync is not available on the ETH_MAINNET"), and is keyed
-// on the method name so no other -32600 can latch the arm off.
-const METHOD_UNAVAILABLE =
-    /eth_sendRawTransactionSync.{0,20}(not available|not supported|does not exist)/i
-
-const isMethodNotFound = (e: unknown) =>
-    walkError(
-        e,
-        (node) =>
-            node.name === "MethodNotFoundRpcError" ||
-            node.name === "MethodNotSupportedRpcError" ||
-            node.code === -32601 ||
-            node.code === -32004 ||
-            METHOD_UNAVAILABLE.test(`${node.message} ${node.details}`)
-    )
-
-export async function sendTransactionSyncOrFallback(
-    client: SyncWalletClient,
-    request: SendTransactionParameters<Chain, Account | undefined>,
-    logger: Logger
-): Promise<Hex> {
-    if (!isSyncSubmissionSupported(client)) {
-        return await client.sendTransaction(request)
-    }
-    try {
-        const { transactionHash, timedOut } = await sendTransactionSync(
-            client,
-            request
-        )
-        if (timedOut) {
-            logger.warn(
-                { chainId: client.chain.id, txHash: transactionHash },
-                "eth_sendRawTransactionSync timed out before inclusion, tracking the transaction as pending"
-            )
-        }
-        return transactionHash
-    } catch (e) {
-        if (!isMethodNotFound(e)) {
-            throw e
-        }
-        syncUnsupported.add(client.uid)
+        const transactionHash = keccak256(signedTransaction)
         logger.warn(
-            { chainId: client.chain.id },
-            "eth_sendRawTransactionSync unsupported, falling back to eth_sendRawTransaction"
+            { txHash: transactionHash },
+            "eth_sendRawTransactionSync timed out before inclusion, tracking the transaction as pending"
         )
-        return await client.sendTransaction(request)
+        return transactionHash
     }
 }

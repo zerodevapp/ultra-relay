@@ -445,7 +445,7 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
     },
     "send-transaction-sync": {
         description:
-            "Submit the bundle with eth_sendRawTransactionSync, so the node returns the receipt at inclusion instead of the bundler polling for it. Falls back to eth_sendRawTransaction per endpoint when the node lacks the method",
+            "Submit bundles with eth_sendRawTransactionSync, which returns at inclusion. rpc-url and send-transaction-rpc-url must both support it",
         type: "boolean",
         require: false,
         default: false

@@ -33,10 +33,7 @@ import type { SendTransactionErrorType } from "viem"
 import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
-import {
-    isSyncSubmissionSupported,
-    sendTransactionSyncOrFallback
-} from "./sendTransactionSync"
+import { sendTransactionSync } from "./sendTransactionSync"
 import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
@@ -305,10 +302,7 @@ export class Executor {
                     }
                 }
 
-                // Same span name either way so the submit step stays comparable;
-                // `sync` says which call produced it. The sync call only returns
-                // once the transaction is included, so this span covers inclusion
-                // too -- latency the async path pays later, on the block watcher.
+                // With `sync`, the span covers the wait for inclusion.
                 transactionHash = await timed(
                     childLogger,
                     "walletClient.sendTransaction",
@@ -317,17 +311,15 @@ export class Executor {
                         isPrivate: usePrivateEndpoint,
                         executor: account.address,
                         entryPoint,
-                        sync:
-                            useSyncSubmission &&
-                            isSyncSubmissionSupported(walletClient)
+                        sync: useSyncSubmission
                     },
                     () =>
                         useSyncSubmission
-                            ? sendTransactionSyncOrFallback(
+                            ? sendTransactionSync({
                                   walletClient,
                                   request,
-                                  childLogger
-                              )
+                                  logger: childLogger
+                              })
                             : walletClient.sendTransaction(request)
                 )
 

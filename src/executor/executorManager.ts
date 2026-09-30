@@ -568,12 +568,8 @@ export class ExecutorManager {
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
 
-                    // With sync submission the send only returned because the
-                    // transaction was already included, so the receipt is there to be
-                    // read now. Marking the userOps as submitted must finish first:
-                    // handleBlock removes submitted entries during inclusion cleanup,
-                    // and starting it earlier could resurrect an already-included op
-                    // when the mark call completes afterward.
+                    // Sync sends return at inclusion, so check now. Must follow
+                    // markUserOpsAsSubmitted, or cleanup can resurrect included ops.
                     if (this.config.sendTransactionSync) {
                         void this.handleBlock().catch((err) =>
                             this.logger.error(

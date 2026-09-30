@@ -19,6 +19,7 @@ import {
 } from "viem"
 import * as chains from "viem/chains"
 import { type AltoConfig, createConfig } from "../createConfig"
+import { syncShouldThrow } from "../executor/sendTransactionSync"
 import { getSenderManager } from "../executor/senderManager/index"
 import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
 import type { IOptionsInput } from "./config"
@@ -214,7 +215,12 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                           createWalletTransport(args.sendTransactionRpcUrl),
                           createWalletTransport(args.rpcUrl)
                       ],
-                      { rank: false }
+                      {
+                          rank: false,
+                          shouldThrow: args.sendTransactionSync
+                              ? syncShouldThrow
+                              : undefined
+                      }
                   ),
                   chain
               })
