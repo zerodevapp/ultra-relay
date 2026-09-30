@@ -4,7 +4,9 @@ import type { Logger } from "@alto/utils"
 import {
     http,
     type Hex,
+    NonceTooLowError,
     TimeoutError,
+    TransactionExecutionError,
     createWalletClient,
     custom,
     keccak256
@@ -162,6 +164,23 @@ describe("sendTransactionSyncOrFallback", () => {
         expect(calls).toContain("eth_sendRawTransactionSync")
         expect(calls).not.toContain("eth_sendRawTransaction")
         expect(isSyncSubmissionSupported(client)).toBe(true)
+    })
+
+    // The executor's retry loop only recognises nonce and intrinsic-gas errors in
+    // the shape viem's sendTransaction throws, so the sync path must match it.
+    it("wraps node errors the way sendTransaction does", async () => {
+        const { client } = clientWith(() => {
+            throw { code: -32000, message: "nonce too low" }
+        })
+
+        const error = await sendTransactionSyncOrFallback(
+            client,
+            request,
+            logger
+        ).catch((e) => e)
+
+        expect(error).toBeInstanceOf(TransactionExecutionError)
+        expect(error.cause).toBeInstanceOf(NonceTooLowError)
     })
 })
 

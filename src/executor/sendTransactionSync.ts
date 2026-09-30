@@ -4,8 +4,8 @@ import {
     BaseError,
     type Chain,
     type Hex,
+    type LocalAccount,
     type SendTransactionParameters,
-    type TransactionSerializable,
     type Transport,
     type WalletClient,
     keccak256
@@ -14,10 +14,12 @@ import { parseAccount } from "viem/accounts"
 
 type SyncWalletClient = WalletClient<Transport, Chain, Account | undefined>
 
-// viem's own sendTransactionSync throws on a receipt timeout without the hash, so
-// this prepares and signs the same way it does and keeps the hash for that case.
-// eth_sendRawTransactionSync returns the receipt at inclusion instead of
-// eth_sendRawTransaction returning a hash the caller then has to poll for.
+// viem's sendTransactionSync throws on a receipt timeout without the hash, and a
+// timeout means the node accepted the transaction but hadn't included it yet.
+// Throwing would make the bundle look failed and requeue its userOps while the
+// original lands untracked. So the account records what it signs, and a timeout
+// returns that hash for the block watcher to track as pending, the same state the
+// async path leaves a bundle in.
 async function sendTransactionSync(
     client: SyncWalletClient,
     request: SendTransactionParameters<Chain, Account | undefined>
@@ -27,35 +29,32 @@ async function sendTransactionSync(
     if (account?.type !== "local") {
         throw new Error("sync submission requires a local executor account")
     }
-    const prepared = await client.prepareTransactionRequest({
-        ...request,
-        account
-    })
-    // Signed with the account directly, as viem's sendTransaction does:
-    // client.signTransaction would first spend an eth_chainId round trip.
-    const serializedTransaction = await account.signTransaction(
-        prepared as TransactionSerializable,
-        {
-            serializer: client.chain.serializers?.transaction
-        }
-    )
 
-    // A timeout means the node accepted the transaction but it wasn't included in
-    // time, so it is on its way on chain. Throwing here would make the bundle look
-    // failed and requeue its userOps while the original lands untracked, so return
-    // the locally computed hash and let the block watcher treat it as pending, the
-    // same state the async path leaves a bundle in.
+    let signedTransaction: Hex | undefined
+    const recordingAccount: LocalAccount = {
+        ...account,
+        signTransaction: async (transaction, options) => {
+            signedTransaction = await account.signTransaction(
+                transaction,
+                options
+            )
+            return signedTransaction
+        }
+    }
+
     try {
-        const receipt = await client.sendRawTransactionSync({
-            serializedTransaction
+        const receipt = await client.sendTransactionSync({
+            ...request,
+            account: recordingAccount
         })
         return { transactionHash: receipt.transactionHash, timedOut: false }
     } catch (e) {
-        if (!isSyncTimeout(e)) {
+        // Unsigned means nothing reached the node, so a timeout there is a failure.
+        if (!signedTransaction || !isSyncTimeout(e)) {
             throw e
         }
         return {
-            transactionHash: keccak256(serializedTransaction),
+            transactionHash: keccak256(signedTransaction),
             timedOut: true
         }
     }
