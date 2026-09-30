@@ -21,7 +21,7 @@ application:
     image:
       # Rewritten by deploy-pr.yml; never hand-edit. Placeholder until the
       # first rollout — the pod cannot start until then.
-      tag: "feat-event-loop-metrics-1db7cc5"
+      tag: "feat-arbitrum-skip-network-gas-price-9404fd8"
 
     volumes:
       config:
