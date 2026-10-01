@@ -8,7 +8,7 @@ name: Build and push image to ECR
 #
 # Re-runs are safe: if the tag already exists in ECR the build is skipped and
 # the release is only created when missing (the ECR repo should use immutable
-# tags, ADR 0002 assumption 1).
+# tags).
 on:
   push:
     branches: [main]
@@ -33,7 +33,7 @@ on:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  # Created by SRE; trust policy must allow repo:zerodevapp/ultra-relay:* (ADR 0002).
+  # Created by SRE; trust policy must allow repo:zerodevapp/ultra-relay:*.
   # Both carry the AWS account ID, so they are repository secrets: this repo's
   # run logs are public, and secrets are masked there while variables are not.
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
