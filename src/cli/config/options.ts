@@ -471,6 +471,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: false
     },
+    "skip-bundle-simulation": {
+        description:
+            "Skip the bundle-time filterOps re-simulation on a bundle's first send. Ops are still simulated on arrival, and a bundle that reverts onchain is recovered op by op. Without the simulated beneficiary fees, the bid falls back to the network gas price",
+        type: "boolean",
+        require: false,
+        default: false
+    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",

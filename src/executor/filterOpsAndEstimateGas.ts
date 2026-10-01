@@ -290,12 +290,17 @@ export async function filterOpsAndEstimateGas({
     userOpBundle,
     config,
     logger,
-    networkBaseFee
+    networkBaseFee,
+    skipSimulation = false
 }: {
     userOpBundle: UserOperationBundle
     config: AltoConfig
     logger: Logger
     networkBaseFee: bigint
+    // Trust the arrival-time simulation and bundle every op as is. Only the
+    // gas used and beneficiary fees go missing, so the break-even bid is 0
+    // and pricing uses the network gas price (Arbitrum ignores both).
+    skipSimulation?: boolean
 }): Promise<FilterOpsResult> {
     const { utilityWalletAddress: beneficiary } = config
     const { userOps, entryPoint } = userOpBundle
@@ -307,14 +312,20 @@ export async function filterOpsAndEstimateGas({
 
     try {
         // Create promises for parallel execution
-        const filterOpsPromise = timed(logger, "filterOps", timingCtx, () =>
-            getFilterOpsResult({
-                userOpBundle,
-                config,
-                networkBaseFee,
-                beneficiary
-            })
-        )
+        const filterOpsPromise = skipSimulation
+            ? Promise.resolve({
+                  gasUsed: 0n,
+                  balanceChange: 0n,
+                  rejectedUserOps: []
+              })
+            : timed(logger, "filterOps", timingCtx, () =>
+                  getFilterOpsResult({
+                      userOpBundle,
+                      config,
+                      networkBaseFee,
+                      beneficiary
+                  })
+              )
 
         // Start chain-specific overhead calculation in parallel
         const chainSpecificOverheadPromise = timed(
