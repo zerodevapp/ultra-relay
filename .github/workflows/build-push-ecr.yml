@@ -1,8 +1,8 @@
 name: Build and push image to ECR
 
 # Every merge to main builds the Dockerfile, pushes main-<sha> to ECR and cuts
-# GitHub release v<run_number>. Nothing deploys here — see deploy-pr.yml and
-# deployments/README.md. A manual run on any branch pushes <branch>-<sha>
+# GitHub release v<run_number>. Nothing deploys here — rollouts live in the
+# separate deployments repo. A manual run on any branch pushes <branch>-<sha>
 # (no release) so a branch can be rolled out; dry_run builds without AWS.
 # Pull requests that touch the image inputs get a build-only check.
 #
@@ -15,10 +15,6 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'deployments/**'
-      - 'scripts/deployments/**'
-      - '.github/workflows/deploy-pr.yml'
-      - '.github/workflows/deployments-check.yml'
   pull_request:
     paths:
       - 'Dockerfile'
