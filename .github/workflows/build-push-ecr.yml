@@ -32,9 +32,7 @@ on:
         default: false
 
 env:
-  # ECR lives in the management account in us-west-2 like every other ZeroDev
-  # image; the us-east-2 cluster pulls cross-region (ADR 0002, assumption 1).
-  AWS_REGION: us-west-2
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   # Created by SRE; trust policy must allow repo:zerodevapp/ultra-relay:* (ADR 0002).
   # Both carry the AWS account ID, so they are repository secrets: this repo's
   # run logs are public, and secrets are masked there while variables are not.
