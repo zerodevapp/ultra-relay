@@ -36,8 +36,10 @@ env:
   # image; the us-east-2 cluster pulls cross-region (ADR 0002, assumption 1).
   AWS_REGION: us-west-2
   # Created by SRE; trust policy must allow repo:zerodevapp/ultra-relay:* (ADR 0002).
-  AWS_ROLE_ARN: arn:aws:iam::352956043285:role/ultra-relay-gha
-  ECR_REGISTRY: 352956043285.dkr.ecr.us-west-2.amazonaws.com
+  # Both carry the AWS account ID, so they are repository secrets: this repo's
+  # run logs are public, and secrets are masked there while variables are not.
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
   ECR_REPOSITORY: offchain-labs/ultra-relay
 
 permissions:
@@ -162,14 +164,16 @@ jobs:
               }
               return
             }
+            // Drop the registry host: it holds the AWS account ID and releases are public.
             const tags = process.env.IMAGE_TAGS.split('\n').filter(Boolean)
+              .map((t) => t.slice(t.indexOf('/') + 1))
             const body = [
               '## Docker images',
               ...tags.map((t) => `- \`${t}\``),
               '',
               `Digest: \`${process.env.IMAGE_DIGEST}\``,
               '',
-              'Roll out with the "Create deploy PR" workflow.'
+              'Roll out from the deployments repo.'
             ].join('\n')
             await github.rest.repos.createRelease({
               owner,

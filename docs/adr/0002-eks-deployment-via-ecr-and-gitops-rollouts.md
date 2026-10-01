@@ -74,17 +74,17 @@ Marked **[verified]** when checked against code or a live source, **[SRE]**
 when it depends on infrastructure we could not inspect and must be confirmed
 by SRE before first rollout.
 
-1. **[SRE]** ECR lives in the management account `352956043285`, region
+1. **[SRE]** ECR lives in the management account, region
    us-west-2, repository `offchain-labs/ultra-relay` — confirmed by SRE, the
    same registry and region every other ZeroDev image uses; the cluster pulls
    cross-region and cross-account exactly like the us-east-1 clusters do. The
-   target cluster is `zerodev-prod-ue2-v1` (us-east-2, AWS account
-   `518033442333`, the same account as `zerodev-prod-ue1-v1`), added by SRE to
+   target cluster is `zerodev-prod-ue2-v1` (us-east-2, the same AWS account
+   as `zerodev-prod-ue1-v1`), added by SRE to
    the ArgoCD config repo for this migration. The repository
    uses immutable tags; the build workflow skips the build when the tag
    already exists, so a re-run can never replace the image behind an existing
    release.
-2. **[SRE]** IAM role `arn:aws:iam::352956043285:role/ultra-relay-gha` and
+2. **[SRE]** IAM role `ultra-relay-gha` in the management account and
    the ECR repository were created by SRE (values confirmed 2026-09-17). The
    role must trust GitHub OIDC for `repo:zerodevapp/ultra-relay:*` — this
    repository is in the `zerodevapp` org, not `OffchainLabs`, so copying
