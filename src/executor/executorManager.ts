@@ -402,13 +402,25 @@ export class ExecutorManager {
                         executor: wallet.address
                     }
 
+                    // Arbitrum's initial EIP-1559 bid uses the separate base
+                    // fee and configured tip, not this generic network quote.
+                    // Leave legacy sends, rotations and replacements unchanged.
+                    const skipNetworkGasPrice =
+                        this.config.arbitrumSkipNetworkGasPrice &&
+                        this.config.chainType === "arbitrum" &&
+                        !this.config.legacyTransactions &&
+                        userOpBundle.submissionAttempts === 0
+
                     const [gasPriceParams, baseFee, nonce] = await Promise.all([
-                        timed(
-                            this.logger,
-                            "preBundle.networkGasPrice",
-                            bundleCtx,
-                            () => this.gasPriceManager.tryGetNetworkGasPrice()
-                        ),
+                        skipNetworkGasPrice
+                            ? Promise.resolve(undefined)
+                            : timed(
+                                  this.logger,
+                                  "preBundle.networkGasPrice",
+                                  bundleCtx,
+                                  () =>
+                                      this.gasPriceManager.tryGetNetworkGasPrice()
+                              ),
                         timed(this.logger, "preBundle.baseFee", bundleCtx, () =>
                             this.getBaseFee()
                         ),
@@ -426,7 +438,11 @@ export class ExecutorManager {
                         return []
                     })
 
-                    if (!gasPriceParams || nonce === undefined) {
+                    if (
+                        (!skipNetworkGasPrice && !gasPriceParams) ||
+                        baseFee === undefined ||
+                        nonce === undefined
+                    ) {
                         // Free executor if failed to get initial params.
                         await this.senderManager.markWalletProcessed(wallet)
                         await this.mempool.resubmitUserOps({

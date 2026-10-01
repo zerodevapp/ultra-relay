@@ -107,7 +107,7 @@ export class Executor {
         bundleGasUsed
     }: {
         bundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         totalBeneficiaryFees: bigint
         bundleGasUsed: bigint
@@ -147,6 +147,10 @@ export class Executor {
                 ),
                 maxPriorityFeePerGas: priorityFee
             }
+        }
+
+        if (!networkGasPrice) {
+            throw new Error("Network gas price is required outside Arbitrum")
         }
 
         // Increase network gas price for resubmissions to improve tx inclusion
@@ -438,7 +442,7 @@ export class Executor {
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         nonce: number
         previousTransactionRequest?: {
@@ -618,9 +622,9 @@ export class Executor {
                 submissionAttempts: userOpBundle.submissionAttempts,
                 bundlerMaxFeePerGas: maxFeePerGas,
                 bundlerMaxPriorityFeePerGas: maxPriorityFeePerGas,
-                networkMaxFeePerGas: networkGasPrice.maxFeePerGas,
+                networkMaxFeePerGas: networkGasPrice?.maxFeePerGas,
                 networkMaxPriorityFeePerGas:
-                    networkGasPrice.maxPriorityFeePerGas,
+                    networkGasPrice?.maxPriorityFeePerGas,
                 networkBaseFee
             })
         } catch (err: unknown) {
