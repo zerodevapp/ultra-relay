@@ -97,7 +97,10 @@ export class Mempool {
         entryPoint: Address
         transactionHash: Hex
     }) {
-        await Promise.all(
+        // allSettled: a failure is rethrown only once every op's writes have
+        // settled, so the caller never tracks the bundle while a sibling's
+        // submitted write is still in flight.
+        const results = await Promise.allSettled(
             userOps.map(async (userOpInfo) => {
                 const { userOpHash } = userOpInfo
                 await this.store.removeProcessing({ entryPoint, userOpHash })
@@ -110,6 +113,13 @@ export class Mempool {
                 })
             })
         )
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
 
         this.metrics.userOperationsSubmitted
             .labels({ status: "success" })

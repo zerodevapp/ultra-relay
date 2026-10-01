@@ -118,10 +118,9 @@ export class BundleManager {
         // Cleanup bundle
         await this.freeSubmittedBundle(submittedBundle)
 
-        // Process each userOp
-        // rest of the code is non-blocking
-        return (async () => {
-            for (const userOpInfo of userOps) {
+        // Preserve per-op ordering while overlapping independent I/O waits.
+        const results = await Promise.allSettled(
+            userOps.map(async (userOpInfo) => {
                 const userOpReceipt = userOpReceipts[userOpInfo.userOpHash]
 
                 // Cache the receipt
@@ -138,8 +137,15 @@ export class BundleManager {
                     entryPoint,
                     blockReceivedTimestamp
                 )
-            }
-        })()
+            })
+        )
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
     }
 
     /**
