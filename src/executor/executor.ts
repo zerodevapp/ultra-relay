@@ -459,9 +459,16 @@ export class Executor {
             executor: executor.address
         })
 
+        // Only the first send skips the re-simulation; a resubmitted bundle
+        // has waited, so its ops are checked again before paying for another tx.
+        const skipSimulation =
+            this.config.skipBundleSimulation &&
+            userOpBundle.submissionAttempts === 0
+
         const filterOpsResult = await filterOpsAndEstimateGas({
             networkBaseFee,
             userOpBundle,
+            skipSimulation,
             config: this.config,
             logger: childLogger
         })
