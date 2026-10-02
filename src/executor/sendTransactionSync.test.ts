@@ -36,6 +36,7 @@ const request = {
 function clientWith(onSync: () => unknown) {
     const calls: string[] = []
     const sent: Hex[] = []
+    const params_: unknown[][] = []
     const walletClient = createWalletClient({
         account,
         chain: foundry,
@@ -44,13 +45,14 @@ function clientWith(onSync: () => unknown) {
                 calls.push(method)
                 if (method === "eth_sendRawTransactionSync") {
                     sent.push((params as Hex[])[0])
+                    params_.push(params as unknown[])
                     return onSync()
                 }
                 throw new Error(`unexpected ${method}`)
             }
         })
     })
-    return { walletClient, calls, sent }
+    return { walletClient, calls, sent, params: params_ }
 }
 
 describe("sendTransactionSync", () => {
@@ -96,6 +98,41 @@ describe("sendTransactionSync", () => {
         })
 
         expect(hash).toBe(keccak256(sent[0]))
+    })
+
+    // Nitro rejects a numeric timeout param, so the wait is bounded client-side.
+    it("returns the signed hash as pending when the node holds the call past `timeout`", async () => {
+        const { walletClient, sent, params } = clientWith(
+            () => new Promise(() => undefined)
+        )
+
+        const hash = await sendTransactionSync({
+            walletClient,
+            request,
+            timeout: 20,
+            logger
+        })
+
+        expect(hash).toBe(keccak256(sent[0]))
+        expect(params[0]).toHaveLength(1)
+    })
+
+    it("returns the receipt when it arrives before `timeout`", async () => {
+        const { walletClient } = clientWith(
+            () =>
+                new Promise((resolve) =>
+                    setTimeout(() => resolve({ transactionHash: HASH }), 5)
+                )
+        )
+
+        const hash = await sendTransactionSync({
+            walletClient,
+            request,
+            timeout: 1_000,
+            logger
+        })
+
+        expect(hash).toBe(HASH)
     })
 
     // The executor's retry loop matches this shape.

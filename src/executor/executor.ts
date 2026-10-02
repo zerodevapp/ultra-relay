@@ -233,7 +233,8 @@ export class Executor {
             publicClient,
             privateEndpointSubmissionAttempts,
             maxBundlingGasPrice,
-            sendTransactionSync: useSyncSubmission
+            sendTransactionSync: useSyncSubmission,
+            sendTransactionSyncTimeout
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -318,6 +319,7 @@ export class Executor {
                             ? sendTransactionSync({
                                   walletClient,
                                   request,
+                                  timeout: sendTransactionSyncTimeout,
                                   logger: childLogger
                               })
                             : walletClient.sendTransaction(request)

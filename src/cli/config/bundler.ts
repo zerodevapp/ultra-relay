@@ -139,6 +139,7 @@ export const executorArgsSchema = z.object({
     "executor-gas-multiplier": z.string().transform((val) => BigInt(val)),
     "send-handle-ops-retry-count": z.number().int().default(3),
     "send-transaction-sync": z.boolean().default(false),
+    "send-transaction-sync-timeout": z.number().int().min(1).default(2000),
     "transaction-underpriced-multiplier": z
         .string()
         .transform((val) => BigInt(val)),

@@ -39,10 +39,12 @@ export const syncShouldThrow = (e: Error) => shouldThrow(e) || isSyncTimeout(e)
 export async function sendTransactionSync({
     walletClient,
     request,
+    timeout,
     logger
 }: {
     walletClient: WalletClient<Transport, Chain, Account | undefined>
     request: SendTransactionParameters<Chain, Account | undefined>
+    timeout?: number
     logger: Logger
 }): Promise<Hex> {
     const account_ = request.account ?? walletClient.account
@@ -52,6 +54,17 @@ export async function sendTransactionSync({
     }
 
     let signedTransaction: Hex | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let expire: (() => void) | undefined
+    // Starts at signing, so a timeout never abandons a send still being prepared.
+    const expired = new Promise<never>((_, reject) => {
+        expire = () =>
+            reject(
+                new BaseError(
+                    `eth_sendRawTransactionSync timed out after ${timeout}ms`
+                )
+            )
+    })
     const recordingAccount: LocalAccount = {
         ...account,
         signTransaction: async (transaction, options) => {
@@ -59,16 +72,26 @@ export async function sendTransactionSync({
                 transaction,
                 options
             )
+            if (timeout !== undefined) {
+                timer = setTimeout(() => expire?.(), timeout)
+            }
             return signedTransaction
         }
     }
 
     try {
-        const receipt = await walletClient.sendTransactionSync({
+        // Nitro rejects viem's numeric `timeout` param (it wants a hex quantity)
+        // and anvil rejects both forms, so bound the wait here instead.
+        const send = walletClient.sendTransactionSync({
             ...request,
             account: recordingAccount
         })
-        return receipt.transactionHash
+        send.catch(() => undefined)
+        try {
+            return (await Promise.race([send, expired])).transactionHash
+        } finally {
+            clearTimeout(timer)
+        }
     } catch (e) {
         // Unsigned means nothing was sent.
         if (!signedTransaction || !isSyncTimeout(e)) {
