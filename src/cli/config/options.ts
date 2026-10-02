@@ -443,6 +443,20 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: 3
     },
+    "send-transaction-sync": {
+        description:
+            "Submit bundles with eth_sendRawTransactionSync, which returns at inclusion. rpc-url and send-transaction-rpc-url must both support it",
+        type: "boolean",
+        require: false,
+        default: false
+    },
+    "send-transaction-sync-timeout": {
+        description:
+            "Milliseconds the node may hold eth_sendRawTransactionSync before returning; the tx is then tracked as pending. Keep below the RPC request timeout",
+        type: "number",
+        require: false,
+        default: 2000
+    },
     "bundler-initial-commission": {
         description:
             "Initial commission percentage the bundler retains (10 = retain 10% of margin)",

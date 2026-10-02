@@ -33,6 +33,7 @@ import type { SendTransactionErrorType } from "viem"
 import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
+import { sendTransactionSync } from "./sendTransactionSync"
 import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
@@ -235,7 +236,9 @@ export class Executor {
             walletClients,
             publicClient,
             privateEndpointSubmissionAttempts,
-            maxBundlingGasPrice
+            maxBundlingGasPrice,
+            sendTransactionSync: useSyncSubmission,
+            sendTransactionSyncTimeout
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -304,6 +307,7 @@ export class Executor {
                     }
                 }
 
+                // With `sync`, the span covers the wait for inclusion.
                 transactionHash = await timed(
                     childLogger,
                     "walletClient.sendTransaction",
@@ -311,9 +315,18 @@ export class Executor {
                         attempt: attempts,
                         isPrivate: usePrivateEndpoint,
                         executor: account.address,
-                        entryPoint
+                        entryPoint,
+                        sync: useSyncSubmission
                     },
-                    () => walletClient.sendTransaction(request)
+                    () =>
+                        useSyncSubmission
+                            ? sendTransactionSync({
+                                  walletClient,
+                                  request,
+                                  timeout: sendTransactionSyncTimeout,
+                                  logger: childLogger
+                              })
+                            : walletClient.sendTransaction(request)
                 )
 
                 childLogger.info(

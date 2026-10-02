@@ -601,6 +601,18 @@ export class ExecutorManager {
                     }
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
+
+                    // Sync sends return at inclusion, so check now. Must follow
+                    // markUserOpsAsSubmitted, or cleanup can resurrect included ops.
+                    if (this.config.sendTransactionSync) {
+                        void this.handleBlock().catch((err) =>
+                            this.logger.error(
+                                { err },
+                                "immediate post-submission block handling failed"
+                            )
+                        )
+                    }
+
                     this.metrics.bundlesSubmitted
                         .labels({ status: "success" })
                         .inc()
