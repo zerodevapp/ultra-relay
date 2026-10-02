@@ -97,7 +97,10 @@ export class Mempool {
         entryPoint: Address
         transactionHash: Hex
     }) {
-        await Promise.all(
+        // allSettled: a failure is rethrown only once every op's writes have
+        // settled, so the caller never tracks the bundle while a sibling's
+        // submitted write is still in flight.
+        const results = await Promise.allSettled(
             userOps.map(async (userOpInfo) => {
                 const { userOpHash } = userOpInfo
                 await this.store.removeProcessing({ entryPoint, userOpHash })
@@ -110,6 +113,13 @@ export class Mempool {
                 })
             })
         )
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
 
         this.metrics.userOperationsSubmitted
             .labels({ status: "success" })
@@ -811,6 +821,10 @@ export class Mempool {
         const bundles: UserOperationBundle[] = []
         const seenOps = new Set()
         let breakLoop = false
+        // Set by the first pop that finds nothing ready. The loops used to
+        // re-check with a peek before every pop, which on the Redis queue
+        // cost two extra round trips per op; the pop already reports empty.
+        let outstandingEmpty = false
 
         // Sender-and-nonce-key slots already placed in an EARLIER bundle of
         // this pass. Dispatch and execution can overlap across the bundles of
@@ -833,10 +847,7 @@ export class Mempool {
 
         try {
             // Process operations until no more are available or we hit maxBundleCount
-            while (
-                carriedUserOpInfo ||
-                (await this.store.peekOutstanding(entryPoint))
-            ) {
+            while (carriedUserOpInfo || !outstandingEmpty) {
                 // If maxBundles is set and we reached the limit, break
                 if (maxBundleCount && bundles.length >= maxBundleCount) {
                     break
@@ -910,10 +921,7 @@ export class Mempool {
                 }
 
                 // Keep adding ops to current bundle
-                while (
-                    carriedUserOpInfo ||
-                    (await this.store.peekOutstanding(entryPoint))
-                ) {
+                while (carriedUserOpInfo || !outstandingEmpty) {
                     let userOpInfo: UserOpInfo
                     let fromCarry = false
 
@@ -930,6 +938,7 @@ export class Mempool {
                         const poppedUserOpInfo =
                             await this.store.popOutstanding(entryPoint)
                         if (!poppedUserOpInfo) {
+                            outstandingEmpty = true
                             break
                         }
 

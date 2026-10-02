@@ -186,8 +186,8 @@ export class EventManager {
         submissionAttempts: number
         bundlerMaxFeePerGas: bigint
         bundlerMaxPriorityFeePerGas: bigint
-        networkMaxFeePerGas: bigint
-        networkMaxPriorityFeePerGas: bigint
+        networkMaxFeePerGas?: bigint
+        networkMaxPriorityFeePerGas?: bigint
         networkBaseFee: bigint
     }) {
         for (const hash of userOpHashes) {
@@ -202,10 +202,15 @@ export class EventManager {
                         bundlerMaxPriorityFeePerGas: toHex(
                             bundlerMaxPriorityFeePerGas
                         ),
-                        networkMaxFeePerGas: toHex(networkMaxFeePerGas),
-                        networkMaxPriorityFeePerGas: toHex(
-                            networkMaxPriorityFeePerGas
-                        ),
+                        // Absent means not requested, not a zero-valued quote.
+                        ...(networkMaxFeePerGas !== undefined && {
+                            networkMaxFeePerGas: toHex(networkMaxFeePerGas)
+                        }),
+                        ...(networkMaxPriorityFeePerGas !== undefined && {
+                            networkMaxPriorityFeePerGas: toHex(
+                                networkMaxPriorityFeePerGas
+                            )
+                        }),
                         networkBaseFee: toHex(networkBaseFee)
                     }
                 }

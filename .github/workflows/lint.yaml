@@ -9,6 +9,16 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,6 +34,8 @@ jobs:
 
       - name: Run unit tests
         run: pnpm run test:unit
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
 
       - uses: stefanzweifel/git-auto-commit-action@v5
         env:

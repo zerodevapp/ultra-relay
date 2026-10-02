@@ -5,6 +5,7 @@ import {
     initProductionLogger,
     setChainId,
     setNetworkName,
+    startEventLoopMonitorIfEnabled,
     startFetchDispatcherHeartbeat
 } from "@alto/utils"
 import { Registry } from "prom-client"
@@ -270,6 +271,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
 
     const registry = new Registry()
     const metrics = createMetrics(registry)
+    startEventLoopMonitorIfEnabled({ config, registry })
 
     await preFlightChecks(config)
 

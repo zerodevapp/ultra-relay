@@ -478,6 +478,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "0"
     },
+    "arbitrum-skip-network-gas-price": {
+        description:
+            "Skip the unused network fee quote for initial Arbitrum EIP-1559 sends. Requires a status listener accepting absent network fee quote fields",
+        type: "boolean",
+        require: false,
+        default: false
+    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",
@@ -736,6 +743,20 @@ export const logOptions: CliCommandOptions<ILogArgsInput> = {
         type: "string",
         choices: ["trace", "debug", "info", "warn", "error", "fatal"],
         require: false
+    },
+    "enable-event-loop-metrics": {
+        description:
+            "Measure event-loop stalls, utilization and GC pauses: export stall and utilization metrics on /metrics, and log each 1-second window whose worst delay reaches event-loop-block-threshold-ms (with its GC pauses), plus a 60-second summary",
+        type: "boolean",
+        require: false,
+        default: false
+    },
+    "event-loop-block-threshold-ms": {
+        description:
+            "A 1-second window counts as an event-loop stall when its worst delay reaches this many ms (min 25; the delay includes the 10ms sampling interval, so an idle loop already reads 11-25ms; used only with enable-event-loop-metrics)",
+        type: "number",
+        require: false,
+        default: 50
     }
 }
 
