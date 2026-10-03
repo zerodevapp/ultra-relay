@@ -37,15 +37,18 @@ export class GasPriceManager {
 
         this.baseFeePerGasQueue = createMinMaxQueue({
             config,
-            keyPrefix: "base-fee-per-gas-queue"
+            keyPrefix: "base-fee-per-gas-queue",
+            allowZero: true
         })
         this.maxFeePerGasQueue = createMinMaxQueue({
             config,
-            keyPrefix: "max-fee-per-gas-queue"
+            keyPrefix: "max-fee-per-gas-queue",
+            allowZero: true
         })
         this.maxPriorityFeePerGasQueue = createMinMaxQueue({
             config,
-            keyPrefix: "max-priority-fee-per-gas-queue"
+            keyPrefix: "max-priority-fee-per-gas-queue",
+            allowZero: true
         })
 
         // Periodically update gas prices if specified
@@ -338,7 +341,7 @@ export class GasPriceManager {
             }
 
             const baseFee = latestBlock.baseFeePerGas
-            this.baseFeePerGasQueue.saveValue(baseFee)
+            await this.baseFeePerGasQueue.saveValue(baseFee)
 
             return baseFee
         } catch (e) {
@@ -359,7 +362,7 @@ export class GasPriceManager {
             }
 
             let baseFee = await this.baseFeePerGasQueue.getLatestValue()
-            if (!baseFee) {
+            if (baseFee === null) {
                 baseFee = await this.tryUpdateBaseFee()
             }
 
@@ -367,8 +370,8 @@ export class GasPriceManager {
         } catch (e) {
             this.logger.error(e, "Failed to get base fee, returning 0n")
 
-            // Save 0n to the queue for the missing baseFee case
-            this.baseFeePerGasQueue.saveValue(0n)
+            // This is an error fallback, not a successfully fetched zero fee.
+            // Do not cache it and suppress the next recovery attempt.
             return 0n
         }
     }
@@ -377,8 +380,12 @@ export class GasPriceManager {
     private async tryUpdateGasPrice(): Promise<GasPriceParameters> {
         const gasPrice = await this.innerGetGasPrice()
 
-        this.maxFeePerGasQueue.saveValue(gasPrice.maxFeePerGas)
-        this.maxPriorityFeePerGasQueue.saveValue(gasPrice.maxPriorityFeePerGas)
+        await Promise.all([
+            this.maxFeePerGasQueue.saveValue(gasPrice.maxFeePerGas),
+            this.maxPriorityFeePerGasQueue.saveValue(
+                gasPrice.maxPriorityFeePerGas
+            )
+        ])
 
         return gasPrice
     }
@@ -405,7 +412,7 @@ export class GasPriceManager {
             this.maxPriorityFeePerGasQueue.getLatestValue()
         ])
 
-        if (!(maxFeePerGas && maxPriorityFeePerGas)) {
+        if (maxFeePerGas === null || maxPriorityFeePerGas === null) {
             throw new RpcError("No gas price available")
         }
 
@@ -423,7 +430,7 @@ export class GasPriceManager {
     public async getMaxBaseFeePerGas(): Promise<bigint> {
         try {
             let maxBaseFeePerGas = await this.baseFeePerGasQueue.getMaxValue()
-            if (!maxBaseFeePerGas) {
+            if (maxBaseFeePerGas === null) {
                 maxBaseFeePerGas = await this.getBaseFee()
             }
 
@@ -439,7 +446,7 @@ export class GasPriceManager {
 
     public async getHighestMaxFeePerGas(): Promise<bigint> {
         let highestMaxFeePerGas = await this.maxFeePerGasQueue.getMaxValue()
-        if (!highestMaxFeePerGas) {
+        if (highestMaxFeePerGas === null) {
             const gasPrice = await this.getGasPrice()
             highestMaxFeePerGas = gasPrice.maxFeePerGas
         }
@@ -450,7 +457,7 @@ export class GasPriceManager {
     public async getHighestMaxPriorityFeePerGas(): Promise<bigint> {
         let highestMaxPriorityFeePerGas =
             await this.maxPriorityFeePerGasQueue.getMaxValue()
-        if (!highestMaxPriorityFeePerGas) {
+        if (highestMaxPriorityFeePerGas === null) {
             const gasPrice = await this.getGasPrice()
             highestMaxPriorityFeePerGas = gasPrice.maxPriorityFeePerGas
         }
@@ -460,7 +467,7 @@ export class GasPriceManager {
 
     private async getMinMaxFeePerGas(): Promise<bigint> {
         let minMaxFeePerGas = await this.maxFeePerGasQueue.getMinValue()
-        if (!minMaxFeePerGas) {
+        if (minMaxFeePerGas === null) {
             const gasPrice = await this.getGasPrice()
             minMaxFeePerGas = gasPrice.maxFeePerGas
         }
@@ -472,7 +479,7 @@ export class GasPriceManager {
         let minMaxPriorityFeePerGas =
             await this.maxPriorityFeePerGasQueue.getMinValue()
 
-        if (!minMaxPriorityFeePerGas) {
+        if (minMaxPriorityFeePerGas === null) {
             const gasPrices = await this.getGasPrice()
             minMaxPriorityFeePerGas = gasPrices.maxPriorityFeePerGas
         }

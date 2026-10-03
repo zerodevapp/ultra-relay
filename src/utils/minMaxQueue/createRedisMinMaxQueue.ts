@@ -12,15 +12,18 @@ class SortedTtlSet {
     valueKey: string
     timestampKey: string
     queueValidity: number
+    allowZero: boolean
 
     constructor({
         keyPrefix,
         config,
-        redisEndpoint
+        redisEndpoint,
+        allowZero
     }: {
         keyPrefix: string
         config: AltoConfig
         redisEndpoint: string
+        allowZero: boolean
     }) {
         const redis = new Redis(redisEndpoint)
         const queueValidity = config.gasPriceExpiry
@@ -31,12 +34,13 @@ class SortedTtlSet {
         this.valueKey = `${redisKey}:value`
         this.timestampKey = `${redisKey}:timestamp`
         this.queueValidity = queueValidity
+        this.allowZero = allowZero
     }
 
     async add(value: bigint, logger: Logger) {
         try {
             await this.pruneExpiredEntries(logger)
-            if (value === 0n) {
+            if (value === 0n && !this.allowZero) {
                 return
             }
 
@@ -133,16 +137,19 @@ class SortedTtlSet {
 export const createRedisMinMaxQueue = ({
     config,
     keyPrefix,
-    redisEndpoint
+    redisEndpoint,
+    allowZero = false
 }: {
     config: AltoConfig
     keyPrefix: string
     redisEndpoint: string
+    allowZero?: boolean
 }): MinMaxQueue => {
     const queue = new SortedTtlSet({
         config,
         redisEndpoint,
-        keyPrefix: `${keyPrefix}:minMaxQueue`
+        keyPrefix: `${keyPrefix}:minMaxQueue`,
+        allowZero
     })
 
     const logger = config.getLogger(
