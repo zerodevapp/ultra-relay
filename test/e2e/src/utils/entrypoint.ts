@@ -16,6 +16,8 @@ export const getEntryPointAddress = (version: EntryPointVersion) => {
             return entryPoint07Address
         case "0.8":
             return entryPoint08Address
+        default:
+            throw new Error(`Unsupported test EntryPoint version: ${version}`)
     }
 }
 
@@ -27,5 +29,7 @@ export const getEntryPointAbi = (version: EntryPointVersion) => {
             return entryPoint07Abi
         case "0.8":
             return entryPoint08Abi
+        default:
+            throw new Error(`Unsupported test EntryPoint version: ${version}`)
     }
 }
