@@ -84,6 +84,8 @@ export class ExecutorManager {
     private bundleManager: BundleManager
     private unWatch: WatchBlocksReturnType | undefined
 
+    // Next nonce per wallet after a sync settle; rpc-url can lag behind it.
+    private nonceFloors = new Map<Address, number>()
     private currentlyHandlingBlock = false
 
     // When handleBlock last reconciled pending bundles, from either trigger
@@ -461,7 +463,10 @@ export class ExecutorManager {
                         userOpBundle,
                         networkGasPrice: gasPriceParams,
                         networkBaseFee: baseFee,
-                        nonce
+                        nonce: Math.max(
+                            nonce,
+                            this.nonceFloors.get(wallet.address) ?? 0
+                        )
                     })
 
                     if (!bundleResult.success) {
@@ -730,6 +735,11 @@ export class ExecutorManager {
         if (bundleStatus.status === "not_found") {
             return false
         }
+        // Settling frees the wallet before rpc-url may have this block.
+        this.nonceFloors.set(
+            submittedBundle.executor.address,
+            submittedBundle.transactionRequest.nonce + 1
+        )
         const blockReceivedTimestamp = Date.now()
         try {
             if (bundleStatus.status === "included") {

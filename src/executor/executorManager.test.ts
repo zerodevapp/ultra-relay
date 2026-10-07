@@ -1724,6 +1724,7 @@ const makeSend = () => {
                 processRevertedBundle
             },
             startWatchingBlocks: vi.fn(),
+            nonceFloors: new Map(),
             mempool: {
                 markUserOpsAsSubmitted,
                 dropUserOps: vi.fn(),
@@ -2562,7 +2563,7 @@ describe("sendBundleToExecutor with a sync send receipt", () => {
             success: true,
             userOpsBundled: userOpBundle.userOps,
             rejectedUserOps: [],
-            transactionRequest: {},
+            transactionRequest: { nonce: 7 },
             transactionHash: TX_HASH,
             receipt
         }))
@@ -2635,6 +2636,16 @@ describe("sendBundleToExecutor with a sync send receipt", () => {
             "failed to process the sync send receipt"
         )
         expect(send.trackBundle).not.toHaveBeenCalled()
+    })
+
+    it("S6: the wallet's next send never reuses the settled nonce", async () => {
+        const send = sendWithReceipt("included")
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+        // rpc-url still reports 0, the nonce before the settled bundle.
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(send.bundle.mock.calls[1][0]).toMatchObject({ nonce: 8 })
     })
 
     it("S5: without a receipt the bundle is tracked as before", async () => {

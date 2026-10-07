@@ -24,9 +24,43 @@ const isSyncTimeout = (e: unknown) =>
 export const syncShouldThrow = (e: Error) => shouldThrow(e) || isSyncTimeout(e)
 
 // Half the wallet transport's 10 s HTTP timeout, so the node times the call
-// out (code 4) before the client does. Geth holds it 20 s by default; Nitro
-// ignores it and answers once the tx is in a block. Anvil rejects the param.
+// out (code 4) before the client does. Geth holds it 20 s by default.
 const SYNC_TIMEOUT_MS = 5_000
+
+// Geth needs the timeout. Live Arbitrum rejects it in any form (its RPC and
+// sequencer parse it differently), as does anvil, before reading the tx. So
+// such a client resends once without it, and keeps doing so. Nitro answers
+// once the tx is in a block anyway.
+const noTimeoutClients = new Set<string>()
+
+// -32602: invalid params. Our signed tx is well formed, so it is the timeout.
+const isTimeoutParamRejected = (e: unknown) =>
+    e instanceof BaseError &&
+    e.walk((node) => (node as { code?: unknown }).code === -32602) !== null
+
+async function sendRawTransactionSync(
+    walletClient: WalletClient<Transport, Chain, Account | undefined>,
+    serializedTransaction: Hex
+): Promise<TransactionReceipt> {
+    const send = (withTimeout: boolean) =>
+        walletClient.sendRawTransactionSync({
+            serializedTransaction,
+            timeout: withTimeout ? SYNC_TIMEOUT_MS : undefined,
+            throwOnReceiptRevert: false
+        })
+    if (noTimeoutClients.has(walletClient.uid)) {
+        return await send(false)
+    }
+    try {
+        return await send(true)
+    } catch (e) {
+        if (!isTimeoutParamRejected(e)) {
+            throw e
+        }
+        noTimeoutClients.add(walletClient.uid)
+        return await send(false)
+    }
+}
 
 export type SentTransaction = {
     transactionHash: Hex
@@ -58,11 +92,10 @@ export async function sendTransactionSync({
     )
 
     try {
-        const receipt = await walletClient.sendRawTransactionSync({
-            serializedTransaction,
-            timeout: SYNC_TIMEOUT_MS,
-            throwOnReceiptRevert: false
-        })
+        const receipt = await sendRawTransactionSync(
+            walletClient,
+            serializedTransaction
+        )
         return { transactionHash: receipt.transactionHash, receipt }
     } catch (e) {
         if (!isSyncTimeout(e)) {

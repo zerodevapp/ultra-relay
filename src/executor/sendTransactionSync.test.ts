@@ -81,6 +81,34 @@ describe("sendTransactionSync", () => {
         expect(sent.receipt?.status).toBe("success")
     })
 
+    // Live Arbitrum rejects the timeout param before reading the tx.
+    it("resends without the timeout when the node rejects it, and remembers", async () => {
+        const { walletClient, calls } = clientWith((tx) => {
+            if (calls[calls.length - 1].length > 2) {
+                throw {
+                    code: -32602,
+                    message:
+                        "invalid argument 1: json: cannot unmarshal non-string into Go value of type hexutil.Uint64"
+                }
+            }
+            return receiptFor(keccak256(tx), "0x1")
+        })
+
+        const sent = await sendTransactionSync({
+            walletClient,
+            request,
+            logger
+        })
+        await sendTransactionSync({ walletClient, request, logger })
+
+        expect(sent.receipt?.status).toBe("success")
+        expect(calls.map((call) => call[2])).toEqual([
+            5000,
+            undefined,
+            undefined
+        ])
+    })
+
     it("returns a reverted receipt instead of throwing", async () => {
         const { walletClient } = clientWith((tx) =>
             receiptFor(keccak256(tx), "0x0")

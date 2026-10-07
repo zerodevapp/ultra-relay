@@ -497,6 +497,11 @@ export function customTransport(
                     if (error) {
                         let loggerFn = logger.error.bind(logger)
 
+                        // EIP-7966 code 4: accepted, not yet included.
+                        if (error?.code === 4) {
+                            loggerFn = logger.info.bind(logger)
+                        }
+
                         if (isHex(error?.data) && error?.data?.length > 10) {
                             const errorSelector = slice(error?.data, 0, 4)
 
