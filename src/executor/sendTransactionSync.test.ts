@@ -164,14 +164,14 @@ describe("sendTransactionSync", () => {
 })
 
 describe("syncShouldThrow on the private fallback transport", () => {
-    function fallbackClient(onPrivate: () => never) {
+    function fallbackClient(onPrivate: (params: Hex[]) => unknown) {
         const calls: string[] = []
-        const transport = (name: string, handler: () => unknown) =>
+        const transport = (name: string, handler: (params: Hex[]) => unknown) =>
             custom({
                 async request({ method, params }) {
                     calls.push(name)
                     return method === "eth_sendRawTransactionSync"
-                        ? handler()
+                        ? handler(params as Hex[])
                         : receiptFor(keccak256((params as Hex[])[0]), "0x1")
                 }
             })
@@ -197,6 +197,19 @@ describe("syncShouldThrow on the private fallback transport", () => {
         await sendTransactionSync({ walletClient, request, logger })
 
         expect(calls).toEqual(["private"])
+    })
+
+    it("retries a rejected timeout on the private endpoint, not the next one", async () => {
+        const { walletClient, calls } = fallbackClient((params) => {
+            if (params.length > 1) {
+                throw { code: -32602, message: "invalid argument 1" }
+            }
+            return receiptFor(keccak256(params[0]), "0x1")
+        })
+
+        await sendTransactionSync({ walletClient, request, logger })
+
+        expect(calls).toEqual(["private", "private"])
     })
 
     it("still falls back when the private endpoint is unreachable", async () => {
