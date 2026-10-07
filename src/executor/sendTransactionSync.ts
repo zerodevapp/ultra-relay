@@ -20,50 +20,9 @@ const isSyncTimeout = (e: unknown) =>
     e instanceof BaseError &&
     e.walk((node) => (node as { code?: unknown }).code === 4) !== null
 
-// Half the wallet transport's 10 s HTTP timeout, so the node times the call
-// out (code 4) before the client does. Geth holds it 20 s by default.
-const SYNC_TIMEOUT_MS = 5_000
-
-// Geth needs the timeout. Live Arbitrum rejects it in any form (its RPC and
-// sequencer parse it differently), as does anvil, before reading the tx. So
-// such a client resends once without it, and keeps doing so. Nitro answers
-// once the tx is in a block anyway.
-const noTimeoutClients = new Set<string>()
-
-// -32602: invalid params. Our signed tx is well formed, so it is the timeout.
-const isTimeoutParamRejected = (e: unknown) =>
-    e instanceof BaseError &&
-    e.walk((node) => (node as { code?: unknown }).code === -32602) !== null
-
-// Stops the private fallback transport. A timed-out tx was accepted, so the
-// next transport would fail it as a duplicate. Invalid params would fail there
-// too, and a rejected timeout must reach the retry below on this transport.
-export const syncShouldThrow = (e: Error) =>
-    shouldThrow(e) || isSyncTimeout(e) || isTimeoutParamRejected(e)
-
-async function sendRawTransactionSync(
-    walletClient: WalletClient<Transport, Chain, Account | undefined>,
-    serializedTransaction: Hex
-): Promise<TransactionReceipt> {
-    const send = (withTimeout: boolean) =>
-        walletClient.sendRawTransactionSync({
-            serializedTransaction,
-            timeout: withTimeout ? SYNC_TIMEOUT_MS : undefined,
-            throwOnReceiptRevert: false
-        })
-    if (noTimeoutClients.has(walletClient.uid)) {
-        return await send(false)
-    }
-    try {
-        return await send(true)
-    } catch (e) {
-        if (!isTimeoutParamRejected(e)) {
-            throw e
-        }
-        noTimeoutClients.add(walletClient.uid)
-        return await send(false)
-    }
-}
+// Stops the private fallback transport: a timed-out tx was accepted, so the
+// next transport would fail it as a duplicate.
+export const syncShouldThrow = (e: Error) => shouldThrow(e) || isSyncTimeout(e)
 
 export type SentTransaction = {
     transactionHash: Hex
@@ -95,10 +54,12 @@ export async function sendTransactionSync({
     )
 
     try {
-        const receipt = await sendRawTransactionSync(
-            walletClient,
-            serializedTransaction
-        )
+        // No timeout param: live Arbitrum rejects it, and geth's 20 s default
+        // fits the 25 s wallet RPC timeout the flag sets.
+        const receipt = await walletClient.sendRawTransactionSync({
+            serializedTransaction,
+            throwOnReceiptRevert: false
+        })
         return { transactionHash: receipt.transactionHash, receipt }
     } catch (e) {
         if (!isSyncTimeout(e)) {

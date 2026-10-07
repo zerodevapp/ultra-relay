@@ -84,8 +84,6 @@ export class ExecutorManager {
     private bundleManager: BundleManager
     private unWatch: WatchBlocksReturnType | undefined
 
-    // Next nonce per wallet after a sync settle; rpc-url can lag behind it.
-    private nonceFloors = new Map<Address, number>()
     private currentlyHandlingBlock = false
 
     // When handleBlock last reconciled pending bundles, from either trigger
@@ -463,10 +461,7 @@ export class ExecutorManager {
                         userOpBundle,
                         networkGasPrice: gasPriceParams,
                         networkBaseFee: baseFee,
-                        nonce: Math.max(
-                            nonce,
-                            this.nonceFloors.get(wallet.address) ?? 0
-                        )
+                        nonce
                     })
 
                     if (!bundleResult.success) {
@@ -721,7 +716,7 @@ export class ExecutorManager {
 
     // Processes the receipt a sync send returned, as a block run would. The
     // bundle is never tracked, so no block run can process it a second time.
-    // Returns false when there is nothing to process and the caller tracks it.
+    // Returns false when it cannot settle now and the caller tracks it instead.
     private async settleSyncReceipt(
         submittedBundle: SubmittedBundleInfo,
         receipt: BundleTransactionReceipt | undefined
@@ -735,11 +730,19 @@ export class ExecutorManager {
         if (bundleStatus.status === "not_found") {
             return false
         }
-        // Settling frees the wallet before rpc-url may have this block.
-        this.nonceFloors.set(
-            submittedBundle.executor.address,
-            submittedBundle.transactionRequest.nonce + 1
-        )
+        // rpc-url can lag the node that took the send. Settle only once it has
+        // the block, or a client acting on this receipt is validated against
+        // older state and the freed wallet reads a stale nonce.
+        const deadline = Date.now() + 1_000
+        while (
+            (await this.config.publicClient.getBlockNumber({ cacheTime: 0 })) <
+            bundleStatus.blockNumber
+        ) {
+            if (Date.now() > deadline) {
+                return false
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50))
+        }
         const blockReceivedTimestamp = Date.now()
         try {
             if (bundleStatus.status === "included") {

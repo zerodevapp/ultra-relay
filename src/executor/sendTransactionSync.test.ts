@@ -64,7 +64,7 @@ function clientWith(onSync: (tx: Hex) => unknown) {
 }
 
 describe("sendTransactionSync", () => {
-    it("returns the receipt from one call that carries the timeout", async () => {
+    it("returns the receipt from one call that carries no timeout", async () => {
         const { walletClient, calls } = clientWith((tx) =>
             receiptFor(keccak256(tx), "0x1")
         )
@@ -76,39 +76,12 @@ describe("sendTransactionSync", () => {
         })
 
         expect(calls).toHaveLength(1)
-        expect(calls[0][2]).toBe(5000)
+        expect(calls[0]).toHaveLength(2) // method and the signed tx only
         expect(sent.transactionHash).toBe(keccak256(calls[0][1] as Hex))
         expect(sent.receipt?.status).toBe("success")
     })
 
     // Live Arbitrum rejects the timeout param before reading the tx.
-    it("resends without the timeout when the node rejects it, and remembers", async () => {
-        const { walletClient, calls } = clientWith((tx) => {
-            if (calls[calls.length - 1].length > 2) {
-                throw {
-                    code: -32602,
-                    message:
-                        "invalid argument 1: json: cannot unmarshal non-string into Go value of type hexutil.Uint64"
-                }
-            }
-            return receiptFor(keccak256(tx), "0x1")
-        })
-
-        const sent = await sendTransactionSync({
-            walletClient,
-            request,
-            logger
-        })
-        await sendTransactionSync({ walletClient, request, logger })
-
-        expect(sent.receipt?.status).toBe("success")
-        expect(calls.map((call) => call[2])).toEqual([
-            5000,
-            undefined,
-            undefined
-        ])
-    })
-
     it("returns a reverted receipt instead of throwing", async () => {
         const { walletClient } = clientWith((tx) =>
             receiptFor(keccak256(tx), "0x0")
@@ -197,19 +170,6 @@ describe("syncShouldThrow on the private fallback transport", () => {
         await sendTransactionSync({ walletClient, request, logger })
 
         expect(calls).toEqual(["private"])
-    })
-
-    it("retries a rejected timeout on the private endpoint, not the next one", async () => {
-        const { walletClient, calls } = fallbackClient((params) => {
-            if (params.length > 1) {
-                throw { code: -32602, message: "invalid argument 1" }
-            }
-            return receiptFor(keccak256(params[0]), "0x1")
-        })
-
-        await sendTransactionSync({ walletClient, request, logger })
-
-        expect(calls).toEqual(["private", "private"])
     })
 
     it("still falls back when the private endpoint is unreachable", async () => {

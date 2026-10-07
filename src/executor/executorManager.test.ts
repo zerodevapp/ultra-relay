@@ -1669,6 +1669,8 @@ const makeSend = () => {
         maxPriorityFeePerGas: 1n
     }))
     const getTransactionCount = vi.fn(async () => 0)
+    // rpc-url already has the settled block unless a test says otherwise.
+    const getBlockNumber = vi.fn(async () => 1n)
     const bundle = vi.fn(
         async ({ userOpBundle }: { userOpBundle: UserOperationBundle }) => ({
             success: true,
@@ -1699,6 +1701,7 @@ const makeSend = () => {
         requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
+        getBlockNumber,
         bundle,
         trackBundle,
         processIncludedBundle,
@@ -1710,7 +1713,7 @@ const makeSend = () => {
             shutdownRequested: false,
             config: {
                 legacyTransactions: true,
-                publicClient: { getTransactionCount }
+                publicClient: { getTransactionCount, getBlockNumber }
             },
             senderManager: {
                 getWallet,
@@ -2638,14 +2641,15 @@ describe("sendBundleToExecutor with a sync send receipt", () => {
         expect(send.trackBundle).not.toHaveBeenCalled()
     })
 
-    it("S6: the wallet's next send never reuses the settled nonce", async () => {
+    it("S6: tracks the bundle instead when rpc-url does not catch up in time", async () => {
         const send = sendWithReceipt("included")
+        send.getBlockNumber.mockResolvedValue(0n)
 
         await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
-        // rpc-url still reports 0, the nonce before the settled bundle.
-        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
 
-        expect(send.bundle.mock.calls[1][0]).toMatchObject({ nonce: 8 })
+        expect(send.getBlockNumber).toHaveBeenCalledWith({ cacheTime: 0 })
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
     })
 
     it("S5: without a receipt the bundle is tracked as before", async () => {

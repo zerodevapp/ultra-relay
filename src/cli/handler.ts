@@ -205,7 +205,9 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                 { module: "wallet_client" },
                 { level: args.walletClientLogLevel || args.logLevel }
             ),
-            fetchOptions
+            fetchOptions,
+            // Sync sends return at inclusion; geth holds them up to 20 s.
+            timeout: args.sendTransactionSync ? 25_000 : undefined
         })
 
     const walletClients = {
@@ -216,7 +218,12 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                           createWalletTransport(args.sendTransactionRpcUrl),
                           createWalletTransport(args.rpcUrl)
                       ],
-                      { rank: false, shouldThrow: syncShouldThrow }
+                      {
+                          rank: false,
+                          shouldThrow: args.sendTransactionSync
+                              ? syncShouldThrow
+                              : undefined
+                      }
                   ),
                   chain
               })
