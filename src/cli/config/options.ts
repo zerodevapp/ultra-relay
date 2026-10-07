@@ -445,17 +445,10 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
     },
     "send-transaction-sync": {
         description:
-            "Submit bundles with eth_sendRawTransactionSync, which returns at inclusion. rpc-url and send-transaction-rpc-url must both support it",
+            "Submit bundles with eth_sendRawTransactionSync, so an included bundle is processed as soon as the send returns. A node that times out the call (EIP-7966 code 4) leaves the bundle pending. rpc-url and send-transaction-rpc-url must support the method and its timeout param (anvil does not)",
         type: "boolean",
         require: false,
         default: false
-    },
-    "send-transaction-sync-timeout": {
-        description:
-            "Milliseconds the node may hold eth_sendRawTransactionSync before returning; the tx is then tracked as pending. Keep below the RPC request timeout",
-        type: "number",
-        require: false,
-        default: 2000
     },
     "bundler-initial-commission": {
         description:

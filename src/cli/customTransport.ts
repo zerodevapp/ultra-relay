@@ -312,7 +312,8 @@ function reduceResultByMethod(
             }
             return reduced
         }
-        case "eth_getTransactionReceipt": {
+        case "eth_getTransactionReceipt":
+        case "eth_sendRawTransactionSync": {
             const reduced = pickFields(source, RECEIPT_FIELDS)
             if (Array.isArray(source.logs)) {
                 reduced.logsCount = source.logs.length

@@ -1,5 +1,5 @@
 import type { HexData32, UserOpInfo } from "@alto/types"
-import type { Address, Prettify } from "viem"
+import type { Address, Prettify, TransactionReceipt } from "viem"
 import type { EntryPointVersion as ViemEntryPointVersion } from "viem/account-abstraction"
 import type { Account } from "viem/accounts"
 
@@ -36,6 +36,8 @@ export type BundleResult =
     | {
           success: true
           transactionHash: HexData32
+          // Set when a sync send returned the inclusion receipt.
+          receipt?: TransactionReceipt
           transactionRequest: {
               maxFeePerGas: bigint
               maxPriorityFeePerGas: bigint

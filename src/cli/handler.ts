@@ -216,12 +216,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                           createWalletTransport(args.sendTransactionRpcUrl),
                           createWalletTransport(args.rpcUrl)
                       ],
-                      {
-                          rank: false,
-                          shouldThrow: args.sendTransactionSync
-                              ? syncShouldThrow
-                              : undefined
-                      }
+                      { rank: false, shouldThrow: syncShouldThrow }
                   ),
                   chain
               })

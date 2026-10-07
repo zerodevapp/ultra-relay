@@ -20,7 +20,10 @@ import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
-import type { BundleTransactionReceipt } from "./getBundleStatus"
+import {
+    type BundleTransactionReceipt,
+    bundleStatusFromReceipts
+} from "./getBundleStatus"
 import { type SenderManager, WalletNotFoundError } from "./senderManager"
 import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
@@ -555,7 +558,8 @@ export class ExecutorManager {
                         userOpsBundled,
                         rejectedUserOps,
                         transactionRequest,
-                        transactionHash
+                        transactionHash,
+                        receipt
                     } = bundleResult
 
                     // Increment submission attempts for all userOps submitted.
@@ -588,31 +592,26 @@ export class ExecutorManager {
                     // write "included", then this late bookkeeping would
                     // re-add it as submitted. finally: a failed write still
                     // leaves the bundle tracked, so handleBlock owns it.
+                    let settled = false
                     try {
                         await this.mempool.markUserOpsAsSubmitted({
                             userOps: submittedBundle.bundle.userOps,
                             entryPoint: submittedBundle.bundle.entryPoint,
                             transactionHash: submittedBundle.transactionHash
                         })
+                        settled = await this.settleSyncReceipt(
+                            submittedBundle,
+                            receipt
+                        )
                     } finally {
-                        // Track bundle and start loop to watch blocks
-                        this.bundleManager.trackBundle(submittedBundle)
-                        this.startWatchingBlocks()
+                        if (!settled) {
+                            // Track bundle and start loop to watch blocks
+                            this.bundleManager.trackBundle(submittedBundle)
+                            this.startWatchingBlocks()
+                        }
                     }
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
-
-                    // Sync sends return at inclusion, so check now. Must follow
-                    // markUserOpsAsSubmitted, or cleanup can resurrect included ops.
-                    if (this.config.sendTransactionSync) {
-                        void this.handleBlock().catch((err) =>
-                            this.logger.error(
-                                { err },
-                                "immediate post-submission block handling failed"
-                            )
-                        )
-                    }
-
                     this.metrics.bundlesSubmitted
                         .labels({ status: "success" })
                         .inc()
@@ -713,6 +712,51 @@ export class ExecutorManager {
             clearInterval(this.staleBlockTimer)
             this.staleBlockTimer = undefined
         }
+    }
+
+    // Processes the receipt a sync send returned, as a block run would. The
+    // bundle is never tracked, so no block run can process it a second time.
+    // Returns false when there is nothing to process and the caller tracks it.
+    private async settleSyncReceipt(
+        submittedBundle: SubmittedBundleInfo,
+        receipt: BundleTransactionReceipt | undefined
+    ): Promise<boolean> {
+        if (!receipt) {
+            return false
+        }
+        const bundleStatus = bundleStatusFromReceipts(submittedBundle.bundle, [
+            receipt
+        ])
+        if (bundleStatus.status === "not_found") {
+            return false
+        }
+        const blockReceivedTimestamp = Date.now()
+        try {
+            if (bundleStatus.status === "included") {
+                await this.bundleManager.processIncludedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            } else {
+                await this.bundleManager.processRevertedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            }
+            this.updateTransactionCostMetrics(
+                receipt,
+                submittedBundle.bundle.userOps.map((op) => op.userOpHash),
+                bundleStatus.status
+            )
+        } catch (err) {
+            this.logger.error(
+                { err, transactionHash: receipt.transactionHash },
+                "failed to process the sync send receipt"
+            )
+        }
+        return true
     }
 
     private updateTransactionCostMetrics(

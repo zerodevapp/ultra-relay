@@ -4,104 +4,79 @@ import {
     BaseError,
     type Chain,
     type Hex,
-    type LocalAccount,
     type SendTransactionParameters,
+    type TransactionSerializable,
     type Transport,
     type WalletClient,
     keccak256,
     shouldThrow
 } from "viem"
 import { parseAccount } from "viem/accounts"
+import { getTransactionError } from "viem/utils"
+import type { BundleTransactionReceipt } from "./getBundleStatus"
 
-// EIP-7966 code 4, older nodes' wording, or viem giving up client-side.
-const SYNC_TIMEOUT = /timeout|timed out|wasn't processed|not processed in time/i
-
+// EIP-7966 code 4: the node accepted the tx but did not include it in time.
 export const isSyncTimeout = (e: unknown) =>
     e instanceof BaseError &&
-    e.walk((node) => {
-        const { name, code, message, details } = node as {
-            name?: string
-            code?: unknown
-            message?: string
-            details?: string
-        }
-        return (
-            code === 4 ||
-            name === "TimeoutError" ||
-            SYNC_TIMEOUT.test(`${message} ${details}`)
-        )
-    }) !== null
+    e.walk((node) => (node as { code?: unknown }).code === 4) !== null
 
-// A timed-out tx was accepted; resending it elsewhere fails as a duplicate.
+// A timed-out tx was accepted; resending it to the next transport would fail.
 export const syncShouldThrow = (e: Error) => shouldThrow(e) || isSyncTimeout(e)
 
-// viem drops the hash on timeout; record the signed tx so a timeout stays pending.
+// Half the wallet transport's 10 s HTTP timeout, so the node times the call
+// out (code 4) before the client does. Geth holds it 20 s by default; Nitro
+// ignores it and answers once the tx is in a block. Anvil rejects the param.
+const SYNC_TIMEOUT_MS = 5_000
+
+export type SentTransaction = {
+    transactionHash: Hex
+    receipt?: BundleTransactionReceipt
+}
+
+// Signs locally so a node timeout still yields the hash to track as pending.
 export async function sendTransactionSync({
     walletClient,
     request,
-    timeout,
     logger
 }: {
     walletClient: WalletClient<Transport, Chain, Account | undefined>
     request: SendTransactionParameters<Chain, Account | undefined>
-    timeout?: number
     logger: Logger
-}): Promise<Hex> {
+}): Promise<SentTransaction> {
     const account_ = request.account ?? walletClient.account
-    const account = account_ ? parseAccount(account_) : undefined
+    const account = account_ && parseAccount(account_)
     if (account?.type !== "local") {
         throw new Error("sync submission requires a local executor account")
     }
-
-    let signedTransaction: Hex | undefined
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let expire: (() => void) | undefined
-    // Starts at signing, so a timeout never abandons a send still being prepared.
-    const expired = new Promise<never>((_, reject) => {
-        expire = () =>
-            reject(
-                new BaseError(
-                    `eth_sendRawTransactionSync timed out after ${timeout}ms`
-                )
-            )
+    const prepared = await walletClient.prepareTransactionRequest({
+        ...request,
+        account
     })
-    const recordingAccount: LocalAccount = {
-        ...account,
-        signTransaction: async (transaction, options) => {
-            signedTransaction = await account.signTransaction(
-                transaction,
-                options
-            )
-            if (timeout !== undefined) {
-                timer = setTimeout(() => expire?.(), timeout)
-            }
-            return signedTransaction
-        }
-    }
+    const serializedTransaction = await account.signTransaction(
+        prepared as TransactionSerializable,
+        { serializer: walletClient.chain.serializers?.transaction }
+    )
 
     try {
-        // Nitro rejects viem's numeric `timeout` param (it wants a hex quantity)
-        // and anvil rejects both forms, so bound the wait here instead.
-        const send = walletClient.sendTransactionSync({
-            ...request,
-            account: recordingAccount
+        const receipt = await walletClient.sendRawTransactionSync({
+            serializedTransaction,
+            timeout: SYNC_TIMEOUT_MS,
+            throwOnReceiptRevert: false
         })
-        send.catch(() => undefined)
-        try {
-            return (await Promise.race([send, expired])).transactionHash
-        } finally {
-            clearTimeout(timer)
-        }
+        return { transactionHash: receipt.transactionHash, receipt }
     } catch (e) {
-        // Unsigned means nothing was sent.
-        if (!signedTransaction || !isSyncTimeout(e)) {
-            throw e
+        if (!isSyncTimeout(e)) {
+            throw getTransactionError(e as BaseError, {
+                ...request,
+                account,
+                chain: walletClient.chain
+            })
         }
-        const transactionHash = keccak256(signedTransaction)
+        const transactionHash = keccak256(serializedTransaction)
         logger.warn(
             { txHash: transactionHash },
             "eth_sendRawTransactionSync timed out before inclusion, tracking the transaction as pending"
         )
-        return transactionHash
+        return { transactionHash }
     }
 }
