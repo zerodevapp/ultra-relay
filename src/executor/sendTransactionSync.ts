@@ -5,6 +5,7 @@ import {
     type Chain,
     type Hex,
     type SendTransactionParameters,
+    type TransactionReceipt,
     type TransactionSerializable,
     type Transport,
     type WalletClient,
@@ -13,7 +14,6 @@ import {
 } from "viem"
 import { parseAccount } from "viem/accounts"
 import { getTransactionError } from "viem/utils"
-import type { BundleTransactionReceipt } from "./getBundleStatus"
 
 // EIP-7966 code 4: the node accepted the tx but did not include it in time.
 const isSyncTimeout = (e: unknown) =>
@@ -30,7 +30,7 @@ const SYNC_TIMEOUT_MS = 5_000
 
 export type SentTransaction = {
     transactionHash: Hex
-    receipt?: BundleTransactionReceipt
+    receipt?: TransactionReceipt
 }
 
 // Signs locally so a node timeout still yields the hash to track as pending.
