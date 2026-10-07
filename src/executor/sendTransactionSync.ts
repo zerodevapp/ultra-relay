@@ -16,7 +16,7 @@ import { getTransactionError } from "viem/utils"
 import type { BundleTransactionReceipt } from "./getBundleStatus"
 
 // EIP-7966 code 4: the node accepted the tx but did not include it in time.
-export const isSyncTimeout = (e: unknown) =>
+const isSyncTimeout = (e: unknown) =>
     e instanceof BaseError &&
     e.walk((node) => (node as { code?: unknown }).code === 4) !== null
 
