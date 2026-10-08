@@ -205,9 +205,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                 { module: "wallet_client" },
                 { level: args.walletClientLogLevel || args.logLevel }
             ),
-            fetchOptions,
-            // Sync sends return at inclusion; geth holds them up to 20 s.
-            timeout: args.sendTransactionSync ? 25_000 : undefined
+            fetchOptions
         })
 
     const walletClients = {

@@ -81,7 +81,6 @@ describe("sendTransactionSync", () => {
         expect(sent.receipt?.status).toBe("success")
     })
 
-    // Live Arbitrum rejects the timeout param before reading the tx.
     it("returns a reverted receipt instead of throwing", async () => {
         const { walletClient } = clientWith((tx) =>
             receiptFor(keccak256(tx), "0x0")

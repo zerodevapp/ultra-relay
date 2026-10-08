@@ -479,7 +479,12 @@ export function customTransport(
                                         response.headers.entries()
                                     )
                                 },
-                                timeout
+                                // Sync sends return at inclusion; geth holds them
+                                // up to 20 s.
+                                timeout:
+                                    method === "eth_sendRawTransactionSync"
+                                        ? 25_000
+                                        : timeout
                             })
                         ]
                     }

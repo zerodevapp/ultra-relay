@@ -591,7 +591,8 @@ export class ExecutorManager {
                     // block run that saw the bundle earlier could free it and
                     // write "included", then this late bookkeeping would
                     // re-add it as submitted. finally: a failed write still
-                    // leaves the bundle tracked, so handleBlock owns it.
+                    // leaves the bundle tracked, so handleBlock owns it. A sync
+                    // receipt settles the bundle here instead of tracking it.
                     let settled = false
                     try {
                         await this.mempool.markUserOpsAsSubmitted({
@@ -730,18 +731,8 @@ export class ExecutorManager {
         if (bundleStatus.status === "not_found") {
             return false
         }
-        // rpc-url can lag the node that took the send. Settle only once it has
-        // the block, or a client acting on this receipt is validated against
-        // older state and the freed wallet reads a stale nonce.
-        const deadline = Date.now() + 1_000
-        while (
-            (await this.config.publicClient.getBlockNumber({ cacheTime: 0 })) <
-            bundleStatus.blockNumber
-        ) {
-            if (Date.now() > deadline) {
-                return false
-            }
-            await new Promise((resolve) => setTimeout(resolve, 50))
+        if (!(await this.rpcUrlHasReceipt(receipt.transactionHash))) {
+            return false
         }
         const blockReceivedTimestamp = Date.now()
         try {
@@ -770,6 +761,33 @@ export class ExecutorManager {
             )
         }
         return true
+    }
+
+    // rpc-url can lag the node that took the send. Settle only once it serves
+    // this receipt too, or a client acting on it is validated against older
+    // state and the freed wallet reads a stale nonce. Errors and a hung call
+    // count as "not yet"; the whole check is capped at 1 s.
+    private async rpcUrlHasReceipt(hash: Hex): Promise<boolean> {
+        const deadline = Date.now() + 1_000
+        const poll = async () => {
+            while (Date.now() < deadline) {
+                const found = await this.config.publicClient
+                    .getTransactionReceipt({ hash })
+                    .then(
+                        () => true,
+                        () => false
+                    )
+                if (found) {
+                    return true
+                }
+                await new Promise((resolve) => setTimeout(resolve, 25))
+            }
+            return false
+        }
+        const giveUp = new Promise<boolean>((resolve) =>
+            setTimeout(() => resolve(false), 1_000)
+        )
+        return await Promise.race([poll(), giveUp])
     }
 
     private updateTransactionCostMetrics(

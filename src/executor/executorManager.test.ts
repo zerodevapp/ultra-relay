@@ -1669,8 +1669,8 @@ const makeSend = () => {
         maxPriorityFeePerGas: 1n
     }))
     const getTransactionCount = vi.fn(async () => 0)
-    // rpc-url already has the settled block unless a test says otherwise.
-    const getBlockNumber = vi.fn(async () => 1n)
+    // rpc-url already serves the settled receipt unless a test says otherwise.
+    const getTransactionReceipt = vi.fn(async () => ({}))
     const bundle = vi.fn(
         async ({ userOpBundle }: { userOpBundle: UserOperationBundle }) => ({
             success: true,
@@ -1701,7 +1701,7 @@ const makeSend = () => {
         requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
-        getBlockNumber,
+        getTransactionReceipt,
         bundle,
         trackBundle,
         processIncludedBundle,
@@ -1713,7 +1713,7 @@ const makeSend = () => {
             shutdownRequested: false,
             config: {
                 legacyTransactions: true,
-                publicClient: { getTransactionCount, getBlockNumber }
+                publicClient: { getTransactionCount, getTransactionReceipt }
             },
             senderManager: {
                 getWallet,
@@ -1727,7 +1727,6 @@ const makeSend = () => {
                 processRevertedBundle
             },
             startWatchingBlocks: vi.fn(),
-            nonceFloors: new Map(),
             mempool: {
                 markUserOpsAsSubmitted,
                 dropUserOps: vi.fn(),
@@ -1752,6 +1751,11 @@ const makeSend = () => {
                     settleSyncReceipt: unknown
                 }
             ).settleSyncReceipt,
+            rpcUrlHasReceipt: (
+                ExecutorManager.prototype as unknown as {
+                    rpcUrlHasReceipt: unknown
+                }
+            ).rpcUrlHasReceipt,
             updateTransactionCostMetrics: vi.fn()
         }
     }
@@ -2641,15 +2645,28 @@ describe("sendBundleToExecutor with a sync send receipt", () => {
         expect(send.trackBundle).not.toHaveBeenCalled()
     })
 
-    it("S6: tracks the bundle instead when rpc-url does not catch up in time", async () => {
+    it("S6: tracks the bundle and still drops rejected ops when rpc-url errors", async () => {
         const send = sendWithReceipt("included")
-        send.getBlockNumber.mockResolvedValue(0n)
+        send.getTransactionReceipt.mockRejectedValue(new Error("rpc-url down"))
 
         await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
 
-        expect(send.getBlockNumber).toHaveBeenCalledWith({ cacheTime: 0 })
         expect(send.processIncludedBundle).not.toHaveBeenCalled()
         expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.mempool.dropUserOps).toHaveBeenCalledTimes(1)
+    })
+
+    it("S7: gives up on a hung rpc-url call after about 1 s", async () => {
+        const send = sendWithReceipt("included")
+        send.getTransactionReceipt.mockReturnValue(new Promise(() => undefined))
+        const started = Date.now()
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(Date.now() - started).toBeLessThan(2_000)
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.mempool.dropUserOps).toHaveBeenCalledTimes(1)
     })
 
     it("S5: without a receipt the bundle is tracked as before", async () => {

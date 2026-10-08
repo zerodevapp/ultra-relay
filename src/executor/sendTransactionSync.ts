@@ -55,7 +55,7 @@ export async function sendTransactionSync({
 
     try {
         // No timeout param: live Arbitrum rejects it, and geth's 20 s default
-        // fits the 25 s wallet RPC timeout the flag sets.
+        // fits the transport's 25 s timeout for this method.
         const receipt = await walletClient.sendRawTransactionSync({
             serializedTransaction,
             throwOnReceiptRevert: false
