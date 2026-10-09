@@ -445,7 +445,7 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
     },
     "send-transaction-sync": {
         description:
-            "Submit bundles with eth_sendRawTransactionSync and settle them from the returned receipt once rpc-url has the block. A node that times out the call (EIP-7966 code 4) leaves the bundle pending. The call gets a 25 s RPC timeout. rpc-url and send-transaction-rpc-url must support the method",
+            "Submit bundles with eth_sendRawTransactionSync and settle them as soon as rpc-url serves the receipt. A node that times out the call (EIP-7966 code 4) leaves the bundle pending. The call gets a 35 s RPC timeout. rpc-url and send-transaction-rpc-url must support the method",
         type: "boolean",
         require: false,
         default: false

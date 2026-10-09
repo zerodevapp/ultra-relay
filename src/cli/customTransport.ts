@@ -479,11 +479,11 @@ export function customTransport(
                                         response.headers.entries()
                                     )
                                 },
-                                // Sync sends return at inclusion; geth holds them
-                                // up to 20 s.
+                                // Sync sends return at inclusion; geth and Nitro
+                                // hold them up to 20 s, reth 30 s.
                                 timeout:
                                     method === "eth_sendRawTransactionSync"
-                                        ? 25_000
+                                        ? 35_000
                                         : timeout
                             })
                         ]

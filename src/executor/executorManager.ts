@@ -16,7 +16,14 @@ import {
     stampFirst,
     timed
 } from "@alto/utils"
-import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
+import {
+    type Account,
+    type Address,
+    type Block,
+    type Hex,
+    type WatchBlocksReturnType,
+    formatTransactionReceipt
+} from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
@@ -715,8 +722,9 @@ export class ExecutorManager {
         }
     }
 
-    // Processes the receipt a sync send returned, as a block run would. The
-    // bundle is never tracked, so no block run can process it a second time.
+    // Settles a sync-sent bundle as a block run would, from rpc-url's copy of
+    // the receipt. The bundle is never tracked, so no block run can process it
+    // a second time.
     // Returns false when it cannot settle now and the caller tracks it instead.
     private async settleSyncReceipt(
         submittedBundle: SubmittedBundleInfo,
@@ -725,13 +733,16 @@ export class ExecutorManager {
         if (!receipt) {
             return false
         }
-        const bundleStatus = bundleStatusFromReceipts(submittedBundle.bundle, [
-            receipt
-        ])
-        if (bundleStatus.status === "not_found") {
+        // The send's receipt only says when to look; settle from rpc-url's, the
+        // same source the block watcher trusts.
+        const rpcReceipt = await this.rpcUrlReceipt(receipt.transactionHash)
+        if (!rpcReceipt) {
             return false
         }
-        if (!(await this.rpcUrlHasReceipt(receipt.transactionHash))) {
+        const bundleStatus = bundleStatusFromReceipts(submittedBundle.bundle, [
+            rpcReceipt
+        ])
+        if (bundleStatus.status === "not_found") {
             return false
         }
         const blockReceivedTimestamp = Date.now()
@@ -750,7 +761,7 @@ export class ExecutorManager {
                 })
             }
             this.updateTransactionCostMetrics(
-                receipt,
+                rpcReceipt,
                 submittedBundle.bundle.userOps.map((op) => op.userOpHash),
                 bundleStatus.status
             )
@@ -767,27 +778,40 @@ export class ExecutorManager {
     // this receipt too, or a client acting on it is validated against older
     // state and the freed wallet reads a stale nonce. Errors and a hung call
     // count as "not yet"; the whole check is capped at 1 s.
-    private async rpcUrlHasReceipt(hash: Hex): Promise<boolean> {
+    private async rpcUrlReceipt(
+        hash: Hex
+    ): Promise<BundleTransactionReceipt | undefined> {
+        const { publicClient } = this.config
+        const format =
+            publicClient.chain?.formatters?.transactionReceipt?.format ??
+            formatTransactionReceipt
         const deadline = Date.now() + 1_000
         const poll = async () => {
             while (Date.now() < deadline) {
-                const found = await this.config.publicClient
-                    .getTransactionReceipt({ hash })
-                    .then(
-                        () => true,
-                        () => false
-                    )
-                if (found) {
-                    return true
+                // A direct request: viem merges identical getTransactionReceipt
+                // calls, so a hung one here would stall the block watcher's.
+                const raw = await publicClient
+                    .request({
+                        method: "eth_getTransactionReceipt",
+                        params: [hash]
+                    })
+                    .catch(() => null)
+                if (raw) {
+                    return format(raw) as BundleTransactionReceipt
                 }
                 await new Promise((resolve) => setTimeout(resolve, 25))
             }
-            return false
+            return undefined
         }
-        const giveUp = new Promise<boolean>((resolve) =>
-            setTimeout(() => resolve(false), 1_000)
-        )
-        return await Promise.race([poll(), giveUp])
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const giveUp = new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), 1_000)
+        })
+        try {
+            return await Promise.race([poll(), giveUp])
+        } finally {
+            clearTimeout(timer)
+        }
     }
 
     private updateTransactionCostMetrics(
