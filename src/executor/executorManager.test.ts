@@ -6,6 +6,7 @@ import type {
 import type { Address, Hex } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ExecutorManager, summarizePass } from "./executorManager"
+import { bundleStatusFromReceipts } from "./getBundleStatus"
 import { computeInclusionTimings } from "./inclusionTimings"
 import { WalletNotFoundError } from "./senderManager"
 
@@ -18,6 +19,15 @@ import { WalletNotFoundError } from "./senderManager"
 // store the truthy string "undefined").
 vi.hoisted(() => {
     process.env.BETTER_STACK_TOKEN = ""
+})
+
+// Real by default; sync-receipt tests set the status a receipt maps to.
+vi.mock("./getBundleStatus", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("./getBundleStatus")>()
+    return {
+        ...actual,
+        bundleStatusFromReceipts: vi.fn(actual.bundleStatusFromReceipts)
+    }
 })
 
 // Chains that only produce a block per transaction deadlock a block-driven
@@ -1659,6 +1669,15 @@ const makeSend = () => {
         maxPriorityFeePerGas: 1n
     }))
     const getTransactionCount = vi.fn(async () => 0)
+    // rpc-url already serves the settled receipt unless a test says otherwise.
+    const rpcRequest = vi.fn(
+        async (): Promise<unknown> => ({
+            transactionHash: TX_HASH,
+            status: "0x1",
+            blockNumber: "0x1",
+            logs: []
+        })
+    )
     const bundle = vi.fn(
         async ({ userOpBundle }: { userOpBundle: UserOperationBundle }) => ({
             success: true,
@@ -1669,6 +1688,8 @@ const makeSend = () => {
         })
     )
     const trackBundle = vi.fn()
+    const processIncludedBundle = vi.fn().mockResolvedValue(undefined)
+    const processRevertedBundle = vi.fn().mockResolvedValue(undefined)
     // Mirrors the stamp in Mempool.markUserOpsAsSubmitted.
     const markUserOpsAsSubmitted = vi.fn(
         ({ userOps }: { userOps: UserOpInfo[] }) => {
@@ -1687,8 +1708,11 @@ const makeSend = () => {
         requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
+        rpcRequest,
         bundle,
         trackBundle,
+        processIncludedBundle,
+        processRevertedBundle,
         markUserOpsAsSubmitted,
         manager: {
             logger,
@@ -1696,7 +1720,7 @@ const makeSend = () => {
             shutdownRequested: false,
             config: {
                 legacyTransactions: true,
-                publicClient: { getTransactionCount }
+                publicClient: { getTransactionCount, request: rpcRequest }
             },
             senderManager: {
                 getWallet,
@@ -1704,7 +1728,11 @@ const makeSend = () => {
             },
             gasPriceManager: { tryGetNetworkGasPrice },
             executor: { bundle },
-            bundleManager: { trackBundle },
+            bundleManager: {
+                trackBundle,
+                processIncludedBundle,
+                processRevertedBundle
+            },
             startWatchingBlocks: vi.fn(),
             mempool: {
                 markUserOpsAsSubmitted,
@@ -1724,7 +1752,18 @@ const makeSend = () => {
                 ExecutorManager.prototype as unknown as {
                     recoverFailedSend: unknown
                 }
-            ).recoverFailedSend
+            ).recoverFailedSend,
+            settleSyncReceipt: (
+                ExecutorManager.prototype as unknown as {
+                    settleSyncReceipt: unknown
+                }
+            ).settleSyncReceipt,
+            rpcUrlReceipt: (
+                ExecutorManager.prototype as unknown as {
+                    rpcUrlReceipt: unknown
+                }
+            ).rpcUrlReceipt,
+            updateTransactionCostMetrics: vi.fn()
         }
     }
 }
@@ -2521,5 +2560,149 @@ describe("potentiallyResubmitBundle underpricing on arbitrum", () => {
 
     it("keeps comparing tips on other chains", () => {
         expect(run("default", 100_000_000n)).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe("sendBundleToExecutor with a sync send receipt", () => {
+    const sendBundleToExecutor = (
+        ExecutorManager.prototype as unknown as {
+            sendBundleToExecutor: (bundle: unknown) => Promise<unknown>
+        }
+    ).sendBundleToExecutor
+    const receipt = { transactionHash: TX_HASH, status: "success" }
+
+    const sendWithReceipt = (status: "included" | "reverted") => {
+        const send = makeSend()
+        send.bundle.mockImplementationOnce(async ({ userOpBundle }) => ({
+            success: true,
+            userOpsBundled: userOpBundle.userOps,
+            rejectedUserOps: [],
+            transactionRequest: { nonce: 7 },
+            transactionHash: TX_HASH,
+            receipt
+        }))
+        vi.mocked(bundleStatusFromReceipts).mockReturnValueOnce({
+            status,
+            transactionHash: TX_HASH,
+            blockNumber: 1n,
+            userOpReceipts: {},
+            receipt
+        } as never)
+        return send
+    }
+
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it("S1: processes an included receipt after the submitted bookkeeping, never tracking it", async () => {
+        const send = sendWithReceipt("included")
+
+        await expect(
+            sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+        ).resolves.toBe(TX_HASH)
+
+        expect(send.processIncludedBundle).toHaveBeenCalledTimes(1)
+        expect(
+            send.markUserOpsAsSubmitted.mock.invocationCallOrder[0]
+        ).toBeLessThan(send.processIncludedBundle.mock.invocationCallOrder[0])
+        expect(send.trackBundle).not.toHaveBeenCalled()
+        expect(send.manager.startWatchingBlocks).not.toHaveBeenCalled()
+        expect(send.manager.updateTransactionCostMetrics).toHaveBeenCalledTimes(
+            1
+        )
+    })
+
+    it("S2: processes a reverted receipt as a reverted bundle", async () => {
+        const send = sendWithReceipt("reverted")
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(send.processRevertedBundle).toHaveBeenCalledTimes(1)
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).not.toHaveBeenCalled()
+    })
+
+    it("S3: a failed bookkeeping write tracks the bundle and processes nothing", async () => {
+        const send = sendWithReceipt("included")
+        send.markUserOpsAsSubmitted.mockRejectedValueOnce(
+            new Error("submitted write failed")
+        )
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+    })
+
+    it("S4: a processing failure is logged and the bundle stays untracked", async () => {
+        const send = sendWithReceipt("included")
+        send.processIncludedBundle.mockRejectedValueOnce(
+            new Error("store down")
+        )
+
+        await expect(
+            sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+        ).resolves.toBe(TX_HASH)
+
+        expect(send.logger.error).toHaveBeenCalledWith(
+            expect.objectContaining({ transactionHash: TX_HASH }),
+            "failed to process the sync send receipt"
+        )
+        expect(send.trackBundle).not.toHaveBeenCalled()
+    })
+
+    it("S8: settles from rpc-url's receipt, not the send endpoint's copy", async () => {
+        const send = sendWithReceipt("included")
+        send.rpcRequest.mockResolvedValue({
+            transactionHash: TX_HASH,
+            status: "0x0",
+            blockNumber: "0x1",
+            logs: []
+        })
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(vi.mocked(bundleStatusFromReceipts)).toHaveBeenLastCalledWith(
+            expect.anything(),
+            [expect.objectContaining({ status: "reverted" })]
+        )
+        expect(send.rpcRequest).toHaveBeenCalledWith({
+            method: "eth_getTransactionReceipt",
+            params: [TX_HASH]
+        })
+    })
+
+    it("S6: tracks the bundle and still drops rejected ops when rpc-url errors", async () => {
+        const send = sendWithReceipt("included")
+        send.rpcRequest.mockRejectedValue(new Error("rpc-url down"))
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.mempool.dropUserOps).toHaveBeenCalledTimes(1)
+    })
+
+    it("S7: gives up on a hung rpc-url call after about 1 s", async () => {
+        const send = sendWithReceipt("included")
+        send.rpcRequest.mockReturnValue(new Promise(() => undefined))
+        const started = Date.now()
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(Date.now() - started).toBeLessThan(2_000)
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.manager.mempool.dropUserOps).toHaveBeenCalledTimes(1)
+    })
+
+    it("S5: without a receipt the bundle is tracked as before", async () => {
+        const send = makeSend()
+
+        await sendBundleToExecutor.call(send.manager, makeBundle(makeUserOps()))
+
+        expect(send.trackBundle).toHaveBeenCalledTimes(1)
+        expect(send.processIncludedBundle).not.toHaveBeenCalled()
     })
 })

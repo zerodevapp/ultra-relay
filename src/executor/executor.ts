@@ -34,6 +34,10 @@ import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
+    type SentTransaction,
+    sendTransactionSync
+} from "./sendTransactionSync"
+import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
     getUserOpHashes,
@@ -235,7 +239,8 @@ export class Executor {
             walletClients,
             publicClient,
             privateEndpointSubmissionAttempts,
-            maxBundlingGasPrice
+            maxBundlingGasPrice,
+            sendTransactionSync: useSyncSubmission
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -269,6 +274,7 @@ export class Executor {
 
         let attempts = 0
         let transactionHash: Hex | undefined
+        let receipt: SentTransaction["receipt"]
         const maxAttempts = sendHandleOpsRetryCount
 
         // Try sending the transaction and updating relevant fields if there is an error.
@@ -304,17 +310,33 @@ export class Executor {
                     }
                 }
 
-                transactionHash = await timed(
+                // With `sync`, the span covers the wait for inclusion.
+                const sent: SentTransaction = await timed(
                     childLogger,
                     "walletClient.sendTransaction",
                     {
                         attempt: attempts,
                         isPrivate: usePrivateEndpoint,
                         executor: account.address,
-                        entryPoint
+                        entryPoint,
+                        sync: useSyncSubmission
                     },
-                    () => walletClient.sendTransaction(request)
+                    async () =>
+                        useSyncSubmission
+                            ? sendTransactionSync({
+                                  walletClient,
+                                  request,
+                                  logger: childLogger
+                              })
+                            : {
+                                  transactionHash:
+                                      await walletClient.sendTransaction(
+                                          request
+                                      )
+                              }
                 )
+                transactionHash = sent.transactionHash
+                receipt = sent.receipt
 
                 childLogger.info(
                     {
@@ -429,7 +451,7 @@ export class Executor {
             throw new Error("Transaction hash not assigned")
         }
 
-        return transactionHash as Hex
+        return { transactionHash: transactionHash as Hex, receipt }
     }
 
     async bundle({
@@ -568,6 +590,7 @@ export class Executor {
         }
 
         let transactionHash: HexData32
+        let receipt: SentTransaction["receipt"]
         try {
             const isLegacyTransaction = this.config.legacyTransactions
             const authorizationList = getAuthorizationList(userOpsToBundle)
@@ -593,7 +616,7 @@ export class Executor {
                 }
             }
 
-            transactionHash = await timed(
+            const sent = await timed(
                 childLogger,
                 "sendHandleOpsTransaction",
                 {
@@ -615,6 +638,8 @@ export class Executor {
                         submissionAttempts: userOpBundle.submissionAttempts
                     })
             )
+            transactionHash = sent.transactionHash
+            receipt = sent.receipt
 
             this.eventManager.emitSubmitted({
                 userOpHashes: getUserOpHashes(userOpsToBundle),
@@ -734,6 +759,7 @@ export class Executor {
             userOpsBundled,
             rejectedUserOps,
             transactionHash,
+            receipt,
             transactionRequest: {
                 maxFeePerGas,
                 maxPriorityFeePerGas,
