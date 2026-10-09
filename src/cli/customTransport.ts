@@ -503,7 +503,10 @@ export function customTransport(
                         let loggerFn = logger.error.bind(logger)
 
                         // EIP-7966 code 4: accepted, not yet included.
-                        if (error?.code === 4) {
+                        if (
+                            method === "eth_sendRawTransactionSync" &&
+                            error?.code === 4
+                        ) {
                             loggerFn = logger.info.bind(logger)
                         }
 
