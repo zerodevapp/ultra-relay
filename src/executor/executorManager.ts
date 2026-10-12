@@ -16,11 +16,21 @@ import {
     stampFirst,
     timed
 } from "@alto/utils"
-import type { Account, Address, Block, Hex, WatchBlocksReturnType } from "viem"
+import {
+    type Account,
+    type Address,
+    type Block,
+    type Hex,
+    type WatchBlocksReturnType,
+    formatTransactionReceipt
+} from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
-import type { BundleTransactionReceipt } from "./getBundleStatus"
+import {
+    type BundleTransactionReceipt,
+    bundleStatusFromReceipts
+} from "./getBundleStatus"
 import { type SenderManager, WalletNotFoundError } from "./senderManager"
 import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
@@ -555,7 +565,8 @@ export class ExecutorManager {
                         userOpsBundled,
                         rejectedUserOps,
                         transactionRequest,
-                        transactionHash
+                        transactionHash,
+                        receipt
                     } = bundleResult
 
                     // Increment submission attempts for all userOps submitted.
@@ -587,17 +598,25 @@ export class ExecutorManager {
                     // block run that saw the bundle earlier could free it and
                     // write "included", then this late bookkeeping would
                     // re-add it as submitted. finally: a failed write still
-                    // leaves the bundle tracked, so handleBlock owns it.
+                    // leaves the bundle tracked, so handleBlock owns it. A sync
+                    // receipt settles the bundle here instead of tracking it.
+                    let settled = false
                     try {
                         await this.mempool.markUserOpsAsSubmitted({
                             userOps: submittedBundle.bundle.userOps,
                             entryPoint: submittedBundle.bundle.entryPoint,
                             transactionHash: submittedBundle.transactionHash
                         })
+                        settled = await this.settleSyncReceipt(
+                            submittedBundle,
+                            receipt
+                        )
                     } finally {
-                        // Track bundle and start loop to watch blocks
-                        this.bundleManager.trackBundle(submittedBundle)
-                        this.startWatchingBlocks()
+                        if (!settled) {
+                            // Track bundle and start loop to watch blocks
+                            this.bundleManager.trackBundle(submittedBundle)
+                            this.startWatchingBlocks()
+                        }
                     }
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
@@ -700,6 +719,98 @@ export class ExecutorManager {
         if (this.staleBlockTimer) {
             clearInterval(this.staleBlockTimer)
             this.staleBlockTimer = undefined
+        }
+    }
+
+    // Settles a sync-sent bundle as a block run would, from rpc-url's copy of
+    // the receipt. The bundle is never tracked, so no block run can process it
+    // a second time.
+    // Returns false when it cannot settle now and the caller tracks it instead.
+    private async settleSyncReceipt(
+        submittedBundle: SubmittedBundleInfo,
+        receipt: BundleTransactionReceipt | undefined
+    ): Promise<boolean> {
+        if (!receipt) {
+            return false
+        }
+        // The send's receipt only says when to look; settle from rpc-url's, the
+        // same source the block watcher trusts.
+        const rpcReceipt = await this.rpcUrlReceipt(receipt.transactionHash)
+        if (!rpcReceipt) {
+            return false
+        }
+        const bundleStatus = bundleStatusFromReceipts(submittedBundle.bundle, [
+            rpcReceipt
+        ])
+        if (bundleStatus.status === "not_found") {
+            return false
+        }
+        const blockReceivedTimestamp = Date.now()
+        try {
+            if (bundleStatus.status === "included") {
+                await this.bundleManager.processIncludedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            } else {
+                await this.bundleManager.processRevertedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            }
+            this.updateTransactionCostMetrics(
+                rpcReceipt,
+                submittedBundle.bundle.userOps.map((op) => op.userOpHash),
+                bundleStatus.status
+            )
+        } catch (err) {
+            this.logger.error(
+                { err, transactionHash: receipt.transactionHash },
+                "failed to process the sync send receipt"
+            )
+        }
+        return true
+    }
+
+    // rpc-url can lag the node that took the send. Settle only once it serves
+    // this receipt too, or a client acting on it is validated against older
+    // state and the freed wallet reads a stale nonce. Errors and a hung call
+    // count as "not yet"; the whole check is capped at 1 s.
+    private async rpcUrlReceipt(
+        hash: Hex
+    ): Promise<BundleTransactionReceipt | undefined> {
+        const { publicClient } = this.config
+        const format =
+            publicClient.chain?.formatters?.transactionReceipt?.format ??
+            formatTransactionReceipt
+        const deadline = Date.now() + 1_000
+        const poll = async () => {
+            while (Date.now() < deadline) {
+                // A direct request: viem merges identical getTransactionReceipt
+                // calls, so a hung one here would stall the block watcher's.
+                const raw = await publicClient
+                    .request({
+                        method: "eth_getTransactionReceipt",
+                        params: [hash]
+                    })
+                    .catch(() => null)
+                if (raw) {
+                    return format(raw) as BundleTransactionReceipt
+                }
+                await new Promise((resolve) => setTimeout(resolve, 25))
+            }
+            return undefined
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const giveUp = new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), 1_000)
+        })
+        try {
+            return await Promise.race([poll(), giveUp])
+        } finally {
+            clearTimeout(timer)
         }
     }
 

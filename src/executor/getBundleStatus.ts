@@ -60,6 +60,14 @@ export const getBundleStatus = async ({
         )
     )
 
+    return bundleStatusFromReceipts(bundle, receipts)
+}
+
+// Also used for the receipt a sync send returns, so both paths agree.
+export const bundleStatusFromReceipts = (
+    bundle: SubmittedBundleInfo["bundle"],
+    receipts: (BundleTransactionReceipt | undefined)[]
+): BundleStatus => {
     const included = receipts.find((receipt) => receipt?.status === "success")
 
     // If any of the txs are included.

@@ -312,7 +312,8 @@ function reduceResultByMethod(
             }
             return reduced
         }
-        case "eth_getTransactionReceipt": {
+        case "eth_getTransactionReceipt":
+        case "eth_sendRawTransactionSync": {
             const reduced = pickFields(source, RECEIPT_FIELDS)
             if (Array.isArray(source.logs)) {
                 reduced.logsCount = source.logs.length
@@ -478,7 +479,12 @@ export function customTransport(
                                         response.headers.entries()
                                     )
                                 },
-                                timeout
+                                // Sync sends return at inclusion; geth and Nitro
+                                // hold them up to 20 s, reth 30 s.
+                                timeout:
+                                    method === "eth_sendRawTransactionSync"
+                                        ? 35_000
+                                        : timeout
                             })
                         ]
                     }
@@ -495,6 +501,14 @@ export function customTransport(
                     const logFullPayload = logger.isLevelEnabled("debug")
                     if (error) {
                         let loggerFn = logger.error.bind(logger)
+
+                        // EIP-7966 code 4: accepted, not yet included.
+                        if (
+                            method === "eth_sendRawTransactionSync" &&
+                            error?.code === 4
+                        ) {
+                            loggerFn = logger.info.bind(logger)
+                        }
 
                         if (isHex(error?.data) && error?.data?.length > 10) {
                             const errorSelector = slice(error?.data, 0, 4)
