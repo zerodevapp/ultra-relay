@@ -94,7 +94,8 @@ export async function addToMempoolIfValid({
     entryPoint,
     apiVersion,
     boost = false,
-    receivedAt
+    receivedAt,
+    onUserOpHash
 }: {
     rpcHandler: RpcHandler
     userOp: UserOperation
@@ -102,6 +103,9 @@ export async function addToMempoolIfValid({
     apiVersion: ApiVersion
     boost?: boolean
     receivedAt?: number
+    // Called once the hash is known and before the op can reach the mempool,
+    // so a caller waiting on the op's events cannot miss any of them.
+    onUserOpHash?: (userOpHash: Hex) => void
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
@@ -126,6 +130,7 @@ export async function addToMempoolIfValid({
     // From here on every log in this flow (incl. RPC transport lines fired by
     // validation) carries the hash.
     addLogContext({ userOpHash })
+    onUserOpHash?.(userOpHash)
 
     // Per-transaction bundle-cap validation: an op that alone exceeds this
     // chain's per-tx gas or calldata-size cap can never be included in any
@@ -303,67 +308,94 @@ export async function addToMempoolIfValid({
     return { result: "added", userOpHash }
 }
 
+// The eth_sendUserOperation flow, shared with zd_sendUserOperationSync so both
+// methods validate, admit, emit and count a userOp identically.
+export async function submitUserOperation({
+    rpcHandler,
+    userOp,
+    entryPoint,
+    apiVersion,
+    method,
+    onUserOpHash
+}: {
+    rpcHandler: RpcHandler
+    userOp: UserOperation
+    entryPoint: Address
+    apiVersion: ApiVersion
+    method: string
+    onUserOpHash?: (userOpHash: Hex) => void
+}): Promise<Hex> {
+    const handlerStart = performance.now()
+    const receivedAt = Date.now()
+
+    const boost =
+        userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+
+    rpcHandler.logger.info(
+        { sender: userOp.sender, apiVersion, boost, entryPoint },
+        `[timing] ${method} received`
+    )
+
+    let status: "added" | "queued" | "rejected" = "rejected"
+    let resolvedUserOpHash: Hex | undefined
+    try {
+        const { result, userOpHash } = await addToMempoolIfValid({
+            rpcHandler,
+            userOp,
+            entryPoint,
+            apiVersion,
+            boost,
+            receivedAt,
+            onUserOpHash
+        })
+
+        status = result
+        resolvedUserOpHash = userOpHash
+
+        rpcHandler.eventManager.emitReceived(userOpHash)
+
+        return userOpHash
+    } catch (error) {
+        status = "rejected"
+        throw error
+    } finally {
+        rpcHandler.metrics.userOperationsReceived
+            .labels({
+                status,
+                type: userOp.eip7702Auth ? "7702" : "regular"
+            })
+            .inc()
+
+        rpcHandler.logger.info(
+            {
+                sender: userOp.sender,
+                apiVersion,
+                boost,
+                status,
+                // Only set when defined: an explicit `undefined` would
+                // clobber the hash the log-context mixin already merged in,
+                // making rejected ops unfindable by hash.
+                ...(resolvedUserOpHash
+                    ? { userOpHash: resolvedUserOpHash }
+                    : {}),
+                ms: Math.round(performance.now() - handlerStart)
+            },
+            `[timing] ${method} total`
+        )
+    }
+}
+
 export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
-        const handlerStart = performance.now()
-        const receivedAt = Date.now()
         const [userOp, entryPoint] = params
-
-        const boost =
-            userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
-
-        rpcHandler.logger.info(
-            { sender: userOp.sender, apiVersion, boost, entryPoint },
-            "[timing] eth_sendUserOperation received"
-        )
-
-        let status: "added" | "queued" | "rejected" = "rejected"
-        let resolvedUserOpHash: Hex | undefined
-        try {
-            const { result, userOpHash } = await addToMempoolIfValid({
-                rpcHandler,
-                userOp,
-                entryPoint,
-                apiVersion,
-                boost,
-                receivedAt
-            })
-
-            status = result
-            resolvedUserOpHash = userOpHash
-
-            rpcHandler.eventManager.emitReceived(userOpHash)
-
-            return userOpHash
-        } catch (error) {
-            status = "rejected"
-            throw error
-        } finally {
-            rpcHandler.metrics.userOperationsReceived
-                .labels({
-                    status,
-                    type: userOp.eip7702Auth ? "7702" : "regular"
-                })
-                .inc()
-
-            rpcHandler.logger.info(
-                {
-                    sender: userOp.sender,
-                    apiVersion,
-                    boost,
-                    status,
-                    // Only set when defined: an explicit `undefined` would
-                    // clobber the hash the log-context mixin already merged in,
-                    // making rejected ops unfindable by hash.
-                    ...(resolvedUserOpHash
-                        ? { userOpHash: resolvedUserOpHash }
-                        : {}),
-                    ms: Math.round(performance.now() - handlerStart)
-                },
-                "[timing] eth_sendUserOperation total"
-            )
-        }
+        return await submitUserOperation({
+            rpcHandler,
+            userOp,
+            entryPoint,
+            apiVersion,
+            method: "eth_sendUserOperation"
+        })
     }
 })
