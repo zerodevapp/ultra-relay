@@ -11,15 +11,23 @@ export interface MinMaxQueue {
 
 export const createMinMaxQueue = ({
     config,
-    keyPrefix
-}: { config: AltoConfig; keyPrefix: string }): MinMaxQueue => {
+    keyPrefix,
+    allowZero = false
+}: {
+    config: AltoConfig
+    keyPrefix: string
+    // Fee queues can contain genuine zero values; oracle queues keep filtering
+    // them unless they explicitly opt in.
+    allowZero?: boolean
+}): MinMaxQueue => {
     if (config.enableHorizontalScaling && config.redisEndpoint) {
         return createRedisMinMaxQueue({
             config,
             keyPrefix,
-            redisEndpoint: config.redisEndpoint
+            redisEndpoint: config.redisEndpoint,
+            allowZero
         })
     }
 
-    return createMemoryMinMaxQueue({ config })
+    return createMemoryMinMaxQueue({ config, allowZero })
 }
