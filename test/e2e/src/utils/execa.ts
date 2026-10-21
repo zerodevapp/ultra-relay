@@ -103,19 +103,21 @@ export function execa(parameters: ExecaParameters): ExecaReturnType {
             process.on("exit", (code, signal) => {
                 emitter.emit("exit", code, signal)
 
-                if (!code) {
+                if (!code || status === "starting") {
                     process.removeAllListeners()
-                    if (status === "starting") {
-                        reject(
-                            new Error(
-                                `Failed to start process "${name}": ${
-                                    errorMessages.length > 0
-                                        ? `\n\n${errorMessages.join("\n")}`
-                                        : "exited"
-                                }`
-                            )
+                }
+                // A crash during startup exits non-zero, so gating this on
+                // `!code` left the caller waiting forever with stderr unreported.
+                if (status === "starting") {
+                    reject(
+                        new Error(
+                            `Failed to start process "${name}": ${
+                                errorMessages.length > 0
+                                    ? `\n\n${errorMessages.join("\n")}`
+                                    : "exited"
+                            }`
                         )
-                    }
+                    )
                 }
             })
 
