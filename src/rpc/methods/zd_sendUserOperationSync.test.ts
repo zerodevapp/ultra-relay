@@ -56,9 +56,7 @@ const admitThen = (afterSubmit: (rpcHandler: any) => void) => {
 const call = (rpcHandler: any, options?: { timeoutMs?: number }) =>
     zdSendUserOperationSyncHandler.handler({
         rpcHandler,
-        params: (options
-            ? [{}, entryPoint, options]
-            : [{}, entryPoint]) as any,
+        params: (options ? [{}, entryPoint, options] : [{}, entryPoint]) as any,
         apiVersion: "v2"
     })
 
@@ -88,9 +86,17 @@ describe("zd_sendUserOperationSync", () => {
         const rpcHandler = makeRpcHandler()
         admitThen(({ eventManager }) => {
             if (eventType === "included_onchain") {
-                eventManager.emitIncludedOnChain(userOpHash, transactionHash, 1n)
+                eventManager.emitIncludedOnChain(
+                    userOpHash,
+                    transactionHash,
+                    1n
+                )
             } else if (eventType === "frontran_onchain") {
-                eventManager.emitFrontranOnChain(userOpHash, transactionHash, 1n)
+                eventManager.emitFrontranOnChain(
+                    userOpHash,
+                    transactionHash,
+                    1n
+                )
             } else {
                 eventManager.emitExecutionRevertedOnChain(
                     userOpHash,
