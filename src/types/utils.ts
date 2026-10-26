@@ -17,6 +17,14 @@ export enum ExecutionErrors {
     UserOperationReverted = -32521
 }
 
+// zd_sendUserOperationSync outcomes that end without a receipt. Timeout reuses
+// EIP-7966's code for "accepted but not included in time"; both carry the
+// userOpHash in data so the caller can keep polling eth_getUserOperationReceipt.
+export enum SyncUserOpErrors {
+    Timeout = 4,
+    Dropped = -32010
+}
+
 export class RpcError extends Error {
     code?: number
     // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
