@@ -146,6 +146,56 @@ describe.each([
             expect(receipt.success).toEqual(true)
         })
 
+        test("shares a bundle with a regular eth_sendUserOperation op", async () => {
+            await setBundlingMode({ mode: "manual", altoRpc })
+            const regularOp = await signedOp()
+            const syncOp = await signedOp()
+
+            const regular = await rpc(altoRpc, "eth_sendUserOperation", [
+                deepHexlify(regularOp),
+                entryPoint
+            ])
+            expect(regular.error).toBeUndefined()
+            const regularHash = regular.result as Hex
+
+            const pending = rpc(altoRpc, "zd_sendUserOperationSync", [
+                deepHexlify(syncOp),
+                entryPoint,
+                { timeoutMs: 10_000 }
+            ])
+
+            // Both ops wait in the mempool before the one bundle is sent.
+            let queued = 0
+            for (let attempt = 0; attempt < 50 && queued < 2; attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 100))
+                const { result } = await rpc(
+                    altoRpc,
+                    "debug_bundler_dumpMempool",
+                    [entryPoint]
+                )
+                queued = result?.length ?? 0
+            }
+            expect(queued).toEqual(2)
+
+            await sendBundleNow({ altoRpc })
+
+            // The sync caller gets its receipt; the regular op is polled as before.
+            const sync = await pending
+            expect(sync.error).toBeUndefined()
+            expect(sync.result.success).toEqual(true)
+            expect(sync.result.userOpHash).not.toEqual(regularHash)
+
+            const regularReceipt = await waitForReceipt(altoRpc, regularHash)
+            expect(regularReceipt.success).toEqual(true)
+
+            expect(sync.result.receipt.transactionHash).toEqual(
+                regularReceipt.receipt.transactionHash
+            )
+            expect(sync.result).toEqual(
+                await waitForReceipt(altoRpc, sync.result.userOpHash)
+            )
+        })
+
         test("rejects an invalid op exactly like eth_sendUserOperation", async () => {
             const op = await signedOp()
             op.signature = `0x${"00".repeat(65)}` as Hex
