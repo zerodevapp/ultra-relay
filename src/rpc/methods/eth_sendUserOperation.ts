@@ -94,8 +94,7 @@ export async function addToMempoolIfValid({
     entryPoint,
     apiVersion,
     boost = false,
-    receivedAt,
-    onUserOpHash
+    receivedAt
 }: {
     rpcHandler: RpcHandler
     userOp: UserOperation
@@ -103,9 +102,6 @@ export async function addToMempoolIfValid({
     apiVersion: ApiVersion
     boost?: boolean
     receivedAt?: number
-    // Called once the hash is known and before the op can reach the mempool,
-    // so a caller waiting on the op's events cannot miss any of them.
-    onUserOpHash?: (userOpHash: Hex) => void
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
@@ -130,7 +126,6 @@ export async function addToMempoolIfValid({
     // From here on every log in this flow (incl. RPC transport lines fired by
     // validation) carries the hash.
     addLogContext({ userOpHash })
-    onUserOpHash?.(userOpHash)
 
     // Per-transaction bundle-cap validation: an op that alone exceeds this
     // chain's per-tx gas or calldata-size cap can never be included in any
@@ -315,15 +310,13 @@ export async function submitUserOperation({
     userOp,
     entryPoint,
     apiVersion,
-    method,
-    onUserOpHash
+    method
 }: {
     rpcHandler: RpcHandler
     userOp: UserOperation
     entryPoint: Address
     apiVersion: ApiVersion
-    method: string
-    onUserOpHash?: (userOpHash: Hex) => void
+    method: "eth_sendUserOperation" | "zd_sendUserOperationSync"
 }): Promise<Hex> {
     const handlerStart = performance.now()
     const receivedAt = Date.now()
@@ -345,8 +338,7 @@ export async function submitUserOperation({
             entryPoint,
             apiVersion,
             boost,
-            receivedAt,
-            onUserOpHash
+            receivedAt
         })
 
         status = result
