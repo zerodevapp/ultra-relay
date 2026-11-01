@@ -233,6 +233,50 @@ export class UnsafeValidator implements InterfaceValidator {
                     paymasterVerificationGasLimit *= 2n
                 }
             }
+
+            // Re-run the check with the doubled limits so we never return
+            // limits that still fail.
+            const retryUserOp = {
+                ...userOp,
+                callGasLimit,
+                verificationGasLimit
+            }
+            if ("paymasterVerificationGasLimit" in retryUserOp) {
+                retryUserOp.paymasterVerificationGasLimit =
+                    paymasterVerificationGasLimit
+            }
+
+            const retryError = await this.gasEstimationHandler.validateHandleOp(
+                {
+                    userOp: retryUserOp,
+                    queuedUserOps,
+                    entryPoint,
+                    targetAddress: zeroAddress,
+                    targetCallData: "0x",
+                    stateOverrides
+                }
+            )
+
+            if (retryError.result === "failed") {
+                const retryData = retryError.data.toString()
+
+                this.logger.warn(
+                    { data: retryData },
+                    "Second validation retry with doubled gas limits failed"
+                )
+
+                if (retryData.includes("AA23")) {
+                    throw new RpcError(
+                        retryData,
+                        ValidationErrors.SimulateValidation
+                    )
+                }
+
+                throw new RpcError(
+                    `UserOperation reverted during simulation with reason: ${decodeRevertReason(retryData)}`,
+                    ExecutionErrors.UserOperationReverted
+                )
+            }
         }
 
         return {
