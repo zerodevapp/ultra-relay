@@ -234,8 +234,10 @@ export class UnsafeValidator implements InterfaceValidator {
                 }
             }
 
-            // Re-run the check with the doubled limits so we never return
-            // limits that still fail.
+            // Re-run the simulation with the padded limits and return them
+            // only if it passes. It covers validation and the call phase: the
+            // simulation EntryPoint reverts with CallPhaseReverted when the
+            // call fails.
             const retryUserOp = {
                 ...userOp,
                 callGasLimit,
