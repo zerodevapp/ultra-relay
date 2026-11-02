@@ -35,6 +35,24 @@ type SimulateHandleOpSuccessResult = {
     targetResult: Hex
 }
 
+// A binary search that sees its target revert still reports resultType
+// Success, with success=false and the revert bytes in returnData. Turn that
+// into a failed result so the revert is not read as a gas limit of 0.
+function searchRevertFailure(data: {
+    success: boolean
+    returnData: Hex
+}): { result: "failed"; data: Hex; code: number } | null {
+    if (data.success) {
+        return null
+    }
+
+    return {
+        result: "failed",
+        data: data.returnData,
+        code: ExecutionErrors.UserOperationReverted
+    }
+}
+
 export class GasEstimator07 {
     private config: AltoConfig
     private logger: Logger
@@ -317,6 +335,13 @@ export class GasEstimator07 {
                     return binarySearchResult
                 }
 
+                const verificationRevert = searchRevertFailure(
+                    binarySearchResult.data
+                )
+                if (verificationRevert) {
+                    return verificationRevert
+                }
+
                 verificationGas = binarySearchResult.data.gasUsed
             } else if (
                 verificationGasLimit.resultType ===
@@ -553,12 +578,26 @@ export class GasEstimator07 {
                 return bsvgl
             }
 
+            const verificationRevert = searchRevertFailure(bsvgl.data)
+            if (verificationRevert) {
+                return verificationRevert
+            }
+
             if (bspvgl.result === "failed") {
                 return bspvgl
             }
 
             if (bscgl.result === "failed") {
                 return bscgl
+            }
+
+            // Empty callData skips the call phase: the search returns
+            // success=false with nothing reverted, and callGasLimit stays 0.
+            if (userOp.callData !== "0x") {
+                const callGasRevert = searchRevertFailure(bscgl.data)
+                if (callGasRevert) {
+                    return callGasRevert
+                }
             }
 
             return {
@@ -594,6 +633,15 @@ export class GasEstimator07 {
 
         if (focgl.result === "failed") {
             return focgl
+        }
+
+        // Empty callData skips the call phase: the search returns
+        // success=false with nothing reverted, and callGasLimit stays 0.
+        if (userOp.callData !== "0x") {
+            const callGasRevert = searchRevertFailure(focgl.data)
+            if (callGasRevert) {
+                return callGasRevert
+            }
         }
 
         const { verificationGas, paymasterVerificationGas, executionResult } =
