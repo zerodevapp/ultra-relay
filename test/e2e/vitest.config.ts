@@ -1,5 +1,4 @@
 import { join } from "node:path"
-import { config } from "dotenv"
 import { defineConfig } from "vitest/config"
 
 export default defineConfig({
@@ -14,9 +13,6 @@ export default defineConfig({
                 "**/_esm/**",
                 "**/_types/**"
             ]
-        },
-        env: {
-            ...config({ path: join(__dirname, "../.env") }).parsed
         },
         sequence: {
             concurrent: false
