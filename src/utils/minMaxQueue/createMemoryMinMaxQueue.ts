@@ -46,8 +46,9 @@ const updateQueues = (
 }
 
 export const createMemoryMinMaxQueue = ({
-    config
-}: { config: AltoConfig }): MinMaxQueue => {
+    config,
+    allowZero = false
+}: { config: AltoConfig; allowZero?: boolean }): MinMaxQueue => {
     const queueValidity = config.gasPriceExpiry
 
     // Element 0 will always be the min.
@@ -58,7 +59,7 @@ export const createMemoryMinMaxQueue = ({
 
     return {
         saveValue: (value: bigint) => {
-            if (value === 0n) {
+            if (value === 0n && !allowZero) {
                 return Promise.resolve()
             }
 
