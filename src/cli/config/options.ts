@@ -102,7 +102,7 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
     },
     "max-bundle-count": {
         description:
-            "Maximum number of UserOperations to include in a bundle. If not set, no limit is applied.",
+            "Maximum number of bundles one bundling pass may produce per entry point. Defaults to the number of executor wallets; a larger value is clamped to it, since bundles beyond the wallet count only queue for a wallet.",
         type: "number",
         require: false
     },
@@ -443,6 +443,13 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: 3
     },
+    "send-transaction-sync": {
+        description:
+            "Submit bundles with eth_sendRawTransactionSync and settle them as soon as rpc-url serves the receipt. A node that times out the call (EIP-7966 code 4) leaves the bundle pending. The call gets a 35 s RPC timeout. rpc-url and send-transaction-rpc-url must support the method",
+        type: "boolean",
+        require: false,
+        default: false
+    },
     "bundler-initial-commission": {
         description:
             "Initial commission percentage the bundler retains (10 = retain 10% of margin)",
@@ -456,6 +463,20 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         type: "string",
         require: false,
         default: "5"
+    },
+    "arbitrum-priority-fee-per-gas": {
+        description:
+            "Priority fee (in gwei) bid on Arbitrum networks. Arbitrum collects it under priority ordering, so keep 0 unless inclusion position matters more than cost",
+        type: "string",
+        require: false,
+        default: "0"
+    },
+    "arbitrum-skip-network-gas-price": {
+        description:
+            "Skip the unused network fee quote for initial Arbitrum EIP-1559 sends. Requires a status listener accepting absent network fee quote fields",
+        type: "boolean",
+        require: false,
+        default: false
     },
     "binary-search-max-retries": {
         description:
@@ -721,6 +742,20 @@ export const logOptions: CliCommandOptions<ILogArgsInput> = {
         type: "string",
         choices: ["trace", "debug", "info", "warn", "error", "fatal"],
         require: false
+    },
+    "enable-event-loop-metrics": {
+        description:
+            "Measure event-loop stalls, utilization and GC pauses: export stall and utilization metrics on /metrics, and log each 1-second window whose worst delay reaches event-loop-block-threshold-ms (with its GC pauses), plus a 60-second summary",
+        type: "boolean",
+        require: false,
+        default: false
+    },
+    "event-loop-block-threshold-ms": {
+        description:
+            "A 1-second window counts as an event-loop stall when its worst delay reaches this many ms (min 25; the delay includes the 10ms sampling interval, so an idle loop already reads 11-25ms; used only with enable-event-loop-metrics)",
+        type: "number",
+        require: false,
+        default: 50
     }
 }
 

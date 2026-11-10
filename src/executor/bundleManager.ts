@@ -26,6 +26,7 @@ import { entryPoint07Abi } from "viem/account-abstraction"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import { type BundleStatus, getBundleStatus } from "./getBundleStatus"
+import { computeInclusionTimings } from "./inclusionTimings"
 
 export class BundleManager {
     private reputationManager: InterfaceReputationManager
@@ -117,10 +118,9 @@ export class BundleManager {
         // Cleanup bundle
         await this.freeSubmittedBundle(submittedBundle)
 
-        // Process each userOp
-        // rest of the code is non-blocking
-        return (async () => {
-            for (const userOpInfo of userOps) {
+        // Preserve per-op ordering while overlapping independent I/O waits.
+        const results = await Promise.allSettled(
+            userOps.map(async (userOpInfo) => {
                 const userOpReceipt = userOpReceipts[userOpInfo.userOpHash]
 
                 // Cache the receipt
@@ -137,8 +137,15 @@ export class BundleManager {
                     entryPoint,
                     blockReceivedTimestamp
                 )
-            }
-        })()
+            })
+        )
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
     }
 
     /**
@@ -276,35 +283,18 @@ export class BundleManager {
         entryPoint: Address,
         blockReceivedTimestamp: number
     ) {
-        const { userOpHash, userOp, submissionAttempts, addedToMempool } =
-            userOpInfo
-        const { receivedAt, processingAt, submittedAt, reentered } = userOpInfo
+        const { userOpHash, userOp, submissionAttempts } = userOpInfo
 
-        const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
-        // totalMs spans the op's whole life (receivedAt survives resubmission);
-        // validationMs is suppressed for reentered records, whose restamped
-        // addedToMempool would make the delta span the entire prior cycle.
-        const totalMs = blockReceivedTimestamp - (receivedAt ?? addedToMempool)
+        const timings = computeInclusionTimings(
+            userOpInfo,
+            blockReceivedTimestamp
+        )
+        const { inclusionTimeMs, totalMs } = timings
         this.logger.info(
             {
                 userOpHash,
                 transactionHash,
-                inclusionTimeMs,
-                totalMs,
-                validationMs:
-                    receivedAt && !reentered
-                        ? addedToMempool - receivedAt
-                        : undefined,
-                outstandingMs: processingAt
-                    ? processingAt - addedToMempool
-                    : undefined,
-                processingMs:
-                    processingAt && submittedAt
-                        ? submittedAt - processingAt
-                        : undefined,
-                submittedMs: submittedAt
-                    ? blockReceivedTimestamp - submittedAt
-                    : undefined,
+                ...timings,
                 submissionAttempts
             },
             `userOp ${userOpHash} included in tx ${transactionHash} after ${totalMs}ms (${submissionAttempts} submission attempts)`

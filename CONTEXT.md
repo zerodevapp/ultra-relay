@@ -12,6 +12,13 @@ runs cleanup before exiting.
 A shutdown the process cannot observe: SIGKILL, OOM-kill, force delete, node
 crash, hard redeploy. No cleanup runs. Synonym in discussion: **crash**.
 
+### Relay instance
+One running ultra-relay process. An instance serves exactly one chain and has
+its own wallets and configuration. The chain default is named
+`ultra-relay-<chain>`; a dedicated instance for a specific integration adds a
+variant suffix, `ultra-relay-<chain>-<variant>`. Not to be confused with a
+Kubernetes Service, which is a networking object.
+
 ### Dead instance
 A bundler instance that has ungracefully terminated. Its in-memory state is
 gone and any shared resources it held are stranded until another instance or a

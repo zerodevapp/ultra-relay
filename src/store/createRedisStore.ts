@@ -1,6 +1,7 @@
 import Redis from "ioredis"
 import { type Address, toHex } from "viem"
 import type { Store } from "."
+import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import {
     type HexData32,
@@ -60,9 +61,10 @@ export const createRedisStore = ({
 }): Store => {
     const redis = new Redis(redisEndpoint, {})
 
-    const factoryLookupKey = `${config.chainId}:${storeType}:factory-lookup:${entryPoint}`
-    const userOpHashLookupKey = `${config.chainId}:${storeType}:user-op-hash-index:${entryPoint}`
-    const senderNonceLookupKey = `${config.chainId}:${storeType}:sender-nonce-lookup:${entryPoint}`
+    const storePrefix = getRedisStorePrefix(config)
+    const factoryLookupKey = `${storePrefix}:${storeType}:factory-lookup:${entryPoint}`
+    const userOpHashLookupKey = `${storePrefix}:${storeType}:user-op-hash-index:${entryPoint}`
+    const senderNonceLookupKey = `${storePrefix}:${storeType}:sender-nonce-lookup:${entryPoint}`
 
     const factoryLookup = new RedisHash(redis, factoryLookupKey) // sender -> userOpHash (if deployment is present)
     const senderNonceLookup = new RedisHash(redis, senderNonceLookupKey) // sender + nonce -> userOp

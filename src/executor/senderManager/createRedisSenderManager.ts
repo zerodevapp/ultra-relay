@@ -33,6 +33,19 @@ async function createRedisQueue({
     }
 }
 
+// The popped address is not one of this instance's keys: another instance
+// shares the queue (e.g. during an executor-key rotation). The address has
+// already been popped and is not pushed back.
+export class WalletNotFoundError extends Error {
+    readonly address: string
+
+    constructor(address: string) {
+        super(`wallet not found: ${address}`)
+        this.name = "WalletNotFoundError"
+        this.address = address
+    }
+}
+
 const delay = async (delay: number) => {
     await new Promise((resolve) => setTimeout(resolve, delay))
 }
@@ -79,14 +92,18 @@ export const createRedisSenderManager = async ({
 
             while (!walletAddress) {
                 walletAddress = await redisQueue.pop()
-                await delay(100)
+                // Only back off when the pool is empty; a successful pop must
+                // return immediately, it sits on the bundling critical path.
+                if (!walletAddress) {
+                    await delay(100)
+                }
             }
 
             const wallet = wallets.find((w) => w.address === walletAddress)
 
-            // should never happen
+            // Only when another instance's keys share the queue.
             if (!wallet) {
-                throw new Error("wallet not found")
+                throw new WalletNotFoundError(walletAddress)
             }
 
             activeWallets.add(wallet)
@@ -96,9 +113,15 @@ export const createRedisSenderManager = async ({
                 "got wallet from sender manager"
             )
 
-            await redisQueue.llen().then((len) => {
-                metrics.walletsAvailable.set(len)
-            })
+            // Metrics only; don't hold the bundle for the round-trip, and a
+            // failed read isn't worth surfacing (pop on the same connection
+            // just succeeded).
+            redisQueue
+                .llen()
+                .then((len) => {
+                    metrics.walletsAvailable.set(len)
+                })
+                .catch(() => {})
 
             return wallet
         },

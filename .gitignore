@@ -28,3 +28,4 @@ src/contracts/*
 !src/contracts/EntryPointGasEstimationOverride.sol/EntryPointGasEstimationOverride06.json
 
 docs/superpowers/*
+.claude

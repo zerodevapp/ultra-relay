@@ -5,15 +5,67 @@ import {
     type UserOperation,
     userOpInfoSchema
 } from "@alto/types"
-import { type ChainableCommander, Redis } from "ioredis"
+import { type ChainableCommander, Redis, type Result } from "ioredis"
 import { toHex } from "viem/utils"
 import type { OutstandingStore } from "."
+import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import {
     getNonceKeyAndSequence,
     isVersion06,
     isVersion07
 } from "../utils/userop"
+
+// Atomic pop for valid records on standalone Redis. In steady state, the
+// highest-fee ready slot's lowest-nonce op is removed with its hash-index
+// entry, and the slot is re-ranked by its next op's fee or deleted.
+// KEYS[1] ready queue    (zset: pending-ops key -> maxFeePerGas of its lowest nonce)
+// KEYS[2] hash lookup    (hash: userOpHash -> pending-ops key)
+// KEYS[3] factory lookup (hash: sender -> userOpHash of its deployment op)
+// Returns the popped member exactly as stored, or nil when nothing is ready.
+const POP_OUTSTANDING_SCRIPT = `
+local pendingOpsKey, ops
+repeat
+    local top = redis.call('ZPOPMAX', KEYS[1])
+    if #top == 0 then
+        return false
+    end
+    pendingOpsKey = top[1]
+    ops = redis.call('ZRANGE', pendingOpsKey, 0, 1)
+    -- An entry whose ops set is empty is stale; ZPOPMAX already dropped it.
+until #ops > 0
+
+local current = cjson.decode(ops[1])
+redis.call('ZREM', pendingOpsKey, ops[1])
+redis.call('HDEL', KEYS[2], current.userOpHash)
+
+local sender = current.userOp.sender
+if redis.call('HGET', KEYS[3], sender) == current.userOpHash then
+    redis.call('HDEL', KEYS[3], sender)
+end
+
+if #ops > 1 then
+    local nextOp = cjson.decode(ops[2])
+    -- Keep the 0x prefix. Explicit base 16 uses strtoul and saturates
+    -- above unsigned-long range, whereas stored fees can be uint256.
+    local fee = tonumber(nextOp.userOp.maxFeePerGas)
+    redis.call('ZADD', KEYS[1], fee, pendingOpsKey)
+else
+    redis.call('DEL', pendingOpsKey)
+end
+
+return ops[1]
+`
+
+declare module "ioredis" {
+    interface RedisCommander<Context> {
+        popOutstandingOp(
+            readyOpsQueueKey: string,
+            userOpHashLookupKey: string,
+            factoryLookupKey: string
+        ): Result<string | null, Context>
+    }
+}
 
 const serializeUserOpInfo = (userOpInfo: UserOpInfo): string => {
     return JSON.stringify(userOpInfo, (_, value) =>
@@ -90,20 +142,6 @@ class RedisSortedSet {
         return Promise.resolve(this.redis.zrange(this.keyPath, start, stop))
     }
 
-    async popMax(): Promise<string | undefined> {
-        type ZmpopResult = [string, [string, string][]] // [key, [[member, score], ...]]
-
-        const result = (await this.redis.zmpop(
-            1,
-            [this.keyPath],
-            "MAX",
-            "COUNT",
-            1
-        )) as ZmpopResult
-
-        return result && result[1].length > 0 ? result[1][0][0] : undefined
-    }
-
     async popMin(): Promise<string | undefined> {
         type ZmpopResult = [string, [string, string][]] // [key, [[member, score], ...]]
 
@@ -116,14 +154,6 @@ class RedisSortedSet {
         )) as ZmpopResult
 
         return result && result[1].length > 0 ? result[1][0][0] : undefined
-    }
-
-    async delete({
-        multi = this.redis
-    }: {
-        multi?: ChainableCommander | Redis
-    }): Promise<void> {
-        await multi.del(this.keyPath)
     }
 }
 
@@ -174,7 +204,7 @@ export class RedisHash {
 
 class RedisOutstandingQueue implements OutstandingStore {
     private redis: Redis
-    private chainId: number
+    private storePrefix: string
     private entryPoint: Address
 
     // Redis data structures
@@ -188,13 +218,17 @@ class RedisOutstandingQueue implements OutstandingStore {
         redisEndpoint
     }: { config: AltoConfig; entryPoint: Address; redisEndpoint: string }) {
         this.redis = new Redis(redisEndpoint, {})
-        this.chainId = config.chainId
+        this.redis.defineCommand("popOutstandingOp", {
+            numberOfKeys: 3,
+            lua: POP_OUTSTANDING_SCRIPT
+        })
+        this.storePrefix = getRedisStorePrefix(config)
         this.entryPoint = entryPoint
 
         // Initialize Redis data structures
-        const factoryLookupKey = `${this.chainId}:outstanding:factory-lookup:${this.entryPoint}`
-        const userOpHashLookupKey = `${this.chainId}:outstanding:user-op-hash-index:${this.entryPoint}`
-        const readyOpsQueueKey = `${this.chainId}:outstanding:pending-queue:${this.entryPoint}`
+        const factoryLookupKey = `${this.storePrefix}:outstanding:factory-lookup:${this.entryPoint}`
+        const userOpHashLookupKey = `${this.storePrefix}:outstanding:user-op-hash-index:${this.entryPoint}`
+        const readyOpsQueueKey = `${this.storePrefix}:outstanding:pending-queue:${this.entryPoint}`
 
         this.readyOpsQueue = new RedisSortedSet(this.redis, readyOpsQueueKey)
         this.userOpHashLookup = new RedisHash(this.redis, userOpHashLookupKey)
@@ -209,7 +243,7 @@ class RedisOutstandingQueue implements OutstandingStore {
     private getPendingOpsKey(userOp: UserOperation): string {
         const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)
         const fingerprint = `${userOp.sender}-${toHex(nonceKey)}`
-        return `${this.chainId}:outstanding:pending-ops:${this.entryPoint}:${fingerprint}`
+        return `${this.storePrefix}:outstanding:pending-ops:${this.entryPoint}:${fingerprint}`
     }
 
     // OutstandingStore methods
@@ -428,59 +462,12 @@ class RedisOutstandingQueue implements OutstandingStore {
     }
 
     async pop(): Promise<UserOpInfo | undefined> {
-        // Pop highest gas price operation
-        const pendingOpsKey = await this.readyOpsQueue.popMax()
-
-        if (!pendingOpsKey) {
-            return undefined
-        }
-
-        const pendingOpsSet = new RedisSortedSet(this.redis, pendingOpsKey)
-
-        // Get the operations from the set (limited to 2 for efficiency)
-        const ops = await pendingOpsSet.getByRankRange(0, 1)
-
-        if (ops.length === 0) {
-            return undefined
-        }
-
-        const currentUserOpStr = ops[0]
-        const currentUserOp = deserializeUserOpInfo(currentUserOpStr)
-
-        // Create a transaction
-        const multi = this.redis.multi()
-
-        // Clean up factory deployment tracking if needed
-        if (isDeployment(currentUserOp.userOp)) {
-            await this.factoryLookup.delete({
-                key: currentUserOp.userOp.sender,
-                multi
-            })
-        }
-
-        // Remove the current operation
-        await pendingOpsSet.remove({ member: currentUserOpStr, multi })
-        await this.userOpHashLookup.delete({
-            key: currentUserOp.userOpHash,
-            multi
-        })
-
-        // Execute transaction
-        await multi.exec()
-
-        // Check if there are more operations in this set
-        if (ops.length > 1) {
-            const nextUserOp = deserializeUserOpInfo(ops[1])
-            await this.readyOpsQueue.add({
-                member: pendingOpsKey,
-                score: Number(nextUserOp.userOp.maxFeePerGas)
-            })
-        } else {
-            // Delete the empty set
-            await pendingOpsSet.delete({})
-        }
-
-        return currentUserOp
+        const member = await this.redis.popOutstandingOp(
+            this.readyOpsQueue.keyPath,
+            this.userOpHashLookup.keyPath,
+            this.factoryLookup.keyPath
+        )
+        return member ? deserializeUserOpInfo(member) : undefined
     }
 
     async getQueuedUserOps(userOp: UserOperation): Promise<UserOperation[]> {

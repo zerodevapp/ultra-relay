@@ -4,17 +4,25 @@ import type { Hex, PublicClient } from "viem"
 import type { SubmittedBundleInfo } from "../types/mempool"
 import { parseUserOpReceipt } from "../utils/userop"
 
+// The exact object publicClient.getTransactionReceipt resolves to, so the
+// receipt can be handed to cost accounting without a second fetch.
+export type BundleTransactionReceipt = Awaited<
+    ReturnType<PublicClient["getTransactionReceipt"]>
+>
+
 export type BundleIncluded = {
     status: "included"
     userOpReceipts: Record<Hex, UserOperationReceipt>
     transactionHash: Hex
     blockNumber: bigint
+    receipt: BundleTransactionReceipt
 }
 
 export type BundleReverted = {
     status: "reverted"
     blockNumber: bigint
     transactionHash: Hex
+    receipt: BundleTransactionReceipt
 }
 
 export type BundleNotFound = {
@@ -52,6 +60,14 @@ export const getBundleStatus = async ({
         )
     )
 
+    return bundleStatusFromReceipts(bundle, receipts)
+}
+
+// Also used for the receipt a sync send returns, so both paths agree.
+export const bundleStatusFromReceipts = (
+    bundle: SubmittedBundleInfo["bundle"],
+    receipts: (BundleTransactionReceipt | undefined)[]
+): BundleStatus => {
     const included = receipts.find((receipt) => receipt?.status === "success")
 
     // If any of the txs are included.
@@ -68,7 +84,8 @@ export const getBundleStatus = async ({
             status: "included",
             userOpReceipts: userOpDetails,
             transactionHash,
-            blockNumber
+            blockNumber,
+            receipt: included
         }
     }
 
@@ -80,7 +97,8 @@ export const getBundleStatus = async ({
         return {
             status: "reverted",
             blockNumber,
-            transactionHash
+            transactionHash,
+            receipt: reverted
         }
     }
 

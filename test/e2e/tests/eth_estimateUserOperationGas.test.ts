@@ -2,7 +2,9 @@ import { deepHexlify } from "permissionless"
 import {
     http,
     type Address,
+    type BaseError,
     type Hex,
+    RpcRequestError,
     createPublicClient,
     getContract,
     zeroAddress
@@ -319,17 +321,41 @@ describe.each([
                 altoRpc
             })
 
-            await expect(async () =>
-                smartAccountClient.estimateUserOperationGas({
-                    calls: [
-                        {
-                            to: revertingContract,
-                            data: getRevertCall("foobar"),
-                            value: 0n
-                        }
-                    ]
-                })
-            ).rejects.toThrow("foobar")
+            const estimation = smartAccountClient.estimateUserOperationGas({
+                calls: [
+                    {
+                        to: revertingContract,
+                        data: getRevertCall("foobar"),
+                        value: 0n
+                    }
+                ]
+            })
+
+            // Capture the rejection once and assert on that single error.
+            const error = await estimation.catch((err: unknown) => err)
+
+            expect((error as Error).message).toContain("foobar")
+
+            // Error contract promised to customers: pin the raw JSON-RPC error.
+            // RpcRequestError's own message is "RPC Request failed.", so assert
+            // on its cause, which is the error object the bundler returned.
+            const rpcRequestError = (error as BaseError).walk(
+                (err) => err instanceof RpcRequestError
+            )
+            const rpcError = (rpcRequestError as RpcRequestError)
+                .cause as unknown as {
+                code: number
+                message: string
+                data?: unknown
+            }
+
+            expect(rpcError.code).toBe(-32521)
+            expect(
+                rpcError.message.startsWith(
+                    "UserOperation reverted during simulation with reason: "
+                )
+            ).toBe(true)
+            expect(rpcError.data).toBeUndefined()
         })
 
         test("Should validate eip7702Auth", async () => {

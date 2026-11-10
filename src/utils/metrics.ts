@@ -165,7 +165,7 @@ export function createMetrics(registry: Registry, register = true) {
     const userOperationsResubmitted = new Counter({
         name: "ultra_relay_user_operations_resubmitted_total",
         help: "Number of user operations resubmitted",
-        labelNames: [] as const,
+        labelNames: ["reason"] as const,
         registers
     })
 

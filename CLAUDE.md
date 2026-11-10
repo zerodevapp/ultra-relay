@@ -8,79 +8,15 @@ Alto is a TypeScript implementation of the ERC-4337 bundler specification, desig
 
 ## Key Commands
 
-### Development
 ```bash
-# Install dependencies
-pnpm install
-
-# Build everything (including smart contracts)
-pnpm run build
-
-# Run in development mode with auto-reload
-pnpm run dev
-
-# Start the bundler
-pnpm start
-
-# Run tests
-pnpm test
-
 # Run a specific test
 cd e2e && pnpm test -t "test name"
-
-# Lint and format code
-pnpm run lint
-pnpm run format
-```
-
-### Smart Contract Commands
-```bash
-# Build all contract versions
-pnpm run build:contracts
-
-# Build specific version contracts
-pnpm run build:contracts-v06
-pnpm run build:contracts-v07
-pnpm run build:contracts-v08
 ```
 
 ## Architecture Overview
 
-### Core Modules
-- **`src/cli/`**: CLI entry point and option parsing
-- **`src/rpc/`**: JSON-RPC server with ERC-4337 methods (eth_sendUserOperation, etc.)
-- **`src/executor/`**: Bundle creation and submission logic, implements transaction execution strategies
-- **`src/mempool/`**: User operation pool management with validation and reputation tracking
-- **`src/store/`**: Storage abstraction layer (Redis or in-memory)
-- **`src/handlers/`**: Chain-specific gas price managers (Arbitrum, Optimism, Mantle)
-- **`src/utils/`**: Shared utilities, validation helpers, and common types
-
 ### Key Design Patterns
-1. **Multi-version Support**: Each ERC-4337 version has dedicated handlers in separate directories (v06, v07, v08)
-2. **Chain Abstraction**: Chain-specific logic is isolated in handlers, allowing easy addition of new chains
-3. **Storage Flexibility**: Store interface allows switching between Redis and in-memory storage
-4. **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots). Stuck bundles are resubmitted with bumped gas (floored above the bor +10% replacement requirement), then rotated to a fresh executor wallet after `max-stuck-attempts-before-rotation` total attempts (cancelling the old transaction)
-5. **Comprehensive Validation**: Multiple validation layers including simulation, reputation, and paymaster checks
-
-### Important Files
-- `src/cli/config/bundle.ts`: CLI configuration and option definitions
-- `src/executor/executor.ts`: Main bundle execution logic (gas pricing, replacement gas floor)
-- `src/executor/executorManager.ts`: Block watching, stuck-bundle resubmission/rotation, recovery
-- `src/mempool/mempool.ts`: User operation mempool implementation
-- `src/rpc/server.ts`: RPC server setup
-- `src/validator/validator.ts`: User operation validation logic
-
-## Technical Stack
-- **Runtime**: Node.js 18+ with ESM modules
-- **Language**: TypeScript 5.x with strict mode
-- **Web Framework**: Fastify for HTTP/WebSocket
-- **Smart Contracts**: Solidity with Foundry toolchain
-- **Storage**: Redis (optional) or in-memory
-- **Monitoring**: OpenTelemetry, Prometheus metrics
-- **Code Quality**: Biome for linting/formatting
-- **Testing**: Vitest for e2e tests
-- **Validation**: Zod for runtime type validation
-- **Logging**: Pino with custom serializers
+- **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots). Stuck bundles are resubmitted with bumped gas (floored above the bor +10% replacement requirement), then rotated to a fresh executor wallet after `max-stuck-attempts-before-rotation` total attempts (cancelling the old transaction)
 
 ## Development Tips
 1. The project uses pnpm workspaces - always use `pnpm` instead of `npm` or `yarn`
@@ -115,27 +51,15 @@ pnpm run build:contracts-v08
 2. Ensure compatibility across all supported versions
 3. Update validation logic if needed
 
-### Working with User Operations
-- Validation logic is in `src/validator/`
-- Mempool operations are in `src/mempool/`
-- Execution logic is in `src/executor/`
-
 ## Code Style and Best Practices
 
 ### TypeScript Configuration
-- **Strict Mode**: Always enabled with additional checks
-- **Module System**: ESM with `@alto/*` aliases for internal imports
-- **Target**: ESNext for modern JavaScript features
 - **Type Safety**: Never use `any` type - use proper type definitions, `unknown`, or type assertions when needed
 
 ### Coding Conventions
 
 #### Naming Conventions
 - **Interfaces**: Prefixed with `Interface` (e.g., `InterfaceValidator`)
-- **Types**: PascalCase for type definitions
-- **Files**: kebab-case for filenames (e.g., `gas-price-manager.ts`)
-- **Constants**: UPPER_SNAKE_CASE for constants
-- **Functions/Methods**: camelCase
 - **UserOperation Naming**: 
   - **Local variables and parameters**: Use `userOp` (e.g., `submittedUserOp`, `validUserOp`, `queuedUserOps`)
   - **Local method names**: Use `userOp` (e.g., `dropUserOps`, `addUserOp`, `getUserOpHash`)
@@ -194,11 +118,6 @@ async function functionName({
 - Pass configuration and dependencies as objects
 - Use interfaces for testability
 
-### Async Best Practices
-- Use `Promise.all` for parallel operations
-- Proper error handling in try-catch blocks
-- Explicit return types for async functions
-
 ### RPC and HTTP Communication
 - **Important**: When making RPC calls for methods that are not natively supported by viem, use the viem client's `request` method
 - The viem `Client` type provides a `request` method for custom RPC calls: `client.request({ method: 'custom_method', params: [...] })`
@@ -210,13 +129,6 @@ async function functionName({
 - Keep version-specific logic in separate directories
 - Use factory pattern for creating handlers
 
-### Code Formatting
-- **Indentation**: 4 spaces
-- **Line Width**: 80 characters
-- **Semicolons**: Omitted where possible
-- **Trailing Commas**: None
-- Run `pnpm run format` before committing
-
 ### Utility Functions
 When working with BigInt calculations, use the utility functions from `@alto/utils`:
 - **scaleBigIntByPercent**: Scale a BigInt by a percentage (e.g., `scaleBigIntByPercent(value, 150n)` for 150%)
@@ -224,14 +136,5 @@ When working with BigInt calculations, use the utility functions from `@alto/uti
 - **roundUpBigInt**: Round up to nearest multiple
 - Never use manual percentage calculations like `(value * 150n) / 100n`
 
-### Performance Considerations
-- Batch operations when possible
-- Use efficient data structures
-- Minimize BigInt conversions
-- Cache expensive computations
-
 ### Security Best Practices
 - Never log sensitive data (private keys, etc.)
-- Validate all external inputs
-- Use checksummed addresses
-- Follow ERC-4337 security guidelines

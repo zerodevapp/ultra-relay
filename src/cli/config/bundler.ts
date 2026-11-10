@@ -138,6 +138,7 @@ export const executorArgsSchema = z.object({
     "executor-refill-interval": z.number().int().min(0),
     "executor-gas-multiplier": z.string().transform((val) => BigInt(val)),
     "send-handle-ops-retry-count": z.number().int().default(3),
+    "send-transaction-sync": z.boolean().default(false),
     "transaction-underpriced-multiplier": z
         .string()
         .transform((val) => BigInt(val)),
@@ -149,6 +150,11 @@ export const executorArgsSchema = z.object({
         .string()
         .transform((val) => BigInt(val))
         .default("5"),
+    "arbitrum-priority-fee-per-gas": z
+        .string()
+        .transform((val) => parseGwei(val))
+        .default("0"),
+    "arbitrum-skip-network-gas-price": z.boolean().default(false),
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3),
     "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5),
@@ -241,7 +247,9 @@ export const logArgsSchema = z.object({
     "mempool-log-level": logLevel.optional(),
     "executor-log-level": logLevel.optional(),
     "reputation-manager-log-level": logLevel.optional(),
-    "nonce-queuer-log-level": logLevel.optional()
+    "nonce-queuer-log-level": logLevel.optional(),
+    "enable-event-loop-metrics": z.boolean().default(false),
+    "event-loop-block-threshold-ms": z.number().int().min(25).default(50)
 })
 
 export const debugArgsSchema = z.object({

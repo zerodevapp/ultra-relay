@@ -3,6 +3,7 @@ import Redis from "ioredis"
 import type { Logger } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import type { MinMaxQueue } from "."
+import { getRedisStorePrefix } from "../../cli/config/redisKeys"
 import type { AltoConfig } from "../../createConfig"
 
 // Sorted TTL queue, one queue to keep track of values and other queue to keep track of TTL.
@@ -24,7 +25,7 @@ class SortedTtlSet {
         const redis = new Redis(redisEndpoint)
         const queueValidity = config.gasPriceExpiry
 
-        const redisKey = `${config.chainId}:${keyPrefix}`
+        const redisKey = `${getRedisStorePrefix(config)}:${keyPrefix}`
 
         this.redis = redis
         this.valueKey = `${redisKey}:value`

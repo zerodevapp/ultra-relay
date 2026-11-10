@@ -276,7 +276,7 @@ describe.each([
                 privateKey
             })
 
-            await client.sendUserOperation({
+            const deployHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -287,6 +287,9 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
+            // Ops below are prepared against the deployed account, so the
+            // factory args must be gone before they are built, else AA10.
+            await client.waitForUserOperationReceipt({ hash: deployHash })
 
             const opHashes = await Promise.all(
                 nonceKeys.map((nonceKey) =>
@@ -372,7 +375,7 @@ describe.each([
                 privateKey
             })
 
-            await client.sendUserOperation({
+            const deployHash = await client.sendUserOperation({
                 calls: [
                     {
                         to: client.account.address,
@@ -383,6 +386,9 @@ describe.each([
             })
 
             await sendBundleNow({ altoRpc })
+            // Ops below are prepared against the deployed account, so the
+            // factory args must be gone before they are built, else AA10.
+            await client.waitForUserOperationReceipt({ hash: deployHash })
 
             const nonceKey = 100n
             const nonceValueDiffs = [0n, 1n, 2n]

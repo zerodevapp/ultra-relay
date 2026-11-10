@@ -113,7 +113,8 @@ const getExecutorManager = ({
     senderManager,
     metrics,
     gasPriceManager,
-    bundleManager
+    bundleManager,
+    requestShutdown
 }: {
     config: AltoConfig
     executor: Executor
@@ -122,6 +123,7 @@ const getExecutorManager = ({
     metrics: Metrics
     gasPriceManager: GasPriceManager
     bundleManager: BundleManager
+    requestShutdown: (reason: string) => void
 }) => {
     return new ExecutorManager({
         config,
@@ -130,7 +132,8 @@ const getExecutorManager = ({
         mempool,
         senderManager,
         metrics,
-        gasPriceManager
+        gasPriceManager,
+        requestShutdown
     })
 }
 
@@ -290,7 +293,15 @@ export const setupServer = async ({
         mempool,
         senderManager,
         metrics,
-        gasPriceManager
+        gasPriceManager,
+        // gracefulShutdown and rootLogger are defined below. Nothing calls
+        // this before setupServer returns: bundling awaits the store first.
+        requestShutdown: (reason) => {
+            gracefulShutdown(reason).catch((err) => {
+                rootLogger.error({ err }, `Error during ${reason} shutdown`)
+                process.exit(1)
+            })
+        }
     })
 
     const rpcEndpoint = getRpcHandler({

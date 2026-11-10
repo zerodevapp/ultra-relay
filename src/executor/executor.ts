@@ -34,6 +34,10 @@ import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
+    type SentTransaction,
+    sendTransactionSync
+} from "./sendTransactionSync"
+import {
     encodeHandleOpsCalldata,
     getAuthorizationList,
     getUserOpHashes,
@@ -107,7 +111,7 @@ export class Executor {
         bundleGasUsed
     }: {
         bundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         totalBeneficiaryFees: bigint
         bundleGasUsed: bigint
@@ -117,23 +121,40 @@ export class Executor {
             resubmitMultiplierCeiling,
             legacyTransactions,
             chainType,
-            arbitrumGasBidMultiplier
+            arbitrumGasBidMultiplier,
+            arbitrumPriorityFeePerGas
         } = this.config
 
-        // Arbtirum's sequencer orders based on first come first serve.
-        // Because of this, maxFee/maxPriorityFee is ignored and the bundler *always* pays the network's baseFee.
-        // The bundler need to set a large enough gasBid to account for network baseFee fluctuations.
-        // GasBid = min(maxFee, base + priority)
+        // Arbitrum charges min(maxFee, baseFee + priorityFee). maxFee carries
+        // headroom for baseFee moves between estimation and inclusion. The
+        // priority fee is a separate, configurable bid (default 0): with
+        // priority ordering live the tip is collected, and a tip equal to
+        // maxFee made every bundle pay the whole headroom.
         if (chainType === "arbitrum") {
+            const resubmitPercent =
+                100n + 20n * BigInt(bundle.submissionAttempts)
             const scaledBaseFee = scaleBigIntByPercent(
                 networkBaseFee,
-                100n + 20n * BigInt(bundle.submissionAttempts)
+                resubmitPercent
+            )
+            // Scaled with retries too, so a non-zero tip still clears the
+            // replacement-price rule on resubmission.
+            const priorityFee = scaleBigIntByPercent(
+                arbitrumPriorityFeePerGas,
+                resubmitPercent
             )
 
             return {
-                maxFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier,
-                maxPriorityFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier
+                maxFeePerGas: maxBigInt(
+                    scaledBaseFee * arbitrumGasBidMultiplier,
+                    scaledBaseFee + priorityFee
+                ),
+                maxPriorityFeePerGas: priorityFee
             }
+        }
+
+        if (!networkGasPrice) {
+            throw new Error("Network gas price is required outside Arbitrum")
         }
 
         // Increase network gas price for resubmissions to improve tx inclusion
@@ -218,7 +239,8 @@ export class Executor {
             walletClients,
             publicClient,
             privateEndpointSubmissionAttempts,
-            maxBundlingGasPrice
+            maxBundlingGasPrice,
+            sendTransactionSync: useSyncSubmission
         } = this.config
 
         // Use private wallet for configured number of attempts if available, then switch to public
@@ -241,6 +263,7 @@ export class Executor {
             data: handleOpsCalldata,
             from: account.address,
             chain: publicClient.chain,
+            chainId: publicClient.chain.id,
             gas,
             account,
             nonce,
@@ -251,6 +274,7 @@ export class Executor {
 
         let attempts = 0
         let transactionHash: Hex | undefined
+        let receipt: SentTransaction["receipt"]
         const maxAttempts = sendHandleOpsRetryCount
 
         // Try sending the transaction and updating relevant fields if there is an error.
@@ -286,17 +310,33 @@ export class Executor {
                     }
                 }
 
-                transactionHash = await timed(
+                // With `sync`, the span covers the wait for inclusion.
+                const sent: SentTransaction = await timed(
                     childLogger,
                     "walletClient.sendTransaction",
                     {
                         attempt: attempts,
                         isPrivate: usePrivateEndpoint,
                         executor: account.address,
-                        entryPoint
+                        entryPoint,
+                        sync: useSyncSubmission
                     },
-                    () => walletClient.sendTransaction(request)
+                    async () =>
+                        useSyncSubmission
+                            ? sendTransactionSync({
+                                  walletClient,
+                                  request,
+                                  logger: childLogger
+                              })
+                            : {
+                                  transactionHash:
+                                      await walletClient.sendTransaction(
+                                          request
+                                      )
+                              }
                 )
+                transactionHash = sent.transactionHash
+                receipt = sent.receipt
 
                 childLogger.info(
                     {
@@ -411,7 +451,7 @@ export class Executor {
             throw new Error("Transaction hash not assigned")
         }
 
-        return transactionHash as Hex
+        return { transactionHash: transactionHash as Hex, receipt }
     }
 
     async bundle({
@@ -424,7 +464,7 @@ export class Executor {
     }: {
         executor: Account
         userOpBundle: UserOperationBundle
-        networkGasPrice: GasPriceParameters
+        networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
         nonce: number
         previousTransactionRequest?: {
@@ -550,6 +590,7 @@ export class Executor {
         }
 
         let transactionHash: HexData32
+        let receipt: SentTransaction["receipt"]
         try {
             const isLegacyTransaction = this.config.legacyTransactions
             const authorizationList = getAuthorizationList(userOpsToBundle)
@@ -575,7 +616,7 @@ export class Executor {
                 }
             }
 
-            transactionHash = await timed(
+            const sent = await timed(
                 childLogger,
                 "sendHandleOpsTransaction",
                 {
@@ -597,6 +638,8 @@ export class Executor {
                         submissionAttempts: userOpBundle.submissionAttempts
                     })
             )
+            transactionHash = sent.transactionHash
+            receipt = sent.receipt
 
             this.eventManager.emitSubmitted({
                 userOpHashes: getUserOpHashes(userOpsToBundle),
@@ -604,9 +647,9 @@ export class Executor {
                 submissionAttempts: userOpBundle.submissionAttempts,
                 bundlerMaxFeePerGas: maxFeePerGas,
                 bundlerMaxPriorityFeePerGas: maxPriorityFeePerGas,
-                networkMaxFeePerGas: networkGasPrice.maxFeePerGas,
+                networkMaxFeePerGas: networkGasPrice?.maxFeePerGas,
                 networkMaxPriorityFeePerGas:
-                    networkGasPrice.maxPriorityFeePerGas,
+                    networkGasPrice?.maxPriorityFeePerGas,
                 networkBaseFee
             })
         } catch (err: unknown) {
@@ -716,6 +759,7 @@ export class Executor {
             userOpsBundled,
             rejectedUserOps,
             transactionHash,
+            receipt,
             transactionRequest: {
                 maxFeePerGas,
                 maxPriorityFeePerGas,

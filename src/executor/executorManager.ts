@@ -4,6 +4,7 @@ import type {
     BundlingMode,
     HexData32,
     SubmittedBundleInfo,
+    UserOpInfo,
     UserOperationBundle
 } from "@alto/types"
 import type { GasPriceParameters } from "@alto/types"
@@ -12,6 +13,7 @@ import {
     type Metrics,
     runWithLogContext,
     scaleBigIntByPercent,
+    stampFirst,
     timed
 } from "@alto/utils"
 import {
@@ -20,16 +22,42 @@ import {
     type Block,
     type Hex,
     type WatchBlocksReturnType,
-    formatEther
+    formatTransactionReceipt
 } from "viem"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
-import type { SenderManager } from "./senderManager"
+import {
+    type BundleTransactionReceipt,
+    bundleStatusFromReceipts
+} from "./getBundleStatus"
+import { type SenderManager, WalletNotFoundError } from "./senderManager"
+import { computeTransactionCostEth } from "./transactionCost"
 import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
+// Pass timing is logged for every pass that produced a bundle; an empty pass
+// is logged only when it took at least this long, so idle ticks stay quiet.
+const EMPTY_PASS_LOG_THRESHOLD_MS = 50
+// Log timer-callback lateness. A slow previous pass delays timer arming
+// and is measured by bundling.getBundles, not by this threshold.
+const TICK_LATE_LOG_THRESHOLD_MS = 50
+
+const countUserOps = (bundles: UserOperationBundle[]): number =>
+    bundles.reduce((sum, bundle) => sum + bundle.userOps.length, 0)
+
+// Success-line fields for the bundling.getBundles timing, or undefined to
+// keep a fast empty pass quiet. ms is unrounded, so 49.999 stays quiet.
+export function summarizePass(
+    bundles: UserOperationBundle[],
+    ms: number
+): { bundleCount: number; userOpCount: number } | undefined {
+    if (bundles.length === 0 && ms < EMPTY_PASS_LOG_THRESHOLD_MS) {
+        return undefined
+    }
+    return { bundleCount: bundles.length, userOpCount: countUserOps(bundles) }
+}
 
 // While a rotated-away wallet is quarantined (its stuck nonce hasn't confirmed),
 // emit an error log every this-many reconcile ticks so a permanently wedged
@@ -41,6 +69,14 @@ const QUARANTINE_ALERT_INTERVAL_TICKS = 30
 // out-of-sync RPC node read can't release a wallet whose stuck tx is still in
 // flight on another node.
 const QUARANTINE_CLEAR_OBSERVATIONS_TO_RELEASE = 2
+
+type BlockRunSummary = {
+    pending: number
+    mined: number
+    reverted: number
+    notMined: number
+    opsClosed: number
+}
 
 export class ExecutorManager {
     private senderManager: SenderManager
@@ -56,6 +92,11 @@ export class ExecutorManager {
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
+
+    // When handleBlock last reconciled pending bundles, from either trigger
+    // (a new block, or the stale-block watchdog below). Drives the watchdog.
+    private lastReconcileAt = Date.now()
+    private staleBlockTimer: NodeJS.Timeout | undefined
 
     // Executor wallets rotated away from a stuck bundle whose cancel did not
     // confirm. Held out of the sender pool (markWalletProcessed deferred) until
@@ -83,6 +124,10 @@ export class ExecutorManager {
     private cancelsInFlight = new Set<Address>()
     private quarantineTimer: NodeJS.Timeout | undefined
     private reconciling = false
+    // Starts the process's graceful shutdown. Called at most once, guarded
+    // by shutdownRequested.
+    private requestShutdown: (reason: string) => void
+    private shutdownRequested = false
 
     constructor({
         config,
@@ -91,7 +136,8 @@ export class ExecutorManager {
         metrics,
         gasPriceManager,
         senderManager,
-        bundleManager
+        bundleManager,
+        requestShutdown
     }: {
         config: AltoConfig
         executor: Executor
@@ -100,6 +146,7 @@ export class ExecutorManager {
         gasPriceManager: GasPriceManager
         senderManager: SenderManager
         bundleManager: BundleManager
+        requestShutdown: (reason: string) => void
     }) {
         this.config = config
         this.executor = executor
@@ -115,6 +162,7 @@ export class ExecutorManager {
         this.senderManager = senderManager
         this.bundlingMode = this.config.bundleMode
         this.bundleManager = bundleManager
+        this.requestShutdown = requestShutdown
 
         if (this.bundlingMode === "auto") {
             this.autoScalingBundling()
@@ -146,20 +194,37 @@ export class ExecutorManager {
                 (timestamp) => now - timestamp < RPM_WINDOW
             )
 
-            const bundles = await this.mempool.getBundles()
+            // Bounded per entry point so a deep queue cannot hold the whole
+            // tick. Every bundle beyond the wallet count only queues for a
+            // wallet with its ops parked in processing, so the wallet count
+            // is the ceiling and max-bundle-count can only lower it. Without
+            // a bound, sustained arrivals keep getBundles() from ever
+            // returning and nothing gets submitted.
+            const walletCount = this.senderManager.getAllWallets().length
+            const bundleBudget = Math.max(
+                1,
+                Math.min(this.config.maxBundleCount ?? walletCount, walletCount)
+            )
+
+            const bundles = await timed(
+                this.logger,
+                "bundling.getBundles",
+                { bundleBudget },
+                // Each completed bundle starts executor work immediately.
+                // The returned array supplies counts, never a second dispatch.
+                () =>
+                    this.mempool.getBundles(bundleBudget, (bundle) => {
+                        // biome-ignore lint/complexity/noVoid: deliberately not awaited; sendBundleToExecutor recovers every failure itself and always resolves (ADR 0004)
+                        void this.sendBundleToExecutor(bundle)
+                    }),
+                { summarize: summarizePass }
+            )
 
             if (bundles.length > 0) {
                 // Count total ops and add timestamps
-                const totalOps = bundles.reduce(
-                    (sum, bundle) => sum + bundle.userOps.length,
-                    0
+                this.opsCount.push(
+                    ...new Array(countUserOps(bundles)).fill(Date.now())
                 )
-                this.opsCount.push(...new Array(totalOps).fill(Date.now()))
-            }
-
-            // Send bundles to executor
-            for (const bundle of bundles) {
-                this.sendBundleToExecutor(bundle)
             }
 
             const rpm = this.opsCount.length
@@ -171,9 +236,29 @@ export class ExecutorManager {
             )
 
             if (this.bundlingMode === "auto") {
-                setTimeout(this.autoScalingBundling.bind(this), nextInterval)
+                this.scheduleNextTick(nextInterval)
             }
         })
+    }
+
+    // Lateness is measured here, where the delay is created, on the
+    // monotonic clock.
+    private scheduleNextTick(interval: number) {
+        const dueAt = performance.now() + interval
+        setTimeout(() => {
+            this.logTickLateness(dueAt)
+            this.autoScalingBundling()
+        }, interval)
+    }
+
+    private logTickLateness(dueAt: number) {
+        const lateMs = performance.now() - dueAt
+        if (lateMs >= TICK_LATE_LOG_THRESHOLD_MS) {
+            this.logger.info(
+                { step: "bundling.tickLate", lateMs },
+                "[timing] bundling.tickLate"
+            )
+        }
     }
 
     startWatchingBlocks(): void {
@@ -219,10 +304,56 @@ export class ExecutorManager {
                     includeTransactions: false,
                     emitMissed: false
                 })
+                this.startStaleBlockWatchdog()
             }
 
             this.logger.debug("started watching blocks")
         })
+    }
+
+    // handleBlock is the only path that frees an executor wallet, and
+    // watchBlocks only fires it on a new block. On a chain that produces blocks
+    // only when it receives a transaction, that deadlocks: no submissions -> no
+    // blocks -> no wallets freed. Re-arms the time-based stuck check the block
+    // gate makes unreachable; no RPC on a healthy chain.
+    private startStaleBlockWatchdog(): void {
+        if (this.staleBlockTimer) {
+            return
+        }
+
+        this.lastReconcileAt = Date.now()
+        this.staleBlockTimer = setInterval(() => {
+            const msSinceReconcile = Date.now() - this.lastReconcileAt
+
+            if (msSinceReconcile < this.config.resubmitStuckTimeout) {
+                return
+            }
+
+            const pendingBundles = this.bundleManager.getPendingBundles().length
+            if (pendingBundles === 0) {
+                // Nothing to reconcile: drop the watcher and this timer.
+                // Submission re-arms both, and a missed submission block is
+                // caught by the fresh watchdog.
+                this.stopWatchingBlocks()
+                return
+            }
+
+            this.logger.warn(
+                {
+                    event: "staleBlockWatchdogFired",
+                    msSinceReconcile,
+                    pendingBundles
+                },
+                "no new block within resubmitStuckTimeout, reconciling pending bundles on a timer"
+            )
+
+            this.handleBlock().catch((err) =>
+                this.logger.error(
+                    { err },
+                    "stale block watchdog failed to reconcile pending bundles"
+                )
+            )
+        }, this.config.blockTime)
     }
 
     async getBaseFee(): Promise<bigint> {
@@ -232,6 +363,19 @@ export class ExecutorManager {
         return await this.gasPriceManager.getBaseFee()
     }
 
+    // Times the wallet wait and stamps walletAcquiredAt (first value wins;
+    // see the stamp rule on userOpInfoSchema).
+    private async acquireWallet(userOps: UserOpInfo[], entryPoint: Address) {
+        const wallet = await timed(
+            this.logger,
+            "bundle.getWallet",
+            { entryPoint, bundleSize: userOps.length },
+            () => this.senderManager.getWallet()
+        )
+        stampFirst(userOps, "walletAcquiredAt", Date.now())
+        return wallet
+    }
+
     async sendBundleToExecutor(
         userOpBundle: UserOperationBundle
     ): Promise<Hex | undefined> {
@@ -239,6 +383,9 @@ export class ExecutorManager {
         if (userOps.length === 0) {
             return undefined
         }
+
+        // First value wins; see the stamp rule on userOpInfoSchema.
+        stampFirst(userOps, "dispatchedAt", Date.now())
 
         return await runWithLogContext(
             {
@@ -251,22 +398,39 @@ export class ExecutorManager {
                 // known failure paths below still return cleanly; this only catches the
                 // unexpected. bundleSubmitted prevents double-submitting a bundle that
                 // was already tracked (handleBlock then owns its recovery).
-                const wallet = await this.senderManager.getWallet()
+                // Wallet acquisition runs inside the guard too; acquiredWallet
+                // says whether there is a wallet to free.
+                let acquiredWallet: Account | undefined
                 let bundleSubmitted = false
                 try {
+                    const wallet = await this.acquireWallet(userOps, entryPoint)
+                    acquiredWallet = wallet
+
                     const bundleCtx = {
                         entryPoint,
                         bundleSize: userOps.length,
                         executor: wallet.address
                     }
 
+                    // Arbitrum's initial EIP-1559 bid uses the separate base
+                    // fee and configured tip, not this generic network quote.
+                    // Leave legacy sends, rotations and replacements unchanged.
+                    const skipNetworkGasPrice =
+                        this.config.arbitrumSkipNetworkGasPrice &&
+                        this.config.chainType === "arbitrum" &&
+                        !this.config.legacyTransactions &&
+                        userOpBundle.submissionAttempts === 0
+
                     const [gasPriceParams, baseFee, nonce] = await Promise.all([
-                        timed(
-                            this.logger,
-                            "preBundle.networkGasPrice",
-                            bundleCtx,
-                            () => this.gasPriceManager.tryGetNetworkGasPrice()
-                        ),
+                        skipNetworkGasPrice
+                            ? Promise.resolve(undefined)
+                            : timed(
+                                  this.logger,
+                                  "preBundle.networkGasPrice",
+                                  bundleCtx,
+                                  () =>
+                                      this.gasPriceManager.tryGetNetworkGasPrice()
+                              ),
                         timed(this.logger, "preBundle.baseFee", bundleCtx, () =>
                             this.getBaseFee()
                         ),
@@ -284,7 +448,11 @@ export class ExecutorManager {
                         return []
                     })
 
-                    if (!gasPriceParams || nonce === undefined) {
+                    if (
+                        (!skipNetworkGasPrice && !gasPriceParams) ||
+                        baseFee === undefined ||
+                        nonce === undefined
+                    ) {
                         // Free executor if failed to get initial params.
                         await this.senderManager.markWalletProcessed(wallet)
                         await this.mempool.resubmitUserOps({
@@ -397,7 +565,8 @@ export class ExecutorManager {
                         userOpsBundled,
                         rejectedUserOps,
                         transactionRequest,
-                        transactionHash
+                        transactionHash,
+                        receipt
                     } = bundleResult
 
                     // Increment submission attempts for all userOps submitted.
@@ -421,16 +590,34 @@ export class ExecutorManager {
                         lastReplaced: Date.now()
                     }
 
-                    // Track bundle and start loop to watch blocks
-                    this.bundleManager.trackBundle(submittedBundle)
+                    // Sent: from here a failure must not requeue the userOps,
+                    // so recoverFailedSend leaves recovery to handleBlock.
                     bundleSubmitted = true
-                    this.startWatchingBlocks()
 
-                    await this.mempool.markUserOpsAsSubmitted({
-                        userOps: submittedBundle.bundle.userOps,
-                        entryPoint: submittedBundle.bundle.entryPoint,
-                        transactionHash: submittedBundle.transactionHash
-                    })
+                    // Track only once the submitted bookkeeping has settled. A
+                    // block run that saw the bundle earlier could free it and
+                    // write "included", then this late bookkeeping would
+                    // re-add it as submitted. finally: a failed write still
+                    // leaves the bundle tracked, so handleBlock owns it. A sync
+                    // receipt settles the bundle here instead of tracking it.
+                    let settled = false
+                    try {
+                        await this.mempool.markUserOpsAsSubmitted({
+                            userOps: submittedBundle.bundle.userOps,
+                            entryPoint: submittedBundle.bundle.entryPoint,
+                            transactionHash: submittedBundle.transactionHash
+                        })
+                        settled = await this.settleSyncReceipt(
+                            submittedBundle,
+                            receipt
+                        )
+                    } finally {
+                        if (!settled) {
+                            // Track bundle and start loop to watch blocks
+                            this.bundleManager.trackBundle(submittedBundle)
+                            this.startWatchingBlocks()
+                        }
+                    }
 
                     await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
                     this.metrics.bundlesSubmitted
@@ -439,39 +626,89 @@ export class ExecutorManager {
 
                     return transactionHash
                 } catch (err) {
-                    this.logger.error(
-                        { err, executor: wallet.address },
-                        "unexpected error sending bundle to executor"
-                    )
-                    // Tx not submitted/tracked -> userOps are detached and unowned, so
-                    // free the wallet and requeue them rather than dropping them. If it
-                    // was already tracked, handleBlock owns recovery -> don't resubmit.
-                    if (!bundleSubmitted) {
-                        await this.senderManager
-                            .markWalletProcessed(wallet)
-                            .catch((e) =>
-                                this.logger.error(
-                                    { err: e },
-                                    "failed to free wallet after send error"
-                                )
-                            )
-                        await this.mempool
-                            .resubmitUserOps({
-                                userOps,
-                                entryPoint,
-                                reason: "send_bundle_unexpected_error"
-                            })
-                            .catch((e) =>
-                                this.logger.error(
-                                    { err: e },
-                                    "failed to resubmit userOps after send error"
-                                )
-                            )
-                    }
-                    return undefined
+                    return await this.recoverFailedSend({
+                        err,
+                        acquiredWallet,
+                        bundleSubmitted,
+                        userOps,
+                        entryPoint
+                    })
                 }
             }
         )
+    }
+
+    // Recovery for an unexpected throw in sendBundleToExecutor: free the
+    // wallet and requeue the ops unless the bundle was already tracked.
+    // Always resolves, so no caller's handling decides whether the process
+    // restarts.
+    private async recoverFailedSend({
+        err,
+        acquiredWallet,
+        bundleSubmitted,
+        userOps,
+        entryPoint
+    }: {
+        err: unknown
+        acquiredWallet: Account | undefined
+        bundleSubmitted: boolean
+        userOps: UserOpInfo[]
+        entryPoint: Address
+    }): Promise<undefined> {
+        this.logger.error(
+            { err, executor: acquiredWallet?.address },
+            "unexpected error sending bundle to executor"
+        )
+        // Tx not submitted/tracked -> userOps are detached and unowned, so
+        // free the wallet and requeue them rather than dropping them. If it
+        // was already tracked, handleBlock owns recovery -> don't resubmit.
+        if (!bundleSubmitted) {
+            // A failed getWallet left no wallet to free.
+            if (acquiredWallet) {
+                await this.senderManager
+                    .markWalletProcessed(acquiredWallet)
+                    .catch((e) =>
+                        this.logger.error(
+                            { err: e },
+                            "failed to free wallet after send error"
+                        )
+                    )
+            }
+            await this.mempool
+                .resubmitUserOps({
+                    userOps,
+                    entryPoint,
+                    // A reason of its own, so the resubmitted counter shows
+                    // a wallet pool that keeps failing.
+                    reason: acquiredWallet
+                        ? "send_bundle_unexpected_error"
+                        : "wallet_acquisition_failed"
+                })
+                .catch((e) =>
+                    this.logger.error(
+                        { err: e },
+                        "failed to resubmit userOps after send error"
+                    )
+                )
+        }
+        // The popped address was another instance's and is gone from the
+        // shared queue. Retrying would discard one per attempt until the pool
+        // is empty, so once the ops are requeued, shut down: the restart
+        // re-seeds the queue (ADR 0004).
+        if (!acquiredWallet && err instanceof WalletNotFoundError) {
+            this.logger.error(
+                {
+                    event: "executorWalletNotOwned",
+                    executor: err.address
+                },
+                "executor wallet from the shared queue is not one of this instance's keys; shutting down so a restart can re-seed the queue"
+            )
+            if (!this.shutdownRequested) {
+                this.shutdownRequested = true
+                this.requestShutdown("executorWalletNotOwned")
+            }
+        }
+        return undefined
     }
 
     stopWatchingBlocks(): void {
@@ -479,34 +716,121 @@ export class ExecutorManager {
             this.unWatch()
             this.unWatch = undefined
         }
+        if (this.staleBlockTimer) {
+            clearInterval(this.staleBlockTimer)
+            this.staleBlockTimer = undefined
+        }
     }
 
-    private async updateTransactionCostMetrics(
-        transactionHash: HexData32,
+    // Settles a sync-sent bundle as a block run would, from rpc-url's copy of
+    // the receipt. The bundle is never tracked, so no block run can process it
+    // a second time.
+    // Returns false when it cannot settle now and the caller tracks it instead.
+    private async settleSyncReceipt(
+        submittedBundle: SubmittedBundleInfo,
+        receipt: BundleTransactionReceipt | undefined
+    ): Promise<boolean> {
+        if (!receipt) {
+            return false
+        }
+        // The send's receipt only says when to look; settle from rpc-url's, the
+        // same source the block watcher trusts.
+        const rpcReceipt = await this.rpcUrlReceipt(receipt.transactionHash)
+        if (!rpcReceipt) {
+            return false
+        }
+        const bundleStatus = bundleStatusFromReceipts(submittedBundle.bundle, [
+            rpcReceipt
+        ])
+        if (bundleStatus.status === "not_found") {
+            return false
+        }
+        const blockReceivedTimestamp = Date.now()
+        try {
+            if (bundleStatus.status === "included") {
+                await this.bundleManager.processIncludedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            } else {
+                await this.bundleManager.processRevertedBundle({
+                    submittedBundle,
+                    bundleReceipt: bundleStatus,
+                    blockReceivedTimestamp
+                })
+            }
+            this.updateTransactionCostMetrics(
+                rpcReceipt,
+                submittedBundle.bundle.userOps.map((op) => op.userOpHash),
+                bundleStatus.status
+            )
+        } catch (err) {
+            this.logger.error(
+                { err, transactionHash: receipt.transactionHash },
+                "failed to process the sync send receipt"
+            )
+        }
+        return true
+    }
+
+    // rpc-url can lag the node that took the send. Settle only once it serves
+    // this receipt too, or a client acting on it is validated against older
+    // state and the freed wallet reads a stale nonce. Errors and a hung call
+    // count as "not yet"; the whole check is capped at 1 s.
+    private async rpcUrlReceipt(
+        hash: Hex
+    ): Promise<BundleTransactionReceipt | undefined> {
+        const { publicClient } = this.config
+        const format =
+            publicClient.chain?.formatters?.transactionReceipt?.format ??
+            formatTransactionReceipt
+        const deadline = Date.now() + 1_000
+        const poll = async () => {
+            while (Date.now() < deadline) {
+                // A direct request: viem merges identical getTransactionReceipt
+                // calls, so a hung one here would stall the block watcher's.
+                const raw = await publicClient
+                    .request({
+                        method: "eth_getTransactionReceipt",
+                        params: [hash]
+                    })
+                    .catch(() => null)
+                if (raw) {
+                    return format(raw) as BundleTransactionReceipt
+                }
+                await new Promise((resolve) => setTimeout(resolve, 25))
+            }
+            return undefined
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const giveUp = new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), 1_000)
+        })
+        try {
+            return await Promise.race([poll(), giveUp])
+        } finally {
+            clearTimeout(timer)
+        }
+    }
+
+    private updateTransactionCostMetrics(
+        receipt: BundleTransactionReceipt,
         userOperationHashes: HexData32[],
         transactionStatus: string
     ) {
+        const { transactionHash } = receipt
+
         try {
-            const receipt =
-                await this.config.publicClient.getTransactionReceipt({
-                    hash: transactionHash
-                })
+            const actualCostInEth = computeTransactionCostEth(receipt)
 
-            const l2GasCostTx = receipt.gasUsed * receipt.effectiveGasPrice
-
-            // Handle L1 fee if present (for L2 chains like Optimism)
-            let l1Fee = BigInt(0)
-            if (
-                "l1Fee" in receipt &&
-                receipt.l1Fee !== undefined &&
-                receipt.l1Fee !== null
-            ) {
-                l1Fee = BigInt(receipt.l1Fee.toString())
+            if (actualCostInEth === undefined) {
+                this.logger.warn(
+                    { transactionHash },
+                    "Skipping transaction cost metrics: receipt has neither effectiveGasPrice nor gasPrice"
+                )
+                return
             }
-
-            const actualCost = l2GasCostTx + l1Fee
-            // Convert wei to ETH using viem's formatEther
-            const actualCostInEth = Number(formatEther(actualCost))
 
             // Record cost for each userOp in the bundle since they share the transaction
             for (const userOpHash of userOperationHashes) {
@@ -537,47 +861,66 @@ export class ExecutorManager {
             return
         }
 
+        // try/finally, else a throw in handleBlockInner leaves this set and
+        // every later tick bails at the guard above.
+        this.currentlyHandlingBlock = true
+
         // startWatchingBlocks() registers its timers inside whichever flow
         // first started the watcher, so those timers inherit that flow's log
         // context on every future tick. Open a fresh context here so block
         // handling is never attributed to one arbitrary bundle.
-        await runWithLogContext({ flow: "block" }, () =>
-            timed(
-                this.logger,
-                "handleBlock",
-                { blockNumber: block ? Number(block.number) : undefined },
-                () => this.handleBlockInner(block)
+        try {
+            await runWithLogContext({ flow: "block" }, () =>
+                timed(
+                    this.logger,
+                    "handleBlock",
+                    { blockNumber: block ? Number(block.number) : undefined },
+                    () => this.handleBlockInner(block),
+                    { summarize: (summary) => summary }
+                )
             )
-        )
+        } finally {
+            this.currentlyHandlingBlock = false
+        }
     }
 
-    private async handleBlockInner(block?: Block) {
-        this.currentlyHandlingBlock = true
+    private async handleBlockInner(block?: Block): Promise<BlockRunSummary> {
         const blockReceivedTimestamp = Date.now()
+        this.lastReconcileAt = blockReceivedTimestamp
 
         const pendingBundles = this.bundleManager.getPendingBundles()
 
-        if (pendingBundles.length === 0) {
-            this.stopWatchingBlocks()
-            this.currentlyHandlingBlock = false
-            return
+        const summary: BlockRunSummary = {
+            pending: pendingBundles.length,
+            mined: 0,
+            reverted: 0,
+            notMined: 0,
+            opsClosed: 0
         }
 
-        const [bundleStatuses, networkGasPrice, networkBaseFee] =
-            await Promise.all([
-                this.bundleManager.getBundleStatuses(pendingBundles),
-                this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
-                    maxFeePerGas: 0n,
-                    maxPriorityFeePerGas: 0n
-                })),
-                this.getBaseFee().catch(() => 0n)
-            ])
+        if (pendingBundles.length === 0) {
+            this.stopWatchingBlocks()
+            return summary
+        }
 
-        await Promise.all(
+        // Start fees once, but only unresolved bundles depend on them.
+        const networkFees = Promise.all([
+            this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
+                maxFeePerGas: 0n,
+                maxPriorityFeePerGas: 0n
+            })),
+            this.getBaseFee().catch(() => 0n)
+        ])
+        const bundleStatuses =
+            await this.bundleManager.getBundleStatuses(pendingBundles)
+
+        const results = await Promise.allSettled(
             bundleStatuses.map(async (bundleStatus, index) => {
                 const submittedBundle = pendingBundles[index]
 
                 if (bundleStatus.status === "included") {
+                    summary.mined++
+                    summary.opsClosed += submittedBundle.bundle.userOps.length
                     await this.bundleManager.processIncludedBundle({
                         submittedBundle,
                         bundleReceipt: bundleStatus,
@@ -585,8 +928,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for included bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
@@ -595,6 +938,8 @@ export class ExecutorManager {
                 }
 
                 if (bundleStatus.status === "reverted") {
+                    summary.reverted++
+                    summary.opsClosed += submittedBundle.bundle.userOps.length
                     await this.bundleManager.processRevertedBundle({
                         blockReceivedTimestamp,
                         submittedBundle,
@@ -603,8 +948,8 @@ export class ExecutorManager {
                     })
 
                     // Track transaction costs for reverted bundles
-                    await this.updateTransactionCostMetrics(
-                        submittedBundle.transactionHash,
+                    this.updateTransactionCostMetrics(
+                        bundleStatus.receipt,
                         submittedBundle.bundle.userOps.map(
                             (op) => op.userOpHash
                         ),
@@ -612,8 +957,9 @@ export class ExecutorManager {
                     )
                 }
 
-                // can be potentially resubmitted - so we first submit it again to optimize for the speed
                 if (bundleStatus.status === "not_found") {
+                    summary.notMined++
+                    const [networkGasPrice, networkBaseFee] = await networkFees
                     this.potentiallyResubmitBundle({
                         blockReceivedTimestamp,
                         submittedBundle,
@@ -623,8 +969,15 @@ export class ExecutorManager {
                 }
             })
         )
-
-        this.currentlyHandlingBlock = false
+        // Keep the run guard until every started branch has settled.
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
+        return summary
     }
 
     potentiallyResubmitBundle({
@@ -644,12 +997,17 @@ export class ExecutorManager {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
+        // On Arbitrum the tip is our configured bid, not a market estimate
+        // (the network estimate floors a 0 tip to maxFee/200), so only the
+        // fee cap can be too low there. Comparing tips would flag every
+        // zero-tip bundle as underpriced and replace it each block.
         const isGasPriceTooLow =
             maxFeePerGas < networkGasPrice.maxFeePerGas ||
-            maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
+            (this.config.chainType !== "arbitrum" &&
+                maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas)
 
         const isStuck =
-            Date.now() - lastReplaced > this.config.resubmitStuckTimeout
+            Date.now() - lastReplaced >= this.config.resubmitStuckTimeout
 
         if (!(isGasPriceTooLow || isStuck)) {
             return

@@ -20,6 +20,7 @@ import type { Logger, Metrics } from "@alto/utils"
 import {
     getAAError,
     getAddressFromInitCodeOrPaymasterAndData,
+    getNonceKeyAndSequence,
     getSerializedHandleOpsTx,
     getUserOpHash,
     isVersion06,
@@ -27,7 +28,8 @@ import {
     isVersion08,
     jsonStringifyWithBigint,
     minBigInt,
-    scaleBigIntByPercent
+    scaleBigIntByPercent,
+    stampLatest
 } from "@alto/utils"
 import { type Hex, getAddress, getContract, size } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
@@ -95,10 +97,14 @@ export class Mempool {
         entryPoint: Address
         transactionHash: Hex
     }) {
-        await Promise.all(
+        // allSettled: a failure is rethrown only once every op's writes have
+        // settled, so the caller never tracks the bundle while a sibling's
+        // submitted write is still in flight.
+        const results = await Promise.allSettled(
             userOps.map(async (userOpInfo) => {
                 const { userOpHash } = userOpInfo
                 await this.store.removeProcessing({ entryPoint, userOpHash })
+                // First value wins; see the stamp rule on userOpInfoSchema.
                 userOpInfo.submittedAt ??= Date.now()
                 await this.store.addSubmitted({ entryPoint, userOpInfo })
                 await this.monitor.setUserOpStatus(userOpHash, {
@@ -107,6 +113,13 @@ export class Mempool {
                 })
             })
         )
+        const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        )
+        if (failure) {
+            throw failure.reason
+        }
 
         this.metrics.userOperationsSubmitted
             .labels({ status: "success" })
@@ -156,12 +169,23 @@ export class Mempool {
                         ...userOpInfo,
                         reason: failureReason
                     }
-                    this.dropUserOps(entryPoint, [rejectedUserOp])
+                    // Deliberately not awaited, so every caller keeps the
+                    // resolve/reject behavior it has today; the catch keeps a
+                    // failed drop from escaping as an unhandled rejection.
+                    this.dropUserOps(entryPoint, [rejectedUserOp]).catch(
+                        (err) =>
+                            this.logger.error(
+                                { err, userOpHash },
+                                `failed to drop userOp ${userOpHash} after its re-add was refused`
+                            )
+                    )
                 }
             })
         )
 
-        this.metrics.userOperationsResubmitted.inc(userOps.length)
+        this.metrics.userOperationsResubmitted
+            .labels({ reason })
+            .inc(userOps.length)
     }
 
     async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {
@@ -745,8 +769,15 @@ export class Mempool {
         }
     }
 
+    // onBundle, when given, is called with each bundle the moment it is
+    // complete, while the pass goes on packing. It must be synchronous and
+    // return void: do not pass an async function. Normal return hands the
+    // bundle's ownership to the callback; it may throw only before accepting
+    // it. The returned array still lists every bundle, but for such a caller
+    // it is informational only and must not be dispatched again.
     public async getBundles(
-        maxBundleCount?: number
+        maxBundleCount?: number,
+        onBundle?: (bundle: UserOperationBundle) => void
     ): Promise<UserOperationBundle[]> {
         const bundlePromises = this.config.entrypoints.map(
             async (entryPoint) => {
@@ -754,7 +785,8 @@ export class Mempool {
                     entryPoint,
                     maxGasLimit: this.config.maxGasPerBundle,
                     minOpsPerBundle: 1,
-                    maxBundleCount
+                    maxBundleCount,
+                    onBundle
                 })
             }
         )
@@ -770,12 +802,14 @@ export class Mempool {
         maxGasLimit,
         entryPoint,
         minOpsPerBundle,
-        maxBundleCount
+        maxBundleCount,
+        onBundle
     }: {
         maxGasLimit: bigint
         entryPoint: Address
         minOpsPerBundle: number
         maxBundleCount?: number
+        onBundle?: (bundle: UserOperationBundle) => void
     }): Promise<UserOperationBundle[]> {
         // Check if there are any operations in the store
         const firstOp = await this.store.peekOutstanding(entryPoint)
@@ -787,181 +821,339 @@ export class Mempool {
         const bundles: UserOperationBundle[] = []
         const seenOps = new Set()
         let breakLoop = false
+        // Set by the first pop that finds nothing ready. The loops used to
+        // re-check with a peek before every pop, which on the Redis queue
+        // cost two extra round trips per op; the pop already reports empty.
+        let outstandingEmpty = false
 
-        // Process operations until no more are available or we hit maxBundleCount
-        while (await this.store.peekOutstanding(entryPoint)) {
-            // If maxBundles is set and we reached the limit, break
-            if (maxBundleCount && bundles.length >= maxBundleCount) {
-                break
-            }
+        // Sender-and-nonce-key slots already placed in an EARLIER bundle of
+        // this pass. Dispatch and execution can overlap across the bundles of
+        // one pass (with onBundle, an earlier bundle is already in flight
+        // while later ones are packed) and each is simulated on its own, so a
+        // later nonce for one of these slots would fail AA25 before its
+        // predecessor lands and be dropped as not-found. Such an op is handed
+        // back and the pass ends; the next tick picks it up once the
+        // predecessor has had a block.
+        const slotsInPriorBundles = new Set<string>()
 
-            // Derive version
-            let version: EntryPointVersion
-            if (isVersion08(firstOp.userOp, entryPoint)) {
-                version = "0.8"
-            } else if (isVersion07(firstOp.userOp)) {
-                version = "0.7"
-            } else {
-                version = "0.6"
-            }
+        // A userOp deferred by a bundle cap is held here rather than written
+        // back to outstanding: its hash is already in seenOps, so re-popping it
+        // would trip the repeat guard below and end the whole pass with the
+        // backlog untouched. The slot owns the op from deferral until it is
+        // accepted or handed to skip handling; the finally at the bottom
+        // returns anything still held, so an early exit or a throw in between
+        // cannot drop it.
+        let carriedUserOpInfo: UserOpInfo | undefined
 
-            // Setup for next bundle
-            const currentBundle: UserOperationBundle = {
-                entryPoint,
-                version,
-                userOps: [],
-                submissionAttempts: 0
-            }
-            let gasUsed = 0n
-            let eip7702Overhead = 0n
-            const caps = getBundleCaps(this.config)
-            const gasCeiling = minBigInt(maxGasLimit, caps.gasCap)
-            const byteThreshold = bundleByteThreshold(caps.byteCap)
-            let paymasterDeposit: { [paymaster: string]: bigint } = {}
-            let stakedEntityCount: { [addr: string]: number } = {}
-            let senders = new Set<string>()
-            let knownEntities = await this.getKnownEntities(entryPoint)
-            let storageMap: StorageMap = {}
-
-            if (breakLoop) {
-                break
-            }
-
-            // Keep adding ops to current bundle
-            while (await this.store.peekOutstanding(entryPoint)) {
-                const userOpInfo = await this.store.popOutstanding(entryPoint)
-                if (!userOpInfo) {
+        try {
+            // Process operations until no more are available or we hit maxBundleCount
+            while (carriedUserOpInfo || !outstandingEmpty) {
+                // If maxBundles is set and we reached the limit, break
+                if (maxBundleCount && bundles.length >= maxBundleCount) {
                     break
                 }
 
-                if (seenOps.has(userOpInfo.userOpHash)) {
-                    breakLoop = true
-                    userOpInfo.reentered = true
-                    await this.store.addOutstanding({
-                        entryPoint,
-                        userOpInfo
-                    })
+                if (breakLoop) {
                     break
                 }
 
-                seenOps.add(userOpInfo.userOpHash)
+                // Derive version
+                let version: EntryPointVersion
+                if (isVersion08(firstOp.userOp, entryPoint)) {
+                    version = "0.8"
+                } else if (isVersion07(firstOp.userOp)) {
+                    version = "0.7"
+                } else {
+                    version = "0.6"
+                }
 
-                const { userOp } = userOpInfo
+                // Setup for next bundle
+                const currentBundle: UserOperationBundle = {
+                    entryPoint,
+                    version,
+                    userOps: [],
+                    submissionAttempts: 0
+                }
+                let gasUsed = 0n
+                let eip7702Overhead = 0n
+                const caps = getBundleCaps(this.config)
+                const gasCeiling = minBigInt(maxGasLimit, caps.gasCap)
+                const byteThreshold = bundleByteThreshold(caps.byteCap)
+                let paymasterDeposit: { [paymaster: string]: bigint } = {}
+                let stakedEntityCount: { [addr: string]: number } = {}
+                let senders = new Set<string>()
+                let knownEntities = await this.getKnownEntities(entryPoint)
+                let storageMap: StorageMap = {}
+                const currentBundleSlots = new Set<string>()
 
-                // Check if we should skip this operation
-                const skipResult = await this.shouldSkip({
-                    userOpInfo,
-                    paymasterDeposit,
-                    stakedEntityCount,
-                    knownEntities,
-                    senders,
-                    storageMap,
-                    entryPoint
-                })
+                // A carried userOp is no longer in outstanding, so the snapshot
+                // above no longer lists its entities. Put them back so this
+                // bundle evaluates candidates against the same entity set it
+                // would have seen had the op stayed queued. The redis
+                // outstanding store dumps an empty list, so there is no
+                // snapshot to keep consistent there.
+                const usesMemoryOutstanding = !(
+                    this.config.enableHorizontalScaling &&
+                    this.config.redisEndpoint
+                )
+                if (carriedUserOpInfo && usesMemoryOutstanding) {
+                    const { userOp: carriedUserOp } = carriedUserOpInfo
+                    const isCarriedV06 = isVersion06(carriedUserOp)
 
-                if (skipResult.skip) {
-                    // Re-add to outstanding
-                    if (!skipResult.removeOutstanding) {
+                    const carriedPaymaster = isCarriedV06
+                        ? getAddressFromInitCodeOrPaymasterAndData(
+                              carriedUserOp.paymasterAndData
+                          )
+                        : carriedUserOp.paymaster
+                    const carriedFactory = isCarriedV06
+                        ? getAddressFromInitCodeOrPaymasterAndData(
+                              carriedUserOp.initCode
+                          )
+                        : carriedUserOp.factory
+
+                    knownEntities.sender.add(carriedUserOp.sender)
+                    if (carriedPaymaster) {
+                        knownEntities.paymasters.add(carriedPaymaster)
+                    }
+                    if (carriedFactory) {
+                        knownEntities.factories.add(carriedFactory)
+                    }
+                }
+
+                // Keep adding ops to current bundle
+                while (carriedUserOpInfo || !outstandingEmpty) {
+                    let userOpInfo: UserOpInfo
+                    let fromCarry = false
+
+                    if (carriedUserOpInfo) {
+                        // Selecting does not release ownership: the slot keeps
+                        // the op through shouldSkip and the cap maths, so a
+                        // throw in either is caught by the finally below.
+                        // seenOps already holds this hash and must keep it, so
+                        // that a later store pop of the same hash still trips
+                        // the repeat guard.
+                        userOpInfo = carriedUserOpInfo
+                        fromCarry = true
+                    } else {
+                        const poppedUserOpInfo =
+                            await this.store.popOutstanding(entryPoint)
+                        if (!poppedUserOpInfo) {
+                            outstandingEmpty = true
+                            break
+                        }
+
+                        if (seenOps.has(poppedUserOpInfo.userOpHash)) {
+                            breakLoop = true
+                            poppedUserOpInfo.reentered = true
+                            await this.store.addOutstanding({
+                                entryPoint,
+                                userOpInfo: poppedUserOpInfo
+                            })
+                            break
+                        }
+
+                        seenOps.add(poppedUserOpInfo.userOpHash)
+                        userOpInfo = poppedUserOpInfo
+                    }
+
+                    const { userOp } = userOpInfo
+
+                    const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)
+                    const nonceSlot = `${userOp.sender}-${nonceKey}`
+                    if (slotsInPriorBundles.has(nonceSlot)) {
+                        // Its predecessor sits in an earlier bundle of this
+                        // pass. Release the carry slot before the write so the
+                        // finally cannot write it a second time, then end the
+                        // pass so the predecessor gets a block to land first.
+                        carriedUserOpInfo = undefined
+                        breakLoop = true
                         userOpInfo.reentered = true
                         await this.store.addOutstanding({
                             entryPoint,
                             userOpInfo
                         })
+                        break
                     }
-                    continue
-                }
 
-                const beneficiary =
-                    this.config.utilityPrivateKey?.address ||
-                    privateKeyToAddress(generatePrivateKey())
-
-                gasUsed += calculateAA95GasFloor({
-                    userOps: [userOp],
-                    beneficiary
-                })
-                if (userOp.eip7702Auth) {
-                    eip7702Overhead += 40_000n
-                }
-
-                // Project the ACTUAL submitted tx gas (executor scales the floor
-                // by 105%), not the raw floor, so the budget matches what the
-                // node sees against the per-tx gas cap.
-                const projectedGas = scaleBigIntByPercent(
-                    gasUsed + eip7702Overhead,
-                    105n
-                )
-
-                // Project the serialized tx byte size if this op is added.
-                // O(n^2): re-serializes the growing candidate bundle per op.
-                // Bounded by bundle size (gas cap keeps n small) and runs once
-                // per bundling tick; switch to a running per-op size delta if
-                // packing latency ever shows up in profiles.
-                const candidateUserOps = [
-                    ...currentBundle.userOps.map((info) => info.userOp),
-                    userOp
-                ]
-                const projectedBytes = size(
-                    getSerializedHandleOpsTx({
-                        userOps: candidateUserOps,
-                        entryPoint,
-                        chainId: this.config.chainId,
-                        removeZeros: false
+                    // Check if we should skip this operation
+                    const skipResult = await this.shouldSkip({
+                        userOpInfo,
+                        paymasterDeposit,
+                        stakedEntityCount,
+                        knownEntities,
+                        senders,
+                        storageMap,
+                        entryPoint
                     })
-                )
 
-                const exceedsGas = projectedGas > gasCeiling
-                const exceedsBytes = projectedBytes > byteThreshold
+                    if (skipResult.skip) {
+                        // Skip handling owns the op from here, so release the
+                        // slot first: otherwise the finally would write it a
+                        // second time.
+                        carriedUserOpInfo = undefined
 
-                // Only break once we have at least minOpsPerBundle ops; a lone
-                // over-cap op is handled at ingress (rejected on proven-cap
-                // chains) or by the executor (dropped on a ground-truth node
-                // rejection) rather than black-holed here.
-                if (
-                    (exceedsGas || exceedsBytes) &&
-                    currentBundle.userOps.length >= minOpsPerBundle
-                ) {
-                    this.logger.debug(
-                        {
-                            event: "userOpSkipped",
-                            reason: exceedsBytes
-                                ? "Bundle byte size limit exceeded"
-                                : "Bundle gas limit exceeded",
-                            userOpHash: userOpInfo.userOpHash,
-                            projectedGas: projectedGas.toString(),
-                            gasCeiling: gasCeiling.toString(),
-                            projectedBytes,
-                            byteThreshold
-                        },
-                        `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
+                        // Re-add to outstanding
+                        if (!skipResult.removeOutstanding) {
+                            userOpInfo.reentered = true
+                            await this.store.addOutstanding({
+                                entryPoint,
+                                userOpInfo
+                            })
+                        }
+                        continue
+                    }
+
+                    const beneficiary =
+                        this.config.utilityPrivateKey?.address ||
+                        privateKeyToAddress(generatePrivateKey())
+
+                    gasUsed += calculateAA95GasFloor({
+                        userOps: [userOp],
+                        beneficiary
+                    })
+                    if (userOp.eip7702Auth) {
+                        eip7702Overhead += 40_000n
+                    }
+
+                    // Project the ACTUAL submitted tx gas (executor scales the floor
+                    // by 105%), not the raw floor, so the budget matches what the
+                    // node sees against the per-tx gas cap.
+                    const projectedGas = scaleBigIntByPercent(
+                        gasUsed + eip7702Overhead,
+                        105n
                     )
 
-                    // Put the operation back in the store
-                    userOpInfo.reentered = true
-                    await this.store.addOutstanding({ entryPoint, userOpInfo })
-                    break
+                    // Project the serialized tx byte size if this op is added.
+                    // O(n^2): re-serializes the growing candidate bundle per op.
+                    // Bounded by bundle size (gas cap keeps n small) and runs once
+                    // per bundling tick; switch to a running per-op size delta if
+                    // packing latency ever shows up in profiles.
+                    const candidateUserOps = [
+                        ...currentBundle.userOps.map((info) => info.userOp),
+                        userOp
+                    ]
+                    const projectedBytes = size(
+                        getSerializedHandleOpsTx({
+                            userOps: candidateUserOps,
+                            entryPoint,
+                            chainId: this.config.chainId,
+                            removeZeros: false
+                        })
+                    )
+
+                    const exceedsGas = projectedGas > gasCeiling
+                    const exceedsBytes = projectedBytes > byteThreshold
+
+                    // Deferring a carried op back into the empty bundle it was
+                    // just carried into would hand it straight back to the slot
+                    // and spin forever. Only reachable with minOpsPerBundle<=0,
+                    // which is outside the supported contract (getBundles
+                    // passes 1), but a hang is not an acceptable failure mode.
+                    const carryWouldSpin =
+                        fromCarry && currentBundle.userOps.length === 0
+
+                    // Only break once we have at least minOpsPerBundle ops; a lone
+                    // over-cap op is handled at ingress (rejected on proven-cap
+                    // chains) or by the executor (dropped on a ground-truth node
+                    // rejection) rather than black-holed here.
+                    if (
+                        (exceedsGas || exceedsBytes) &&
+                        currentBundle.userOps.length >= minOpsPerBundle &&
+                        !carryWouldSpin
+                    ) {
+                        this.logger.debug(
+                            {
+                                event: "userOpSkipped",
+                                reason: exceedsBytes
+                                    ? "Bundle byte size limit exceeded"
+                                    : "Bundle gas limit exceeded",
+                                userOpHash: userOpInfo.userOpHash,
+                                projectedGas: projectedGas.toString(),
+                                gasCeiling: gasCeiling.toString(),
+                                projectedBytes,
+                                byteThreshold
+                            },
+                            `Skipping userOp ${userOpInfo.userOpHash}, would exceed bundle cap.`
+                        )
+
+                        // Hold the op for the next bundle rather than writing it
+                        // back: a write-back would be re-popped, trip the repeat
+                        // guard above, and abort the rest of the pass.
+                        carriedUserOpInfo = userOpInfo
+                        break
+                    }
+
+                    // Update state based on skip result
+                    paymasterDeposit = skipResult.paymasterDeposit
+                    stakedEntityCount = skipResult.stakedEntityCount
+                    knownEntities = skipResult.knownEntities
+                    senders = skipResult.senders
+                    storageMap = skipResult.storageMap
+
+                    // Accepted: the bundle owns the op from here.
+                    carriedUserOpInfo = undefined
+
+                    this.reputationManager.decreaseUserOpCount(userOp)
+                    userOpInfo.processingAt = Date.now()
+                    this.store.addProcessing({ entryPoint, userOpInfo })
+
+                    // Add op to current bundle
+                    currentBundle.userOps.push(userOpInfo)
+                    currentBundleSlots.add(nonceSlot)
                 }
 
-                // Update state based on skip result
-                paymasterDeposit = skipResult.paymasterDeposit
-                stakedEntityCount = skipResult.stakedEntityCount
-                knownEntities = skipResult.knownEntities
-                senders = skipResult.senders
-                storageMap = skipResult.storageMap
+                if (currentBundle.userOps.length > 0) {
+                    // Overwritten like processingAt; see the stamp rule on
+                    // userOpInfoSchema.
+                    stampLatest(currentBundle.userOps, "bundledAt", Date.now())
+                    bundles.push(currentBundle)
+                    for (const slot of currentBundleSlots) {
+                        slotsInPriorBundles.add(slot)
+                    }
 
-                this.reputationManager.decreaseUserOpCount(userOp)
-                userOpInfo.processingAt = Date.now()
-                this.store.addProcessing({ entryPoint, userOpInfo })
-
-                // Add op to current bundle
-                currentBundle.userOps.push(userOpInfo)
+                    // Hand the bundle over now, while the pass goes on to the
+                    // next one, so its executor work (wallet, gas, simulate,
+                    // broadcast) does not wait for the rest of the pass. The
+                    // callback owns the bundle on normal return. A callback
+                    // may throw only before accepting ownership. Requeue that
+                    // bundle and let the existing finally restore the carry.
+                    // Async executor recovery belongs to sendBundleToExecutor.
+                    if (onBundle) {
+                        try {
+                            onBundle(currentBundle)
+                        } catch (err) {
+                            this.logger.error(
+                                {
+                                    err,
+                                    userOpHashes: currentBundle.userOps.map(
+                                        (userOpInfo) => userOpInfo.userOpHash
+                                    )
+                                },
+                                "onBundle callback threw"
+                            )
+                            await this.resubmitUserOps({
+                                entryPoint,
+                                userOps: currentBundle.userOps,
+                                reason: "bundle_handoff_failed"
+                            })
+                            throw err
+                        }
+                    }
+                }
             }
 
-            if (currentBundle.userOps.length > 0) {
-                bundles.push(currentBundle)
+            return bundles
+        } finally {
+            // Anything still held is ours to return: normal completion with a
+            // carry, a maxBundleCount exit, or a throw from bundle setup or
+            // candidate evaluation. Exactly one write, and never a return from
+            // finally, so the original result or exception stands.
+            if (carriedUserOpInfo) {
+                const userOpInfo = carriedUserOpInfo
+                carriedUserOpInfo = undefined
+                await this.store.addOutstanding({ entryPoint, userOpInfo })
             }
         }
-
-        return bundles
     }
 
     clear(): void {
