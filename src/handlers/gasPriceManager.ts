@@ -28,6 +28,7 @@ export class GasPriceManager {
 
     constructor(config: AltoConfig) {
         this.config = config
+        this.assertPriorityFeeCapConfig()
         this.logger = config.getLogger(
             { module: "gas_price_manager" },
             {
@@ -89,6 +90,31 @@ export class GasPriceManager {
             ])
         } catch (error) {
             this.logger.error(error, "Error during gas price initialization")
+        }
+    }
+
+    // The cap takes the trimmed tip out of maxFeePerGas too. That is only
+    // safe when the whole tip sits inside maxFeePerGas: refuse the configs
+    // where part of the tip comes from a floor, or where the tip and the
+    // gas price are the same value.
+    private assertPriorityFeeCapConfig() {
+        const cap = this.config.maxPriorityFeePerGasCap
+        if (cap === undefined) {
+            return
+        }
+        if (this.config.legacyTransactions) {
+            throw new Error(
+                "max-priority-fee-per-gas-cap cannot be used with legacy-transactions"
+            )
+        }
+        const floor = maxBigInt(
+            this.config.floorMaxPriorityFeePerGas ?? 0n,
+            this.getDefaultGasFee(this.config.chainId)
+        )
+        if (floor > cap) {
+            throw new Error(
+                "max-priority-fee-per-gas-cap must not be below the priority fee floor (floor-max-priority-fee-per-gas or the chain minimum)"
+            )
         }
     }
 
@@ -160,6 +186,34 @@ export class GasPriceManager {
         }
 
         return result
+    }
+
+    private applyMaxPriorityFeePerGasCap(
+        gasPriceParameters: GasPriceParameters
+    ): GasPriceParameters {
+        // Apply after final lower-bound checks so the oracle value cannot restore
+        // an uncapped priority fee.
+        if (this.config.maxPriorityFeePerGasCap !== undefined) {
+            const cappedPriorityFee = minBigInt(
+                gasPriceParameters.maxPriorityFeePerGas,
+                this.config.maxPriorityFeePerGasCap
+            )
+            const priorityFeeDelta =
+                gasPriceParameters.maxPriorityFeePerGas - cappedPriorityFee
+            const maxFeePerGas =
+                gasPriceParameters.maxFeePerGas - priorityFeeDelta
+
+            return {
+                // Trimming the tip must not drop maxFeePerGas below its floor.
+                maxFeePerGas: maxBigInt(
+                    maxBigInt(maxFeePerGas, cappedPriorityFee),
+                    this.config.floorMaxFeePerGas ?? 0n
+                ),
+                maxPriorityFeePerGas: cappedPriorityFee
+            }
+        }
+
+        return gasPriceParameters
     }
 
     private async getFallBackMaxPriorityFeePerGas(
@@ -285,7 +339,7 @@ export class GasPriceManager {
                     maxPriorityFeePerGas: polygonEstimate.maxPriorityFeePerGas
                 })
 
-                return {
+                return this.applyMaxPriorityFeePerGasCap({
                     maxFeePerGas: maxBigInt(
                         gasPrice.maxFeePerGas,
                         maxFeePerGas
@@ -294,7 +348,7 @@ export class GasPriceManager {
                         gasPrice.maxPriorityFeePerGas,
                         maxPriorityFeePerGas
                     )
-                }
+                })
             }
         }
 
@@ -302,13 +356,13 @@ export class GasPriceManager {
             const gasPrice = this.bumpTheGasPrice(
                 await this.getLegacyTransactionGasPrice()
             )
-            return {
+            return this.applyMaxPriorityFeePerGasCap({
                 maxFeePerGas: maxBigInt(gasPrice.maxFeePerGas, maxFeePerGas),
                 maxPriorityFeePerGas: maxBigInt(
                     gasPrice.maxPriorityFeePerGas,
                     maxPriorityFeePerGas
                 )
-            }
+            })
         }
 
         const estimatedPrice = await this.estimateGasPrice()
@@ -320,13 +374,13 @@ export class GasPriceManager {
             maxFeePerGas,
             maxPriorityFeePerGas
         })
-        return {
+        return this.applyMaxPriorityFeePerGasCap({
             maxFeePerGas: maxBigInt(gasPrice.maxFeePerGas, maxFeePerGas),
             maxPriorityFeePerGas: maxBigInt(
                 gasPrice.maxPriorityFeePerGas,
                 maxPriorityFeePerGas
             )
-        }
+        })
     }
 
     // This method throws if it can't get a valid RPC response.
