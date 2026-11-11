@@ -18,6 +18,7 @@ import { pimlicoGetUserOperationGasPriceHandler } from "./pimlico_getUserOperati
 import { pimlicoGetUserOperationStatusHandler } from "./pimlico_getUserOperationStatus"
 import { pimlicoSendUserOperationNowHandler } from "./pimlico_sendUserOperationNow"
 import { pimlicoSimulateAssetChangeHandler } from "./pimlico_simulateAssetChange"
+import { zdSendUserOperationSyncHandler } from "./zd_sendUserOperationSync"
 
 export function registerHandlers(rpcHandler: RpcHandler) {
     // eth_* namespace
@@ -46,4 +47,7 @@ export function registerHandlers(rpcHandler: RpcHandler) {
 
     // boost_* namespace
     rpcHandler.registerHandler(boostSendUserOperationHandler)
+
+    // zd_* namespace
+    rpcHandler.registerHandler(zdSendUserOperationSyncHandler)
 }

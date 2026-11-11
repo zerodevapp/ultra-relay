@@ -118,6 +118,24 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         type: "boolean",
         default: false
     },
+    "enable-sync-userop-endpoint": {
+        description:
+            "Should the bundler enable zd_sendUserOperationSync, which holds the request open until the userOp is included and returns its receipt",
+        type: "boolean",
+        default: false
+    },
+    "sync-userop-default-timeout-ms": {
+        description:
+            "How long zd_sendUserOperationSync waits for inclusion when the caller does not pass timeoutMs",
+        type: "number",
+        default: 10_000
+    },
+    "sync-userop-max-timeout-ms": {
+        description:
+            "Upper bound on the timeoutMs a zd_sendUserOperationSync caller may request",
+        type: "number",
+        default: 30_000
+    },
     "rpc-gas-estimate": {
         description:
             "Should the bundler make a eth_estimateGas call to estimate the handleOps gasLimit",

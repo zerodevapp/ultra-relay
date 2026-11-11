@@ -114,6 +114,13 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const syncUserOperations = new Counter({
+        name: "ultra_relay_sync_user_operations_total",
+        help: "zd_sendUserOperationSync requests by how they ended",
+        labelNames: ["outcome"] as const,
+        registers
+    })
+
     const userOperationsValidationSuccess = new Counter({
         name: "ultra_relay_user_operations_validation_success_total",
         help: "Number of user operations successfully validated",
@@ -259,6 +266,7 @@ export function createMetrics(registry: Registry, register = true) {
         bundlesSubmitted,
         transactionCosts,
         userOperationsReceived,
+        syncUserOperations,
         userOperationsValidationSuccess,
         userOperationsValidationFailure,
         userOperationInclusionDuration,
