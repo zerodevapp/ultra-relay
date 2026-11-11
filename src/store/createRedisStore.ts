@@ -1,4 +1,4 @@
-import Redis from "ioredis"
+import Redis, { type Result } from "ioredis"
 import { type Address, toHex } from "viem"
 import type { Store } from "."
 import { getRedisStorePrefix } from "../cli/config/redisKeys"
@@ -56,13 +56,23 @@ const deserializeUserOp = (data: string): UserOperation => {
 // waiting ~7.5 minutes for a free executor wallet.
 export const STALE_SENDER_NONCE_MS = 30 * 60 * 1000
 
-// Deletes a sender-nonce entry, its timestamp and every hash-index entry that
-// holds the same userOp, but only if the timestamp is still the one the caller
-// judged stale. A fresh add in between changes the timestamp and wins.
-export const EVICT_STALE_SENDER_NONCE_SCRIPT = `
+// Atomic sender-nonce conflict check.
+// KEYS[1] sender-nonce lookup (hash: sender-nonce -> userOp)
+// KEYS[2] added-at            (hash: sender-nonce -> ms timestamp)
+// KEYS[3] hash index          (hash: userOpHash -> userOp)
+// ARGV: sender-nonce, now (ms), max age (ms)
+// Returns nil when there is no entry, {'live', userOp} for a conflict, or
+// {'evicted', ageMs} after deleting an orphan. An entry written before the
+// added-at key existed has no timestamp, so its clock starts here. Eviction
+// also drops the hash-index entries holding the same userOp, so the owner's
+// late remove(hash) cannot delete a newer op's sender-nonce entry. The scan
+// only runs on eviction, and processing/submitted hold one bundle round each.
+const FIND_CONFLICTING_SENDER_NONCE_SCRIPT = `
 local userOp = redis.call('HGET', KEYS[1], ARGV[1])
-if not userOp then return 0 end
-if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
+if not userOp then return nil end
+redis.call('HSETNX', KEYS[2], ARGV[1], ARGV[2])
+local ageMs = tonumber(ARGV[2]) - tonumber(redis.call('HGET', KEYS[2], ARGV[1]))
+if ageMs <= tonumber(ARGV[3]) then return {'live', userOp} end
 redis.call('HDEL', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
 local entries = redis.call('HGETALL', KEYS[3])
@@ -71,8 +81,21 @@ for i = 1, #entries, 2 do
         redis.call('HDEL', KEYS[3], entries[i])
     end
 end
-return 1
+return {'evicted', tostring(ageMs)}
 `
+
+declare module "ioredis" {
+    interface RedisCommander<Context> {
+        findConflictingSenderNonce(
+            senderNonceLookupKey: string,
+            senderNonceAddedAtKey: string,
+            userOpHashLookupKey: string,
+            senderNonce: string,
+            nowMs: string,
+            maxAgeMs: string
+        ): Result<["live" | "evicted", string] | null, Context>
+    }
+}
 
 export const createRedisStore = ({
     config,
@@ -86,6 +109,10 @@ export const createRedisStore = ({
     redisEndpoint: string
 }): Store => {
     const redis = new Redis(redisEndpoint, {})
+    redis.defineCommand("findConflictingSenderNonce", {
+        numberOfKeys: 3,
+        lua: FIND_CONFLICTING_SENDER_NONCE_SCRIPT
+    })
     const logger = config.getLogger(
         { module: "mempool-store" },
         { level: config.logLevel }
@@ -101,34 +128,6 @@ export const createRedisStore = ({
     const senderNonceLookup = new RedisHash(redis, senderNonceLookupKey) // sender + nonce -> userOp
     const senderNonceAddedAt = new RedisHash(redis, senderNonceAddedAtKey) // sender + nonce -> ms timestamp
     const userOpHashLookup = new RedisHash(redis, userOpHashLookupKey) // userOpHash -> userOp
-
-    // Entries written before this key existed have no timestamp. Start their
-    // clock at the first conflict so they are evicted one timeout later.
-    const isStale = async (senderNonce: string): Promise<string | null> => {
-        const now = Date.now()
-        await redis.hsetnx(senderNonceAddedAtKey, senderNonce, String(now))
-        const addedAt = await senderNonceAddedAt.get(senderNonce)
-        if (addedAt === null) {
-            return null
-        }
-        return now - Number(addedAt) > STALE_SENDER_NONCE_MS ? addedAt : null
-    }
-
-    const evictStale = async (
-        senderNonce: string,
-        addedAt: string
-    ): Promise<boolean> => {
-        const evicted = await redis.eval(
-            EVICT_STALE_SENDER_NONCE_SCRIPT,
-            3,
-            senderNonceLookupKey,
-            senderNonceAddedAtKey,
-            userOpHashLookupKey,
-            senderNonce,
-            addedAt
-        )
-        return evicted === 1
-    }
 
     const memoryStore = createMemoryStore({ config })
 
@@ -210,28 +209,30 @@ export const createRedisStore = ({
         },
         findConflicting: async (userOp: UserOperation) => {
             const senderNonce = encodeSenderNonce(userOp)
-            const conflictingNonce = await senderNonceLookup.get(senderNonce)
+            const conflict = await redis.findConflictingSenderNonce(
+                senderNonceLookupKey,
+                senderNonceAddedAtKey,
+                userOpHashLookupKey,
+                senderNonce,
+                String(Date.now()),
+                String(STALE_SENDER_NONCE_MS)
+            )
 
-            if (conflictingNonce) {
-                const staleAddedAt = await isStale(senderNonce)
-                const evicted =
-                    staleAddedAt !== null &&
-                    (await evictStale(senderNonce, staleAddedAt))
-
-                if (!evicted) {
-                    return {
-                        reason: "conflicting_nonce",
-                        userOp: deserializeUserOp(conflictingNonce)
-                    }
+            if (conflict?.[0] === "live") {
+                return {
+                    reason: "conflicting_nonce",
+                    userOp: deserializeUserOp(conflict[1])
                 }
+            }
 
+            if (conflict?.[0] === "evicted") {
                 logger.warn(
                     {
                         event: "staleSenderNonceEvicted",
                         store: storeType,
                         sender: userOp.sender,
                         nonce: toHex(userOp.nonce),
-                        ageMs: Date.now() - Number(staleAddedAt)
+                        ageMs: Number(conflict[1])
                     },
                     `evicted stale ${storeType} entry for ${senderNonce}`
                 )

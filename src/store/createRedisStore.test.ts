@@ -4,11 +4,7 @@ import pino from "pino"
 import { getAddress } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AltoConfig } from "../createConfig"
-import {
-    EVICT_STALE_SENDER_NONCE_SCRIPT,
-    STALE_SENDER_NONCE_MS,
-    createRedisStore
-} from "./createRedisStore"
+import { STALE_SENDER_NONCE_MS, createRedisStore } from "./createRedisStore"
 
 // Runs against a real Redis because eviction is a Lua script. REDIS_URL must
 // name a disposable server; each test uses its own key prefix.
@@ -144,31 +140,6 @@ describe.skipIf(!process.env.REDIS_URL)(
             expect(cleared).toBeUndefined()
             expect(await inspect.hlen(k.senderNonce)).toBe(0)
             expect(await inspect.hlen(k.hashIndex)).toBe(0)
-        })
-
-        it("keeps an entry that was re-added after it was judged stale", async () => {
-            vi.useFakeTimers({ toFake: ["Date"] })
-            const store = newStore()
-            await store.add(makeUserOpInfo(hash(1)))
-            vi.setSystemTime(Date.now() + STALE_SENDER_NONCE_MS + 1)
-            const k = keys()
-            const field = `${sender}-126`
-            const staleAddedAt = await inspect.hget(k.addedAt, field)
-
-            // A live owner re-adds between the staleness read and the evict.
-            await inspect.hset(k.addedAt, field, String(Date.now()))
-            const evicted = await inspect.eval(
-                EVICT_STALE_SENDER_NONCE_SCRIPT,
-                3,
-                k.senderNonce,
-                k.addedAt,
-                k.hashIndex,
-                field,
-                staleAddedAt as string
-            )
-
-            expect(evicted).toBe(0)
-            expect(await inspect.hexists(k.senderNonce, field)).toBe(1)
         })
 
         it("removes the timestamp when the owner removes the entry", async () => {
