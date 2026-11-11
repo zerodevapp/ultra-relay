@@ -163,25 +163,29 @@ export class GasPriceManager {
             maxPriorityFeePerGas: (maxPriorityFeePerGas * bumpAmount) / 100n
         }
 
-        const finalMaxFeePerGas = this.config.floorMaxFeePerGas
-            ? maxBigInt(this.config.floorMaxFeePerGas, result.maxFeePerGas)
-            : result.maxFeePerGas
+        if (
+            this.config.floorMaxFeePerGas ||
+            this.config.floorMaxPriorityFeePerGas
+        ) {
+            const maxFeePerGas = this.config.floorMaxFeePerGas
+                ? maxBigInt(this.config.floorMaxFeePerGas, result.maxFeePerGas)
+                : result.maxFeePerGas
 
-        const finalMaxPriorityFeePerGas = this.config.floorMaxPriorityFeePerGas
-            ? maxBigInt(
-                  this.config.floorMaxPriorityFeePerGas,
-                  result.maxPriorityFeePerGas
-              )
-            : result.maxPriorityFeePerGas
+            const maxPriorityFeePerGas = this.config.floorMaxPriorityFeePerGas
+                ? maxBigInt(
+                      this.config.floorMaxPriorityFeePerGas,
+                      result.maxPriorityFeePerGas
+                  )
+                : result.maxPriorityFeePerGas
 
-        return {
-            // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
-            maxFeePerGas: maxBigInt(
-                finalMaxFeePerGas,
-                finalMaxPriorityFeePerGas
-            ),
-            maxPriorityFeePerGas: finalMaxPriorityFeePerGas
+            return {
+                // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
+                maxFeePerGas: maxBigInt(maxFeePerGas, maxPriorityFeePerGas),
+                maxPriorityFeePerGas
+            }
         }
+
+        return result
     }
 
     private applyMaxPriorityFeePerGasCap(
@@ -200,7 +204,11 @@ export class GasPriceManager {
                 gasPriceParameters.maxFeePerGas - priorityFeeDelta
 
             return {
-                maxFeePerGas: maxBigInt(maxFeePerGas, cappedPriorityFee),
+                // Trimming the tip must not drop maxFeePerGas below its floor.
+                maxFeePerGas: maxBigInt(
+                    maxBigInt(maxFeePerGas, cappedPriorityFee),
+                    this.config.floorMaxFeePerGas ?? 0n
+                ),
                 maxPriorityFeePerGas: cappedPriorityFee
             }
         }

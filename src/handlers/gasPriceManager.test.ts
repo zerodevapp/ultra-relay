@@ -79,6 +79,26 @@ describe("max-priority-fee-per-gas-cap", () => {
         )
     })
 
+    it("keeps maxFeePerGas at or above floor-max-fee-per-gas", async () => {
+        const manager = new GasPriceManager(
+            makeConfig({
+                maxPriorityFeePerGasCap: gwei("5"),
+                floorMaxFeePerGas: gwei("40"),
+                publicClient: {
+                    chain: undefined,
+                    estimateFeesPerGas: async () => ({
+                        maxFeePerGas: gwei("520"),
+                        maxPriorityFeePerGas: gwei("500")
+                    })
+                }
+            } as unknown as Partial<AltoConfig>)
+        )
+        expect(await manager.tryGetNetworkGasPrice()).toEqual({
+            maxFeePerGas: gwei("40"),
+            maxPriorityFeePerGas: gwei("5")
+        })
+    })
+
     it("refuses legacy transactions", () => {
         expect(
             () =>

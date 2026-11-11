@@ -583,7 +583,7 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
         },
         "max-priority-fee-per-gas-cap": {
             description:
-                "Maximum value for maxPriorityFeePerGas to enforce (in gwei). Caps the tip taken from the network gas oracle. On low-traffic chains the oracle can feedback-loop on the bundler's own past tips and report an absurd value; without a ceiling the bundler bids it verbatim and overpays. maxFeePerGas is reduced by the same amount the tip is capped.",
+                "Maximum value for maxPriorityFeePerGas to enforce (in gwei). Caps the tip taken from the network gas oracle. On low-traffic chains the oracle can feedback-loop on the bundler's own past tips and report an absurd value; without a ceiling the bundler bids it verbatim and overpays. maxFeePerGas is reduced by the same amount the tip is capped. Set this above the tip the chain needs under real load.",
             type: "string",
             require: false
         },
