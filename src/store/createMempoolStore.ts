@@ -15,7 +15,7 @@ import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import { createMemoryOutstandingQueue } from "./createMemoryOutstandingStore"
 import { createRedisOutstandingQueue } from "./createRedisOutstandingStore"
-import { createRedisStore } from "./createRedisStore"
+import { STALE_SENDER_NONCE_MS, createRedisStore } from "./createRedisStore"
 import { createMemoryStore } from "./createStore"
 
 export const createMempoolStore = ({
@@ -63,7 +63,8 @@ export const createMempoolStore = ({
                 config,
                 entryPoint,
                 storeType: "processing",
-                redisEndpoint: config.redisEndpoint
+                redisEndpoint: config.redisEndpoint,
+                staleAfterMs: STALE_SENDER_NONCE_MS
             })
             submitted = createRedisStore({
                 config,
