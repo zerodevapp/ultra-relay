@@ -245,34 +245,30 @@ export const createMempoolStore = ({
                 )
             }
         },
-        addProcessing: ({
+        addProcessing: async ({
             entryPoint,
             userOpInfo
         }: EntryPointUserOpInfoParam) => {
             try {
                 const { processing } = getStoreHandlers(entryPoint)
                 logAddOperation(userOpInfo, "processing")
-                processing.add(userOpInfo)
-                return Promise.resolve()
+                await processing.add(userOpInfo)
             } catch (err) {
                 logger.error({ err }, "Failed to add to processing mempool")
                 sentry.captureException(err)
-                return Promise.resolve()
             }
         },
-        addSubmitted: ({
+        addSubmitted: async ({
             entryPoint,
             userOpInfo
         }: EntryPointUserOpInfoParam) => {
             try {
                 const { submitted } = getStoreHandlers(entryPoint)
                 logAddOperation(userOpInfo, "submitted")
-                submitted.add(userOpInfo)
-                return Promise.resolve()
+                await submitted.add(userOpInfo)
             } catch (err) {
                 logger.error({ err }, "Failed to add to submitted mempool")
                 sentry.captureException(err)
-                return Promise.resolve()
             }
         },
         removeOutstanding: async ({
