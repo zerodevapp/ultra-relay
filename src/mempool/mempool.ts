@@ -874,6 +874,7 @@ export class Mempool {
                     userOps: [],
                     submissionAttempts: 0
                 }
+                const processingWrites: Promise<void>[] = []
                 let gasUsed = 0n
                 let eip7702Overhead = 0n
                 const caps = getBundleCaps(this.config)
@@ -1095,12 +1096,19 @@ export class Mempool {
 
                     this.reputationManager.decreaseUserOpCount(userOp)
                     userOpInfo.processingAt = Date.now()
-                    this.store.addProcessing({ entryPoint, userOpInfo })
+                    processingWrites.push(
+                        this.store.addProcessing({ entryPoint, userOpInfo })
+                    )
 
                     // Add op to current bundle
                     currentBundle.userOps.push(userOpInfo)
                     currentBundleSlots.add(nonceSlot)
                 }
+
+                // Land every processing write before the bundle is handed
+                // over, so the executor's removeProcessing cannot run first
+                // and leave an entry nothing removes.
+                await Promise.all(processingWrites)
 
                 if (currentBundle.userOps.length > 0) {
                     // Overwritten like processingAt; see the stamp rule on
