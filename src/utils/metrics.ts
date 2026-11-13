@@ -232,6 +232,13 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    const bundlesRevertedAfterSkippedSimulation = new Counter({
+        name: "ultra_relay_bundles_reverted_after_skipped_simulation_total",
+        help: "Number of bundles that reverted onchain on a first send that skipped the bundle-time filterOps simulation (--skip-bundle-simulation)",
+        labelNames: [] as const,
+        registers
+    })
+
     const fetchRequestsAwaitingSocket = new Gauge({
         name: "ultra_relay_fetch_requests_awaiting_socket",
         help: "Requests dispatched to the fetch connection pool but not yet written to a socket (queued for a free connection or waiting on DNS/TLS connection setup)",
@@ -275,6 +282,7 @@ export function createMetrics(registry: Registry, register = true) {
         walletsProcessingTime,
         fetchRequestsAwaitingSocket,
         userOperationsSubmissionAttempts,
-        secondValidationFailed
+        secondValidationFailed,
+        bundlesRevertedAfterSkippedSimulation
     }
 }

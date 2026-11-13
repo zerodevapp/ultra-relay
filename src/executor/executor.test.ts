@@ -9,10 +9,15 @@ import { foundry } from "viem/chains"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { customTransport } from "../cli/customTransport"
 import { Executor } from "./executor"
+import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 
 vi.hoisted(() => {
     process.env.BETTER_STACK_TOKEN = ""
 })
+
+vi.mock("./filterOpsAndEstimateGas", () => ({
+    filterOpsAndEstimateGas: vi.fn()
+}))
 
 describe("Executor.sendHandleOpsTransaction", () => {
     let server: Server
@@ -147,8 +152,7 @@ const call = (submissionAttempts: number, arbitrumPriorityFeePerGas = 0n) =>
             bundle: { submissionAttempts } as never,
             networkGasPrice: { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n },
             networkBaseFee: 20_000_000n, // 0.02 gwei
-            totalBeneficiaryFees: 0n,
-            bundleGasUsed: 0n
+            breakEvenGasPrice: 0n
         }
     )
 
@@ -165,8 +169,7 @@ describe("getBundleGasPrice on arbitrum", () => {
                 const input = {
                     bundle: { submissionAttempts } as never,
                     networkBaseFee: 20_000_000n,
-                    totalBeneficiaryFees: 0n,
-                    bundleGasUsed: 1n
+                    breakEvenGasPrice: 0n
                 }
                 const context = { config } as unknown as Executor
                 const quoted = getBundleGasPrice.call(context, {
@@ -194,8 +197,7 @@ describe("getBundleGasPrice on arbitrum", () => {
                     bundle: { submissionAttempts: 0 } as never,
                     networkGasPrice: undefined,
                     networkBaseFee: 20_000_000n,
-                    totalBeneficiaryFees: 0n,
-                    bundleGasUsed: 1n
+                    breakEvenGasPrice: 0n
                 }
             )
         ).toThrow("Network gas price is required outside Arbitrum")
@@ -235,4 +237,46 @@ describe("getBundleGasPrice on arbitrum", () => {
             maxPriorityFeePerGas: 200_000_000n
         })
     })
+})
+
+describe("Executor.bundle", () => {
+    it.each([
+        [0, true],
+        [1, false]
+    ])(
+        "at submissionAttempts %i passes skipSimulation=%s",
+        async (submissionAttempts, skipSimulation) => {
+            const logger = { child: () => logger, warn: () => {} }
+            vi.mocked(filterOpsAndEstimateGas).mockResolvedValueOnce({
+                status: "all_ops_rejected",
+                rejectedUserOps: []
+            })
+            const executor = new Executor({
+                config: {
+                    getLogger: () => logger,
+                    skipBundleSimulation: true
+                } as unknown as AltoConfig,
+                eventManager: {} as EventManager
+            })
+
+            await executor.bundle({
+                executor: {
+                    address: "0x1111111111111111111111111111111111111111"
+                } as never,
+                userOpBundle: {
+                    entryPoint: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+                    version: "0.6",
+                    submissionAttempts,
+                    userOps: []
+                },
+                networkGasPrice: undefined,
+                networkBaseFee: 0n,
+                nonce: 0
+            })
+
+            expect(filterOpsAndEstimateGas).toHaveBeenLastCalledWith(
+                expect.objectContaining({ skipSimulation })
+            )
+        }
+    )
 })

@@ -75,20 +75,22 @@ describe("filterOpsAndEstimateGas", () => {
         if (result.status !== "success") return
         expect(result.userOpsToBundle).toEqual(bundle.userOps)
         expect(result.rejectedUserOps).toEqual([])
+        expect(result.breakEvenGasPrice).toBe(0n)
         // Gas limit comes from the ops' own limits, not the simulation.
         expect(result.bundleGasLimit).toBeGreaterThan(
             USER_OP.callGasLimit + USER_OP.verificationGasLimit
         )
     })
 
-    it("still runs the filterOps eth_call by default", async () => {
+    it("runs the filterOps eth_call when not skipping", async () => {
         const { config, call } = makeConfig()
 
         const result = await filterOpsAndEstimateGas({
             userOpBundle: bundle,
             config,
             logger,
-            networkBaseFee: 1n
+            networkBaseFee: 1n,
+            skipSimulation: false
         })
 
         expect(call).toHaveBeenCalledOnce()

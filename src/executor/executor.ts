@@ -103,14 +103,12 @@ export class Executor {
         bundle,
         networkGasPrice,
         networkBaseFee,
-        totalBeneficiaryFees,
-        bundleGasUsed
+        breakEvenGasPrice
     }: {
         bundle: UserOperationBundle
         networkGasPrice: GasPriceParameters | undefined
         networkBaseFee: bigint
-        totalBeneficiaryFees: bigint
-        bundleGasUsed: bigint
+        breakEvenGasPrice: bigint
     }): GasPriceParameters {
         const {
             bundlerInitialCommission,
@@ -176,9 +174,6 @@ export class Executor {
                 minBigInt(multiplier, resubmitMultiplierCeiling)
             )
         }
-
-        // The bundler should place a gasBid that is competetive with the network's gasPrice.
-        const breakEvenGasPrice = totalBeneficiaryFees / bundleGasUsed
 
         // Calculate commission: start at bundlerInitialCommission%, then
         // halve the commission with each resubmission attempt
@@ -498,9 +493,8 @@ export class Executor {
         const {
             userOpsToBundle,
             rejectedUserOps,
-            bundleGasUsed,
             bundleGasLimit,
-            totalBeneficiaryFees
+            breakEvenGasPrice
         } = filterOpsResult
 
         // Update child logger with userOperations being sent for bundling.
@@ -515,8 +509,7 @@ export class Executor {
             bundle: userOpBundle,
             networkGasPrice,
             networkBaseFee,
-            totalBeneficiaryFees,
-            bundleGasUsed
+            breakEvenGasPrice
         })
 
         // When replacing a stuck transaction, the new bid must beat the previous
