@@ -163,8 +163,8 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
 
     // Drops the owner and added-at keys, as an entry written before they
     // existed, or by a pod running the previous version, would look.
-    const makeLegacy = async (storeType = "processing") => {
-        const k = keys(storeType)
+    const makeLegacy = async () => {
+        const k = keys()
         await inspect.del(k.addedAt, k.owner)
     }
 
@@ -453,8 +453,8 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         vi.useFakeTimers({ toFake: ["Date"] })
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1)))
+        await makeLegacy()
         const k = keys()
-        await inspect.del(k.addedAt, k.owner)
 
         const blocked = await store.findConflicting(
             makeUserOpInfo(hash(2)).userOp
@@ -496,10 +496,11 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
     it("removes a legacy entry the owner still holds", async () => {
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1)))
-        const k = keys()
-        await inspect.del(k.addedAt, k.owner)
+        await makeLegacy()
 
         expect(await store.remove(hash(1))).toBe(true)
+
+        const k = keys()
 
         expect(await inspect.hlen(k.senderNonce)).toBe(0)
         expect(await inspect.hlen(k.hashIndex)).toBe(0)
