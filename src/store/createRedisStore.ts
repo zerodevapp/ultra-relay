@@ -55,9 +55,21 @@ const deserializeUserOp = (data: string): UserOperation => {
 // Processing entries older than this are treated as orphans. The bound is
 // generous because a live op can sit in processing while it waits for a free
 // executor wallet, and that wait has no limit (the Nov 2 incident had 30
-// minutes of wallet starvation). Submitted entries never expire: their age is
-// how long the transaction has been pending, and they hold its nonce lock.
+// minutes of wallet starvation).
 export const STALE_SENDER_NONCE_MS = 2 * 60 * 60 * 1000
+
+// A submitted entry holds a pending transaction's nonce lock. It is removed by
+// the instance tracking that bundle, and that tracking lives in memory, so a
+// pod that shuts down before its bundle lands leaves the entry behind. A stuck
+// bundle is rotated to a fresh wallet after max-stuck-attempts-before-rotation
+// attempts, and the rotation re-adds the entry and restarts its clock, so a
+// live entry should not reach this age.
+export const STALE_SUBMITTED_MS = 24 * 60 * 60 * 1000
+
+// Bounds every command on the store's connection, so a connection that stops
+// answering fails the write (the mempool store logs it) instead of hanging the
+// bundle builder or the executor.
+export const REDIS_COMMAND_TIMEOUT_MS = 5000
 
 // Every key is per store type and entry point:
 // KEYS[1] hash index        (userOpHash -> userOp)
@@ -65,46 +77,67 @@ export const STALE_SENDER_NONCE_MS = 2 * 60 * 60 * 1000
 // KEYS[3] sender-nonce      (sender-nonce -> userOp)
 // KEYS[4] sender-nonce owner (sender-nonce -> userOpHash)
 // KEYS[5] factory lookup    (sender -> userOpHash)
-// Secondary entries are deleted only while they still point at the evicted or
-// removed hash, so a late remove by a dead op's owner cannot drop a newer op's
-// entries. An op written before added-at existed starts its clock when first
-// seen.
-const EVICT_IF_STALE_FN = `
-local function evictIfStale(hash, senderNonce, sender, now, maxAge)
-    redis.call('HSETNX', KEYS[2], hash, now)
-    local ageMs = tonumber(now) - tonumber(redis.call('HGET', KEYS[2], hash))
-    if ageMs <= tonumber(maxAge) then return nil end
-    redis.call('HDEL', KEYS[1], hash)
-    redis.call('HDEL', KEYS[2], hash)
-    if redis.call('HGET', KEYS[4], senderNonce) == hash then
+// An owner counts only while its hash index entry still holds the
+// sender-nonce's userOp, or it is the synthetic owner of an entry with no hash
+// index match. Any other owner was left by a version that does not write
+// owners and is ignored. Secondary entries are deleted only while their valid
+// owner is the evicted or removed hash, or, with no valid owner, while they
+// hold the same userOp. So a late remove by a dead op's owner cannot drop a
+// newer op's entries. An op written before added-at existed starts its clock
+// when first seen.
+const OWNER_FNS = `
+local function syntheticOwner(userOp)
+    return 'orphan:' .. redis.sha1hex(userOp)
+end
+local function validOwner(senderNonce, userOp)
+    if not userOp then return nil end
+    local owner = redis.call('HGET', KEYS[4], senderNonce)
+    if not owner then return nil end
+    if owner == syntheticOwner(userOp) then return owner end
+    if redis.call('HGET', KEYS[1], owner) == userOp then return owner end
+    return nil
+end
+local function removeSecondary(hash, userOp, senderNonce, sender)
+    local senderNonceUserOp = redis.call('HGET', KEYS[3], senderNonce)
+    local owner = validOwner(senderNonce, senderNonceUserOp)
+    if owner == hash or (not owner and senderNonceUserOp and senderNonceUserOp == userOp) then
         redis.call('HDEL', KEYS[3], senderNonce)
         redis.call('HDEL', KEYS[4], senderNonce)
     end
     if redis.call('HGET', KEYS[5], sender) == hash then
         redis.call('HDEL', KEYS[5], sender)
     end
+end
+`
+
+const EVICT_IF_STALE_FN = `${OWNER_FNS}
+local function evictIfStale(hash, senderNonce, sender, now, maxAge)
+    redis.call('HSETNX', KEYS[2], hash, now)
+    local ageMs = tonumber(now) - tonumber(redis.call('HGET', KEYS[2], hash))
+    if ageMs <= tonumber(maxAge) then return nil end
+    removeSecondary(hash, redis.call('HGET', KEYS[1], hash), senderNonce, sender)
+    redis.call('HDEL', KEYS[1], hash)
+    redis.call('HDEL', KEYS[2], hash)
     return ageMs
 end
 `
 
-// ARGV: sender-nonce, sender, now (ms), max age (ms)
-// Returns nil, {'live', userOp} or {'evicted', ageMs}. An entry written before
-// the owner key existed is matched to its hash once with a scan of the hash
-// index and the owner is backfilled; entries written by this version never
-// scan. An entry with no hash index match gets a synthetic owner so its clock
-// can still run.
+// ARGV: sender-nonce, sender, now (ms), max age (ms), owner candidate
+// Returns nil, {'live', userOp}, {'evicted', ageMs} or {'unowned', userOp}.
+// An entry with no valid owner returns 'unowned' while the candidate is empty;
+// the caller then finds its hash with HSCAN, outside the script so Redis never
+// blocks on a scan, and calls again with that hash or 'none'. An entry with no
+// hash index match gets a synthetic owner so its clock can still run.
 const SENDER_NONCE_CONFLICT_SCRIPT = `${EVICT_IF_STALE_FN}
 local userOp = redis.call('HGET', KEYS[3], ARGV[1])
 if not userOp then return nil end
-local owner = redis.call('HGET', KEYS[4], ARGV[1])
+local owner = validOwner(ARGV[1], userOp)
 if not owner then
-    owner = 'orphan:' .. ARGV[1]
-    local entries = redis.call('HGETALL', KEYS[1])
-    for i = 1, #entries, 2 do
-        if entries[i + 1] == userOp then
-            owner = entries[i]
-            break
-        end
+    if ARGV[5] == '' then return {'unowned', userOp} end
+    if ARGV[5] ~= 'none' and redis.call('HGET', KEYS[1], ARGV[5]) == userOp then
+        owner = ARGV[5]
+    else
+        owner = syntheticOwner(userOp)
     end
     redis.call('HSET', KEYS[4], ARGV[1], owner)
 end
@@ -128,22 +161,18 @@ if ageMs then return {'evicted', tostring(ageMs)} end
 return {'live'}
 `
 
-// ARGV: userOpHash, sender-nonce, sender
-// Returns 1 when the hash was present. An entry written before the owner key
-// existed is removed when its sender-nonce still holds the same userOp.
-const REMOVE_OWNED_SCRIPT = `
+// ARGV: userOpHash, sender-nonce, sender, added-at stamp of the caller's add
+// Returns 1 when the hash was present and removed. With a stamp, nothing is
+// removed when another add has since rewritten added-at: the op was evicted and
+// an identical copy re-added, and that copy's entries are not the caller's.
+const REMOVE_OWNED_SCRIPT = `${OWNER_FNS}
 local userOp = redis.call('HGET', KEYS[1], ARGV[1])
 if not userOp then return 0 end
+local addedAt = redis.call('HGET', KEYS[2], ARGV[1])
+if ARGV[4] ~= '' and addedAt and addedAt ~= ARGV[4] then return 0 end
+removeSecondary(ARGV[1], userOp, ARGV[2], ARGV[3])
 redis.call('HDEL', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
-local owner = redis.call('HGET', KEYS[4], ARGV[2])
-if owner == ARGV[1] or (not owner and redis.call('HGET', KEYS[3], ARGV[2]) == userOp) then
-    redis.call('HDEL', KEYS[3], ARGV[2])
-    redis.call('HDEL', KEYS[4], ARGV[2])
-end
-if redis.call('HGET', KEYS[5], ARGV[3]) == ARGV[1] then
-    redis.call('HDEL', KEYS[5], ARGV[3])
-end
 return 1
 `
 
@@ -157,9 +186,10 @@ declare module "ioredis" {
                 senderNonce: string,
                 sender: string,
                 nowMs: string,
-                maxAgeMs: string
+                maxAgeMs: string,
+                ownerCandidate: string
             ]
-        ): Result<["live" | "evicted", string] | null, Context>
+        ): Result<["live" | "evicted" | "unowned", string] | null, Context>
         hashConflict(
             ...args: [
                 ...StoreKeys,
@@ -175,7 +205,8 @@ declare module "ioredis" {
                 ...StoreKeys,
                 userOpHash: string,
                 senderNonce: string,
-                sender: string
+                sender: string,
+                addedAtStamp: string
             ]
         ): Result<number, Context>
     }
@@ -186,7 +217,8 @@ export const createRedisStore = ({
     storeType,
     entryPoint,
     redisEndpoint,
-    staleAfterMs
+    staleAfterMs,
+    commandTimeoutMs = REDIS_COMMAND_TIMEOUT_MS
 }: {
     config: AltoConfig
     storeType: string
@@ -194,8 +226,9 @@ export const createRedisStore = ({
     redisEndpoint: string
     // Set to evict entries older than this. Unset, entries never expire.
     staleAfterMs?: number
+    commandTimeoutMs?: number
 }): Store => {
-    const redis = new Redis(redisEndpoint, {})
+    const redis = new Redis(redisEndpoint, { commandTimeout: commandTimeoutMs })
     redis.defineCommand("senderNonceConflict", {
         numberOfKeys: 5,
         lua: SENDER_NONCE_CONFLICT_SCRIPT
@@ -235,6 +268,31 @@ export const createRedisStore = ({
 
     const memoryStore = createMemoryStore({ config })
 
+    // userOpHash -> the added-at value this instance wrote, so its remove can
+    // tell its own entry from an identical copy re-added after an eviction.
+    const addedAtStamps = new Map<string, string>()
+
+    // Finds the hash index entry holding this userOp, for an entry written
+    // before owners existed. Runs once per such entry, in HSCAN chunks.
+    const findHashOf = async (userOp: string): Promise<string> => {
+        let cursor = "0"
+        do {
+            const [next, entries] = await redis.hscan(
+                userOpHashLookupKey,
+                cursor,
+                "COUNT",
+                1000
+            )
+            for (let i = 0; i < entries.length; i += 2) {
+                if (entries[i + 1] === userOp) {
+                    return entries[i]
+                }
+            }
+            cursor = next
+        } while (cursor !== "0")
+        return "none"
+    }
+
     const encodeSenderNonce = (userOp: UserOperation) => {
         return `${userOp.sender}-${userOp.nonce}`
     }
@@ -268,7 +326,7 @@ export const createRedisStore = ({
         path
     }: {
         userOpHash: string
-        userOp: UserOperation | undefined
+        userOp: UserOperation
         path: "deployment" | "contains"
     }): Promise<boolean> => {
         if (staleAfterMs === undefined) {
@@ -277,12 +335,12 @@ export const createRedisStore = ({
         const result = await redis.hashConflict(
             ...keys,
             userOpHash,
-            userOp ? encodeSenderNonce(userOp) : "",
-            userOp?.sender ?? "",
+            encodeSenderNonce(userOp),
+            userOp.sender,
             String(Date.now()),
             String(staleAfterMs)
         )
-        if (result?.[0] === "evicted" && userOp) {
+        if (result?.[0] === "evicted") {
             logEviction({ userOp, ageMs: result[1], path })
         }
         return result?.[0] === "live"
@@ -314,9 +372,11 @@ export const createRedisStore = ({
                 value: userOpHash,
                 multi
             })
+            const stamp = String(Date.now())
+            addedAtStamps.set(userOpHash, stamp)
             await addedAt.set({
                 key: userOpHash,
-                value: String(Date.now()),
+                value: stamp,
                 multi
             })
 
@@ -342,12 +402,15 @@ export const createRedisStore = ({
             }
 
             const userOp = deserializeUserOp(exist)
+            const stamp = addedAtStamps.get(userOpHash) ?? ""
+            addedAtStamps.delete(userOpHash)
 
             const removed = await redis.removeOwned(
                 ...keys,
                 userOpHash,
                 encodeSenderNonce(userOp),
-                userOp.sender
+                userOp.sender,
+                stamp
             )
 
             return removed === 1
@@ -381,13 +444,21 @@ export const createRedisStore = ({
                     }
                 }
             } else {
-                const conflict = await redis.senderNonceConflict(
-                    ...keys,
-                    senderNonce,
-                    userOp.sender,
-                    String(Date.now()),
-                    String(staleAfterMs)
-                )
+                const senderNonceConflict = (ownerCandidate: string) =>
+                    redis.senderNonceConflict(
+                        ...keys,
+                        senderNonce,
+                        userOp.sender,
+                        String(Date.now()),
+                        String(staleAfterMs),
+                        ownerCandidate
+                    )
+                let conflict = await senderNonceConflict("")
+                if (conflict?.[0] === "unowned") {
+                    conflict = await senderNonceConflict(
+                        await findHashOf(conflict[1])
+                    )
+                }
 
                 if (conflict?.[0] === "live") {
                     return {

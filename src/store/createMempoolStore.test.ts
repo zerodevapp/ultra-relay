@@ -12,6 +12,7 @@ const submittedAdd = vi.fn<Store["add"]>()
 
 vi.mock("./createRedisStore", () => ({
     STALE_SENDER_NONCE_MS: 1,
+    STALE_SUBMITTED_MS: 1,
     createRedisStore: ({ storeType }: { storeType: string }) => ({
         add: storeType === "processing" ? processingAdd : submittedAdd
     })
