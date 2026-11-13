@@ -10,12 +10,15 @@ import { createMempoolStore } from "./createMempoolStore"
 const processingAdd = vi.fn<Store["add"]>()
 const submittedAdd = vi.fn<Store["add"]>()
 
+const redisStoreArgs = vi.hoisted(() => [] as Record<string, unknown>[])
+
 vi.mock("./createRedisStore", () => ({
-    STALE_SENDER_NONCE_MS: 1,
-    STALE_SUBMITTED_MS: 1,
-    createRedisStore: ({ storeType }: { storeType: string }) => ({
-        add: storeType === "processing" ? processingAdd : submittedAdd
-    })
+    createRedisStore: (args: { storeType: string }) => {
+        redisStoreArgs.push(args)
+        return {
+            add: args.storeType === "processing" ? processingAdd : submittedAdd
+        }
+    }
 }))
 
 vi.mock("./createRedisOutstandingStore", () => ({
@@ -49,6 +52,34 @@ const newMempoolStore = () =>
             }
         } as unknown as Metrics
     })
+
+describe("redis store policy", () => {
+    it("expires processing after 2h and submitted after 24h, with a 5s command timeout", () => {
+        redisStoreArgs.length = 0
+        newMempoolStore()
+
+        expect(
+            redisStoreArgs.map(
+                ({ storeType, staleAfterMs, commandTimeoutMs }) => ({
+                    storeType,
+                    staleAfterMs,
+                    commandTimeoutMs
+                })
+            )
+        ).toEqual([
+            {
+                storeType: "processing",
+                staleAfterMs: 2 * 60 * 60 * 1000,
+                commandTimeoutMs: 5000
+            },
+            {
+                storeType: "submitted",
+                staleAfterMs: 24 * 60 * 60 * 1000,
+                commandTimeoutMs: 5000
+            }
+        ])
+    })
+})
 
 describe.each([
     ["addProcessing", processingAdd],

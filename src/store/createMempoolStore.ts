@@ -15,12 +15,28 @@ import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import { createMemoryOutstandingQueue } from "./createMemoryOutstandingStore"
 import { createRedisOutstandingQueue } from "./createRedisOutstandingStore"
-import {
-    STALE_SENDER_NONCE_MS,
-    STALE_SUBMITTED_MS,
-    createRedisStore
-} from "./createRedisStore"
+import { createRedisStore } from "./createRedisStore"
 import { createMemoryStore } from "./createStore"
+
+// A processing entry outlives its owner when that instance dies mid-bundle or
+// loses track of the op, and then blocks its sender-nonce with AA25 and an
+// identical resend with "Already known". The bound is generous because a live
+// op can sit in processing while it waits for a free executor wallet, and that
+// wait has no limit (the Nov 2 incident had 30 minutes of wallet starvation).
+export const STALE_PROCESSING_MS = 2 * 60 * 60 * 1000
+
+// A submitted entry holds a pending transaction's nonce lock. Bundle tracking
+// lives in the sending instance's memory, so an instance that shuts down
+// before its bundle lands leaves the entry behind. A stuck bundle is rotated
+// to a fresh wallet after max-stuck-attempts-before-rotation attempts, and the
+// rotation re-adds the entry and restarts its clock, so a live entry should
+// not reach this age.
+export const STALE_SUBMITTED_MS = 24 * 60 * 60 * 1000
+
+// Bounds every command on a store's connection, so a connection that stops
+// answering fails the write (logged below) instead of hanging the bundle
+// builder or the executor.
+export const REDIS_COMMAND_TIMEOUT_MS = 5000
 
 export const createMempoolStore = ({
     config,
@@ -68,14 +84,16 @@ export const createMempoolStore = ({
                 entryPoint,
                 storeType: "processing",
                 redisEndpoint: config.redisEndpoint,
-                staleAfterMs: STALE_SENDER_NONCE_MS
+                staleAfterMs: STALE_PROCESSING_MS,
+                commandTimeoutMs: REDIS_COMMAND_TIMEOUT_MS
             })
             submitted = createRedisStore({
                 config,
                 entryPoint,
                 storeType: "submitted",
                 redisEndpoint: config.redisEndpoint,
-                staleAfterMs: STALE_SUBMITTED_MS
+                staleAfterMs: STALE_SUBMITTED_MS,
+                commandTimeoutMs: REDIS_COMMAND_TIMEOUT_MS
             })
 
             // Log the Redis keys being used

@@ -6,10 +6,11 @@ import { getAddress } from "viem"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AltoConfig } from "../createConfig"
 import {
-    STALE_SENDER_NONCE_MS,
-    STALE_SUBMITTED_MS,
-    createRedisStore
-} from "./createRedisStore"
+    REDIS_COMMAND_TIMEOUT_MS,
+    STALE_PROCESSING_MS,
+    STALE_SUBMITTED_MS
+} from "./createMempoolStore"
+import { createRedisStore } from "./createRedisStore"
 
 // Runs against a real Redis because eviction is a Lua script. REDIS_URL must
 // name a disposable server; each test uses its own key prefix.
@@ -155,8 +156,9 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
             redisEndpoint: redisUrl,
             staleAfterMs:
                 storeType === "processing"
-                    ? STALE_SENDER_NONCE_MS
-                    : STALE_SUBMITTED_MS
+                    ? STALE_PROCESSING_MS
+                    : STALE_SUBMITTED_MS,
+            commandTimeoutMs: REDIS_COMMAND_TIMEOUT_MS
         })
 
     // Drops the owner and added-at keys, as an entry written before they
@@ -196,7 +198,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1)))
 
-        advance(STALE_SENDER_NONCE_MS - 60_000)
+        advance(STALE_PROCESSING_MS - 60_000)
         const live = await store.findConflicting(makeUserOpInfo(hash(2)).userOp)
         expect(live?.reason).toBe("conflicting_nonce")
 
@@ -242,7 +244,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
                 entryPoint,
                 storeType: "processing",
                 redisEndpoint: proxy.url,
-                staleAfterMs: STALE_SENDER_NONCE_MS,
+                staleAfterMs: STALE_PROCESSING_MS,
                 commandTimeoutMs: 200
             })
             await store.add(makeUserOpInfo(hash(1)))
@@ -271,7 +273,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         await makeLegacy()
 
         expect(await store.contains(hash(1))).toBe(true)
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         expect(await store.contains(hash(1))).toBe(false)
 
         const k = keys()
@@ -287,7 +289,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         const otherPod = newStore()
         await slowPod.add(makeUserOpInfo(hash(1)))
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         expect(await otherPod.contains(hash(1))).toBe(false)
         await otherPod.add(makeUserOpInfo(hash(1)))
 
@@ -312,7 +314,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         await inspect.hdel(k.hashIndex, hash(1))
         await inspect.hdel(k.senderNonce, senderNonce)
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         // A previous-version pod then adds a new op at that nonce: an add
         // with its owner and added-at writes undone.
         await newStore().add(makeUserOpInfo(hash(2)))
@@ -352,7 +354,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
 
         expect(await store.contains(hash(1))).toBe(true)
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
 
         expect(await store.contains(hash(1))).toBe(false)
         const k = keys()
@@ -365,13 +367,24 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1), 126n, { deployment: true }))
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         const cleared = await store.findConflicting(
             makeUserOpInfo(hash(2), 126n, { deployment: true }).userOp
         )
 
         expect(cleared).toBeUndefined()
         expect(await inspect.hlen(keys().factory)).toBe(0)
+    })
+
+    it("ignores a factory entry whose deployment is gone", async () => {
+        const store = newStore()
+        await inspect.hset(keys().factory, sender, hash(9))
+
+        const conflict = await store.findConflicting(
+            makeUserOpInfo(hash(2), 126n, { deployment: true }).userOp
+        )
+
+        expect(conflict).toBeUndefined()
     })
 
     it("stops a stale deployment blocking a deployment on another nonce key", async () => {
@@ -389,7 +402,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         const blocked = await store.findConflicting(retry)
         expect(blocked?.reason).toBe("conflicting_deployment")
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         const cleared = await store.findConflicting(retry)
 
         expect(cleared).toBeUndefined()
@@ -404,7 +417,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1)))
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         expect(
             await store.findConflicting(makeUserOpInfo(hash(2)).userOp)
         ).toBeUndefined()
@@ -423,7 +436,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         vi.useFakeTimers({ toFake: ["Date"] })
         const store = newStore()
         await store.add(makeUserOpInfo(hash(1)))
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
 
         // Other test files share this Redis; only this test's keys count.
         const watch = await watchCommands(redisUrl, prefix)
@@ -449,7 +462,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
         expect(blocked?.reason).toBe("conflicting_nonce")
         expect(await inspect.hget(k.owner, `${sender}-126`)).toBe(hash(1))
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
         const cleared = await store.findConflicting(
             makeUserOpInfo(hash(2)).userOp
         )
@@ -472,7 +485,7 @@ describe.skipIf(!redisUrl)("RedisStore stale entry eviction", () => {
                 ?.reason
         ).toBe("conflicting_nonce")
 
-        advance(STALE_SENDER_NONCE_MS + 1)
+        advance(STALE_PROCESSING_MS + 1)
 
         expect(
             await store.findConflicting(makeUserOpInfo(hash(2)).userOp)
