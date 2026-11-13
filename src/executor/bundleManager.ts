@@ -171,6 +171,15 @@ export class BundleManager {
 
         await this.freeSubmittedBundle(submittedBundle)
 
+        // submissionAttempts is 1 after the first send; only that send skips
+        // the filterOps simulation (see Executor.bundle).
+        if (
+            this.config.skipBundleSimulation &&
+            bundle.submissionAttempts === 1
+        ) {
+            this.metrics.bundlesRevertedAfterSkippedSimulation.inc()
+        }
+
         const networkBaseFee = this.config.legacyTransactions
             ? 0n
             : (block?.baseFeePerGas ??
@@ -183,7 +192,10 @@ export class BundleManager {
                 userOpBundle: bundle,
                 config: this.config,
                 logger: this.logger,
-                networkBaseFee
+                networkBaseFee,
+                // Recovered ops come back as a new bundle at submissionAttempts
+                // 0, so this filterOps is what checks them before resubmission.
+                skipSimulation: false
             })
 
             // Resubmit any userOps that we can recover
