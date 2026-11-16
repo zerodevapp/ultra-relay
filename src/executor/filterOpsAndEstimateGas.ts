@@ -43,9 +43,10 @@ export type FilterOpsResult =
           status: "success"
           userOpsToBundle: UserOpInfo[]
           rejectedUserOps: RejectedUserOp[]
-          bundleGasUsed: bigint
           bundleGasLimit: bigint
-          totalBeneficiaryFees: bigint
+          // Simulated beneficiary fees per unit of gas used; 0n when the
+          // simulation was skipped.
+          breakEvenGasPrice: bigint
       }
     | {
           status: "unhandled_error"
@@ -290,12 +291,17 @@ export async function filterOpsAndEstimateGas({
     userOpBundle,
     config,
     logger,
-    networkBaseFee
+    networkBaseFee,
+    skipSimulation
 }: {
     userOpBundle: UserOperationBundle
     config: AltoConfig
     logger: Logger
     networkBaseFee: bigint
+    // Trust the arrival-time simulation and bundle every op as is. Only the
+    // gas used and beneficiary fees go missing, so the break-even bid is 0
+    // and pricing uses the network gas price (Arbitrum ignores both).
+    skipSimulation: boolean
 }): Promise<FilterOpsResult> {
     const { utilityWalletAddress: beneficiary } = config
     const { userOps, entryPoint } = userOpBundle
@@ -307,14 +313,20 @@ export async function filterOpsAndEstimateGas({
 
     try {
         // Create promises for parallel execution
-        const filterOpsPromise = timed(logger, "filterOps", timingCtx, () =>
-            getFilterOpsResult({
-                userOpBundle,
-                config,
-                networkBaseFee,
-                beneficiary
-            })
-        )
+        const filterOpsPromise = skipSimulation
+            ? Promise.resolve({
+                  gasUsed: 0n,
+                  balanceChange: 0n,
+                  rejectedUserOps: []
+              })
+            : timed(logger, "filterOps", timingCtx, () =>
+                  getFilterOpsResult({
+                      userOpBundle,
+                      config,
+                      networkBaseFee,
+                      beneficiary
+                  })
+              )
 
         // Start chain-specific overhead calculation in parallel
         const chainSpecificOverheadPromise = timed(
@@ -450,12 +462,11 @@ export async function filterOpsAndEstimateGas({
             status: "success",
             userOpsToBundle,
             rejectedUserOps,
-            bundleGasUsed,
             bundleGasLimit: bundleGasLimit + offChainOverhead.gasLimit,
-            totalBeneficiaryFees: minBigInt(
-                filterOpsResult.balanceChange,
-                maxPossibleRefund
-            )
+            breakEvenGasPrice: skipSimulation
+                ? 0n
+                : minBigInt(filterOpsResult.balanceChange, maxPossibleRefund) /
+                  bundleGasUsed
         }
     } catch (err) {
         logger.error({ err }, "Encountered unhandled error during filterOps")
