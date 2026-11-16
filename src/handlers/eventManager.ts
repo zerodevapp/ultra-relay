@@ -18,6 +18,7 @@ export class EventManager {
     private logger: Logger
     private metrics: Metrics
     private redisEventManagerQueue?: QueueType<QueueMessage>
+    private watchers = new Map<Hex, Set<(event: OpEventType) => void>>()
 
     constructor({
         config,
@@ -58,6 +59,26 @@ export class EventManager {
                 }
             })
             return
+        }
+    }
+
+    // In-process subscription to one userOp's events, for a request held open
+    // until the op settles. Returns the unsubscribe function.
+    watchUserOp(
+        userOpHash: Hex,
+        listener: (event: OpEventType) => void
+    ): () => void {
+        const listeners =
+            this.watchers.get(userOpHash) ??
+            new Set<(event: OpEventType) => void>()
+        this.watchers.set(userOpHash, listeners)
+        listeners.add(listener)
+
+        return () => {
+            listeners.delete(listener)
+            if (listeners.size === 0) {
+                this.watchers.delete(userOpHash)
+            }
         }
     }
 
@@ -251,6 +272,14 @@ export class EventManager {
         event: OpEventType
         timestamp?: number
     }) {
+        for (const listener of this.watchers.get(userOpHash) ?? []) {
+            try {
+                listener(event)
+            } catch (err) {
+                this.logger.error({ err, userOpHash }, "userOp watcher threw")
+            }
+        }
+
         if (!this.redisEventManagerQueue) {
             return
         }

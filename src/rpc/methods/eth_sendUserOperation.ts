@@ -303,67 +303,91 @@ export async function addToMempoolIfValid({
     return { result: "added", userOpHash }
 }
 
+// The eth_sendUserOperation flow, shared with zd_sendUserOperationSync so both
+// methods validate, admit, emit and count a userOp identically.
+export async function submitUserOperation({
+    rpcHandler,
+    userOp,
+    entryPoint,
+    apiVersion,
+    method
+}: {
+    rpcHandler: RpcHandler
+    userOp: UserOperation
+    entryPoint: Address
+    apiVersion: ApiVersion
+    method: "eth_sendUserOperation" | "zd_sendUserOperationSync"
+}): Promise<Hex> {
+    const handlerStart = performance.now()
+    const receivedAt = Date.now()
+
+    const boost =
+        userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
+
+    rpcHandler.logger.info(
+        { sender: userOp.sender, apiVersion, boost, entryPoint },
+        `[timing] ${method} received`
+    )
+
+    let status: "added" | "queued" | "rejected" = "rejected"
+    let resolvedUserOpHash: Hex | undefined
+    try {
+        const { result, userOpHash } = await addToMempoolIfValid({
+            rpcHandler,
+            userOp,
+            entryPoint,
+            apiVersion,
+            boost,
+            receivedAt
+        })
+
+        status = result
+        resolvedUserOpHash = userOpHash
+
+        rpcHandler.eventManager.emitReceived(userOpHash)
+
+        return userOpHash
+    } catch (error) {
+        status = "rejected"
+        throw error
+    } finally {
+        rpcHandler.metrics.userOperationsReceived
+            .labels({
+                status,
+                type: userOp.eip7702Auth ? "7702" : "regular"
+            })
+            .inc()
+
+        rpcHandler.logger.info(
+            {
+                sender: userOp.sender,
+                apiVersion,
+                boost,
+                status,
+                // Only set when defined: an explicit `undefined` would
+                // clobber the hash the log-context mixin already merged in,
+                // making rejected ops unfindable by hash.
+                ...(resolvedUserOpHash
+                    ? { userOpHash: resolvedUserOpHash }
+                    : {}),
+                ms: Math.round(performance.now() - handlerStart)
+            },
+            `[timing] ${method} total`
+        )
+    }
+}
+
 export const ethSendUserOperationHandler = createMethodHandler({
     method: "eth_sendUserOperation",
     schema: sendUserOperationSchema,
     handler: async ({ rpcHandler, params, apiVersion }) => {
-        const handlerStart = performance.now()
-        const receivedAt = Date.now()
         const [userOp, entryPoint] = params
-
-        const boost =
-            userOp.maxFeePerGas === 0n && userOp.maxPriorityFeePerGas === 0n
-
-        rpcHandler.logger.info(
-            { sender: userOp.sender, apiVersion, boost, entryPoint },
-            "[timing] eth_sendUserOperation received"
-        )
-
-        let status: "added" | "queued" | "rejected" = "rejected"
-        let resolvedUserOpHash: Hex | undefined
-        try {
-            const { result, userOpHash } = await addToMempoolIfValid({
-                rpcHandler,
-                userOp,
-                entryPoint,
-                apiVersion,
-                boost,
-                receivedAt
-            })
-
-            status = result
-            resolvedUserOpHash = userOpHash
-
-            rpcHandler.eventManager.emitReceived(userOpHash)
-
-            return userOpHash
-        } catch (error) {
-            status = "rejected"
-            throw error
-        } finally {
-            rpcHandler.metrics.userOperationsReceived
-                .labels({
-                    status,
-                    type: userOp.eip7702Auth ? "7702" : "regular"
-                })
-                .inc()
-
-            rpcHandler.logger.info(
-                {
-                    sender: userOp.sender,
-                    apiVersion,
-                    boost,
-                    status,
-                    // Only set when defined: an explicit `undefined` would
-                    // clobber the hash the log-context mixin already merged in,
-                    // making rejected ops unfindable by hash.
-                    ...(resolvedUserOpHash
-                        ? { userOpHash: resolvedUserOpHash }
-                        : {}),
-                    ms: Math.round(performance.now() - handlerStart)
-                },
-                "[timing] eth_sendUserOperation total"
-            )
-        }
+        return await submitUserOperation({
+            rpcHandler,
+            userOp,
+            entryPoint,
+            apiVersion,
+            method: "eth_sendUserOperation"
+        })
     }
 })

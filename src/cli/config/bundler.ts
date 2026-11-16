@@ -87,6 +87,9 @@ export const bundlerArgsSchema = z.object({
             )}`
         ),
     "enable-instant-bundling-endpoint": z.boolean(),
+    "enable-sync-userop-endpoint": z.boolean(),
+    "sync-userop-default-timeout-ms": z.number().int().positive(),
+    "sync-userop-max-timeout-ms": z.number().int().positive(),
     "rpc-gas-estimate": z.boolean(),
     "flashblocks-preconfirmation-time": z.number().optional()
 })
