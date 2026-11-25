@@ -103,7 +103,7 @@ export async function addToMempoolIfValid({
     boost?: boolean
     receivedAt?: number
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
-    rpcHandler.ensureEntryPointIsSupported(entryPoint)
+    rpcHandler.ensureEntryPointIsSupported(entryPoint, userOp)
 
     const logCtx = { sender: userOp.sender, apiVersion, boost }
 

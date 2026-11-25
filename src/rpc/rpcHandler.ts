@@ -22,6 +22,7 @@ import {
 import type { Logger, Metrics } from "@alto/utils"
 import { getNonceKeyAndSequence, isVersion06, isVersion07 } from "@alto/utils"
 import { getContract, zeroAddress } from "viem"
+import { entryPoint06Address } from "viem/account-abstraction"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { recoverAuthorizationAddress } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
@@ -116,12 +117,22 @@ export class RpcHandler {
         })
     }
 
-    ensureEntryPointIsSupported(entryPoint: Address) {
+    ensureEntryPointIsSupported(entryPoint: Address, userOp?: UserOperation) {
         if (!this.config.entrypoints.includes(entryPoint)) {
             throw new RpcError(
                 `EntryPoint ${entryPoint} not supported, supported EntryPoints: ${this.config.entrypoints.join(
                     ", "
                 )}`,
+                ValidationErrors.InvalidFields
+            )
+        }
+        if (
+            userOp &&
+            entryPoint.toLowerCase() === entryPoint06Address.toLowerCase() &&
+            !isVersion06(userOp)
+        ) {
+            throw new RpcError(
+                "EntryPoint v0.6 requires initCode and paymasterAndData",
                 ValidationErrors.InvalidFields
             )
         }
