@@ -169,6 +169,15 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
+    // Mirrors upstream alto_user_operations_dropped_total (#617); the label is
+    // normalized because our reasons carry revert data (see ADR 0006).
+    const userOperationsDropped = new Counter({
+        name: "ultra_relay_user_operations_dropped_total",
+        help: "Number of user operations dropped from mempool",
+        labelNames: ["reason"] as const,
+        registers
+    })
+
     const userOperationsSubmissionAttempts = new Histogram({
         name: "ultra_relay_user_operations_attempts_before_inclusion",
         help: "Number of submission attempts needed before a user operation was included on-chain",
@@ -266,6 +275,7 @@ export function createMetrics(registry: Registry, register = true) {
         verificationGasLimitEstimationCount,
         replacedTransactions,
         userOperationsResubmitted,
+        userOperationsDropped,
         utilityWalletBalance,
         utilityWalletInsufficientBalance,
         executorWalletsBalances,

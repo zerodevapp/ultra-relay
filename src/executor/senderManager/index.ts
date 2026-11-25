@@ -1,5 +1,5 @@
 import type { Metrics } from "@alto/utils"
-import type { Account } from "viem"
+import type { Account, Address } from "viem"
 import type { AltoConfig } from "../../createConfig"
 import { createMemorySenderManager } from "./createMemorySenderManager"
 import {
@@ -26,6 +26,16 @@ export const getAvailableWallets = (config: AltoConfig) => {
 
     return availableWallets
 }
+
+// Permissioned chains whitelist the executors, so simulations are sent
+// from one of them. Paymasters that check tx.origin (ZER-1350) also only
+// pass when the simulation runs from an executor.
+// Mirrors upstream Alto #817. Unlike upstream we take no version: the fork
+// has one key list (see ADR 0006).
+export const getEthCallSender = ({
+    config
+}: { config: AltoConfig }): Address | undefined =>
+    config.executorPrivateKeys[0]?.address
 
 export type SenderManager = {
     getAllWallets: () => Account[]

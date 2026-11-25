@@ -1,5 +1,7 @@
 # Bundle cap guardrails
 
+> Layer 3's retry is refined by ADR 0006: after an oversize rejection, each userOp is retried in isolation.
+
 Two production incidents (Base: tx gas > EIP-7825's 16,777,216 cap; BNB: bundle
 calldata > geth's 131,072-byte `txMaxSize`) had the same root cause: nothing
 bounded a bundle's submitted gas or serialized byte size, so the bundler

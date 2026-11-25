@@ -2,7 +2,7 @@ import type { HexData32, UserOpInfo, UserOperation } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Logger } from "@alto/utils"
 import * as sentry from "@sentry/node"
-import type { Address } from "viem"
+import { type Address, toHex } from "viem"
 import type {
     EntryPointUserOpHashParam,
     EntryPointUserOpInfoParam,
@@ -13,6 +13,7 @@ import type {
 } from "."
 import { getRedisStorePrefix } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
+import { getNonceKeyAndSequence } from "../utils/userop"
 import { createMemoryOutstandingQueue } from "./createMemoryOutstandingStore"
 import { createRedisOutstandingQueue } from "./createRedisOutstandingStore"
 import { createRedisStore } from "./createRedisStore"
@@ -404,6 +405,48 @@ export const createMempoolStore = ({
             }
 
             return { valid: true }
+        },
+
+        // Successor hold (fork-only, see ADR 0006). Only the exact predecessor
+        // counts: same sender, same nonce key, sequence - 1. A deployment at
+        // another nonce is a different conflict and does not hold.
+        hasPendingPredecessor: async ({
+            entryPoint,
+            userOp
+        }: { entryPoint: Address; userOp: UserOperation }) => {
+            // Sequence 0 has no predecessor in its key; nonce - 1 would wrap
+            // into the previous key's last sequence.
+            const [, nonceSequence] = getNonceKeyAndSequence(userOp.nonce)
+            if (nonceSequence === 0n) {
+                return false
+            }
+
+            const predecessor = { ...userOp, nonce: userOp.nonce - 1n }
+
+            try {
+                const { submitted, processing } = getStoreHandlers(entryPoint)
+                const conflicts = await Promise.all([
+                    processing.findConflicting(predecessor),
+                    submitted.findConflicting(predecessor)
+                ])
+                return conflicts.some(
+                    (conflict) => conflict?.reason === "conflicting_nonce"
+                )
+            } catch (err) {
+                // Holding is the safe answer: the userOp goes back to the
+                // queue for a later tick instead of being lost or failing
+                // the bundling pass. The store has no userOp hash (computing
+                // one for v0.8 is an RPC call), so sender and nonce identify
+                // it.
+                const { sender } = userOp
+                const nonce = toHex(userOp.nonce)
+                logger.error(
+                    { err, sender, nonce },
+                    `failed to look up the predecessor of ${sender} nonce ${nonce}, holding the userOp`
+                )
+                sentry.captureException(err)
+                return true
+            }
         },
 
         popConflictingOustanding: async ({

@@ -23,10 +23,12 @@ import {
     ContractFunctionExecutionError,
     FeeCapTooLowError,
     type Hex,
+    HttpRequestError,
     InsufficientFundsError,
     IntrinsicGasTooLowError,
     NonceTooHighError,
     NonceTooLowError,
+    TimeoutError,
     TransactionExecutionError
 } from "viem"
 import type { SendTransactionErrorType } from "viem"
@@ -51,6 +53,21 @@ import {
 // 13% to keep rounding headroom so resubmissions are never rejected with
 // "replacement transaction underpriced".
 const REPLACEMENT_MIN_BUMP_PERCENT = 113n
+
+// The node that takes the bundle transaction failed at the transport level:
+// a timeout, no response at all (status undefined), or a 5xx. Walks the cause
+// chain so it matches a bare error and one wrapped in a
+// TransactionExecutionError alike. A 4xx is the node or gateway refusing this
+// transaction (for example a 413), so it must count toward the resubmit cap
+// and falls through to the normal classification.
+const isSendTransportError = (err: unknown): boolean =>
+    err instanceof BaseError &&
+    err.walk(
+        (e) =>
+            e instanceof TimeoutError ||
+            (e instanceof HttpRequestError &&
+                (e.status === undefined || e.status >= 500))
+    ) !== null
 
 type HandleOpsTxParams = {
     gas: bigint
@@ -655,12 +672,33 @@ export class Executor {
         } catch (err: unknown) {
             const { rejectedUserOps, userOpsToBundle } = filterOpsResult
 
+            const sendTransportErrorResult = (e: unknown): BundleResult => {
+                childLogger.warn(
+                    { err: jsonStringifyWithBigint(e) },
+                    "transport error submitting bundle transaction"
+                )
+                return {
+                    success: false,
+                    reason: "send_transport_error",
+                    rejectedUserOps,
+                    recoverableOps: userOpsToBundle
+                }
+            }
+
             const isViemExecutionError =
                 err instanceof ContractFunctionExecutionError ||
                 err instanceof TransactionExecutionError
 
+            // Send endpoint outage: infrastructure failure, never counts toward
+            // the resubmit cap (the userOps themselves are fine).
+            const transportError = isSendTransportError(err)
+
             // Unknown error, return INTERNAL FAILURE.
             if (!isViemExecutionError) {
+                if (transportError) {
+                    return sendTransportErrorResult(err)
+                }
+
                 sentry.captureException(err)
                 childLogger.error(
                     { err: JSON.stringify(err) },
@@ -735,6 +773,10 @@ export class Executor {
                     rejectedUserOps,
                     recoverableOps: userOpsToBundle
                 }
+            }
+
+            if (transportError) {
+                return sendTransportErrorResult(err)
             }
 
             childLogger.error(

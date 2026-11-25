@@ -16,7 +16,7 @@ cd e2e && pnpm test -t "test name"
 ## Architecture Overview
 
 ### Key Design Patterns
-- **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots). Stuck bundles are resubmitted with bumped gas (floored above the bor +10% replacement requirement), then rotated to a fresh executor wallet after `max-stuck-attempts-before-rotation` total attempts (cancelling the old transaction)
+- **Executor Strategies**: Supports different bundle submission strategies (conditional, flashbots). Stuck bundles are replaced with bumped gas (floored above the bor +10% replacement requirement), then rotated to a fresh executor wallet after `max-stuck-attempts-before-rotation` total attempts (cancelling the old transaction)
 
 ## Development Tips
 1. The project uses pnpm workspaces - always use `pnpm` instead of `npm` or `yarn`

@@ -499,6 +499,17 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: 5
     },
+    // Same name as upstream #617, which leaves it unset (no limit) and counts
+    // every failure. Default 3 because an uncapped loop drained an executor
+    // wallet (ZER-1350, ZER-1010); infrastructure failures are exempt so an
+    // RPC blip cannot drop the queue. See ADR 0006.
+    "max-resubmits": {
+        description:
+            "Maximum submission attempts (sends, replacements and counted failures) before a userOp is dropped at its next counted failure. Infrastructure failures never count (see ADR 0006).",
+        type: "number",
+        require: false,
+        default: 3
+    },
     "max-bundling-gas-price": {
         description:
             "Absolute ceiling (in gwei) for the gas price the bundler will bid on a handleOps transaction, regardless of escalation. Unset = no cap",

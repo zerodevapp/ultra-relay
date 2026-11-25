@@ -31,7 +31,12 @@ import {
 import type { AltoConfig } from "../createConfig"
 import { bundleByteThreshold, getBundleCaps } from "../executor/bundleCaps"
 import { calculateAA95GasFloor } from "../executor/utils"
-import { Mempool } from "./mempool"
+import {
+    INFRASTRUCTURE_FAILURE_REASONS,
+    MAX_RESUBMITS_REASON,
+    Mempool,
+    dropReasonLabel
+} from "./mempool"
 import type { Monitor } from "./monitoring"
 import {
     type InterfaceReputationManager,
@@ -174,7 +179,8 @@ const makeMetricsStub = () => {
     const gauge = { inc: vi.fn(), dec: vi.fn() }
     return {
         userOperationsInMempool: { labels: vi.fn(() => gauge) },
-        userOperationsResubmitted: { labels: vi.fn(() => ({ inc: vi.fn() })) }
+        userOperationsResubmitted: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+        userOperationsDropped: { labels: vi.fn(() => ({ inc: vi.fn() })) }
     } as unknown as Metrics
 }
 
@@ -2872,6 +2878,270 @@ describe("Mempool.resubmitUserOps", () => {
     })
 })
 
+describe("Mempool.resubmitUserOps limit", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    const INFRASTRUCTURE_FAILURES = [
+        "Failed to get nonce and gas parameters for bundling",
+        "wallet_acquisition_failed",
+        "insufficient_funds",
+        "stuck_bundle_detach_failed",
+        "bundle_handoff_failed",
+        "send_transport_error"
+    ]
+
+    // The real memory store and the real dropUserOps, so only the monitor and
+    // event manager calls that add() and dropUserOps make are stubbed.
+    const makeLimitHarness = (maxResubmits = 3) => {
+        const monitor = { setUserOpStatus: vi.fn() } as unknown as Monitor
+        const eventManager = {
+            emitAddedToMempool: vi.fn(),
+            emitDropped: vi.fn()
+        } as unknown as EventManager
+        const harness = makeHarness({
+            config: makeConfig({ maxResubmits }),
+            monitor,
+            eventManager
+        })
+        const dropSpy = vi.spyOn(harness.mempool, "dropUserOps")
+        return { ...harness, dropSpy }
+    }
+
+    const withAttempts = (
+        id: number,
+        submissionAttempts: number
+    ): UserOpInfo => ({ ...makeUserOpInfoV06(id), submissionAttempts })
+
+    // add() recomputes the userOp hash, so re-added records are keyed by
+    // sender rather than by the fixture's hash.
+    const outstandingAttempts = async (store: MempoolStore) =>
+        Object.fromEntries(
+            (await store.dumpOutstanding(ENTRY_POINT_V06)).map((userOpInfo) => [
+                userOpInfo.userOp.sender,
+                userOpInfo.submissionAttempts
+            ])
+        )
+
+    const capWarnings = () =>
+        silentLogger.warn.mock.calls.filter(
+            ([payload]) =>
+                (payload as { maxResubmits?: number }).maxResubmits !==
+                undefined
+        )
+
+    it("carries submissionAttempts and adds one for a counted failure", async () => {
+        const { mempool, store, dropSpy } = makeLimitHarness()
+
+        await mempool.resubmitUserOps({
+            userOps: [withAttempts(1, 1)],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "sibling_op_reverted"
+        })
+
+        expect(await outstandingAttempts(store)).toEqual({ [senderOf(1)]: 2 })
+        expect(dropSpy).not.toHaveBeenCalled()
+    })
+
+    it.each(INFRASTRUCTURE_FAILURES)(
+        "never counts or drops on infrastructure failure %s",
+        async (reason) => {
+            const { mempool, store, dropSpy } = makeLimitHarness()
+
+            await mempool.resubmitUserOps({
+                userOps: [withAttempts(1, 1), withAttempts(2, 5)],
+                entryPoint: ENTRY_POINT_V06,
+                reason
+            })
+
+            expect(await outstandingAttempts(store)).toEqual({
+                [senderOf(1)]: 1,
+                [senderOf(2)]: 5
+            })
+            expect(dropSpy).not.toHaveBeenCalled()
+        }
+    )
+
+    it("drops at the limit with the max resubmits reason", async () => {
+        const { mempool, store, dropSpy } = makeLimitHarness()
+        const userOpInfo = withAttempts(1, 3)
+
+        await mempool.resubmitUserOps({
+            userOps: [userOpInfo],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "generic_error"
+        })
+        await nextTurn()
+
+        expect(dropSpy.mock.calls).toEqual([
+            [ENTRY_POINT_V06, [{ ...userOpInfo, reason: MAX_RESUBMITS_REASON }]]
+        ])
+        expect(await store.dumpOutstanding(ENTRY_POINT_V06)).toEqual([])
+        expect(capWarnings()).toEqual([
+            [
+                {
+                    userOpHash: hash(1),
+                    submissionAttempts: 3,
+                    maxResubmits: 3,
+                    reason: "generic_error"
+                },
+                `userOp ${hash(1)} dropped: max resubmits reached after generic_error`
+            ]
+        ])
+    })
+
+    it("drops a never-sent userOp at its fourth counted failure", async () => {
+        const { mempool, store, dropSpy } = makeLimitHarness()
+        await store.addOutstanding({
+            entryPoint: ENTRY_POINT_V06,
+            userOpInfo: makeUserOpInfoV06(1)
+        })
+
+        const failOnce = async () => {
+            const popped = await store.popOutstanding(ENTRY_POINT_V06)
+            if (!popped) {
+                throw new Error("nothing to pop")
+            }
+            await mempool.resubmitUserOps({
+                userOps: [popped],
+                entryPoint: ENTRY_POINT_V06,
+                reason: "generic_error"
+            })
+        }
+
+        const reAddedAt: number[] = []
+        for (let failure = 1; failure <= 3; failure++) {
+            await failOnce()
+            const [record] = await store.dumpOutstanding(ENTRY_POINT_V06)
+            reAddedAt.push(record.submissionAttempts)
+        }
+        expect(reAddedAt).toEqual([1, 2, 3])
+        expect(dropSpy).not.toHaveBeenCalled()
+
+        await failOnce()
+        await nextTurn()
+
+        expect(await store.dumpOutstanding(ENTRY_POINT_V06)).toEqual([])
+        expect(dropSpy).toHaveBeenCalledTimes(1)
+        const [[, [dropped]]] = dropSpy.mock.calls
+        expect(dropped).toMatchObject({
+            submissionAttempts: 3,
+            reason: MAX_RESUBMITS_REASON
+        })
+    })
+
+    it("drops at the first counted failure when max-resubmits is 0", async () => {
+        const { mempool, store, dropSpy } = makeLimitHarness(0)
+        const counted = withAttempts(1, 0)
+
+        await mempool.resubmitUserOps({
+            userOps: [counted],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "generic_error"
+        })
+        await nextTurn()
+
+        expect(dropSpy.mock.calls).toEqual([
+            [ENTRY_POINT_V06, [{ ...counted, reason: MAX_RESUBMITS_REASON }]]
+        ])
+        expect(await store.dumpOutstanding(ENTRY_POINT_V06)).toEqual([])
+
+        // An infrastructure failure still never drops, even at a limit of 0.
+        await mempool.resubmitUserOps({
+            userOps: [withAttempts(2, 0)],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "insufficient_funds"
+        })
+
+        expect(await outstandingAttempts(store)).toEqual({ [senderOf(2)]: 0 })
+        expect(dropSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it("drops only the userOps at the limit in a mixed batch", async () => {
+        const { mempool, store, dropSpy } = makeLimitHarness()
+        const atLimit = withAttempts(1, 3)
+        const belowLimit = withAttempts(2, 1)
+
+        await mempool.resubmitUserOps({
+            userOps: [atLimit, belowLimit],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "generic_error"
+        })
+        await nextTurn()
+
+        expect(dropSpy.mock.calls).toEqual([
+            [ENTRY_POINT_V06, [{ ...atLimit, reason: MAX_RESUBMITS_REASON }]]
+        ])
+        expect(await outstandingAttempts(store)).toEqual({ [senderOf(2)]: 2 })
+    })
+
+    it("re-adds one nonce slot in nonce order", async () => {
+        const { mempool, store, storeSpies } = makeLimitHarness()
+        const sender = senderOf(1)
+        const nonceOne = makeUserOpInfoV06(2, { sender, nonce: 1n })
+        const nonceZero = makeUserOpInfoV06(1, { sender, nonce: 0n })
+
+        await mempool.resubmitUserOps({
+            userOps: [nonceOne, nonceZero],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "generic_error"
+        })
+
+        expect(
+            storeSpies.addOutstanding.mock.calls.map(
+                ([{ userOpInfo }]) => userOpInfo.userOp.nonce
+            )
+        ).toEqual([0n, 1n])
+        const head = await store.popOutstanding(ENTRY_POINT_V06)
+        expect(head?.userOp.nonce).toBe(0n)
+    })
+
+    it("pins the infrastructure failure reasons", () => {
+        expect([...INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(
+            [...INFRASTRUCTURE_FAILURES].sort()
+        )
+    })
+
+    it("waits for every nonce slot to settle, then rejects with the first error", async () => {
+        const { mempool } = makeLimitHarness()
+        const senderS = senderOf(1)
+        const senderT = senderOf(2)
+        const sNonceZero = makeUserOpInfoV06(1, { sender: senderS, nonce: 0n })
+        const sNonceOne = makeUserOpInfoV06(2, { sender: senderS, nonce: 1n })
+        const tNonceZero = makeUserOpInfoV06(3, { sender: senderT, nonce: 0n })
+        const sNonceZeroError = new Error("S nonce 0 re-add failed")
+        const tAdd = deferred<[boolean, string]>()
+        const addSpy = vi.spyOn(mempool, "add").mockImplementation((userOp) => {
+            if (userOp.sender === senderS && userOp.nonce === 0n) {
+                return Promise.reject(sNonceZeroError)
+            }
+            if (userOp.sender === senderT) {
+                return tAdd.promise
+            }
+            return Promise.resolve([true, ""])
+        })
+
+        const resubmitted = mempool.resubmitUserOps({
+            userOps: [sNonceZero, sNonceOne, tNonceZero],
+            entryPoint: ENTRY_POINT_V06,
+            reason: "generic_error"
+        })
+        const isSettled = trackSettled(resubmitted)
+        await nextTurn()
+
+        // S's slot carries on past its rejected nonce 0.
+        expect(
+            addSpy.mock.calls.map(([userOp]) => [userOp.sender, userOp.nonce])
+        ).toContainEqual([senderS, 1n])
+        // T's slot is still in flight, so the rejection is held back.
+        expect(isSettled()).toBe(false)
+
+        tAdd.resolve([true, ""])
+        await expect(resubmitted).rejects.toBe(sNonceZeroError)
+    })
+})
+
 describe("Redis round-trip pass contract", () => {
     it("uses one peek across all bundles", async () => {
         const { mempool, storeSpies } = await harnessSeededWith(sevenGasOps())
@@ -3035,5 +3305,831 @@ describe("Mempool.markUserOpsAsSubmitted", () => {
         ])
         expect(h.labels).toHaveBeenCalledWith({ status: "success" })
         expect(h.inc.mock.calls).toEqual([[2]])
+    })
+})
+
+describe("Mempool.dropUserOps metric", () => {
+    it.each([
+        ["AA25 invalid account nonce", "AA25"],
+        ['FailedOpWithRevert(5, "AA33 reverted", 0xd0d25976...)', "AA33"],
+        [MAX_RESUBMITS_REASON, MAX_RESUBMITS_REASON],
+        ["userOp alone exceeds a per-transaction bundle cap", "other"]
+    ])("labels %s as %s", (reason, label) => {
+        expect(dropReasonLabel(reason)).toBe(label)
+    })
+
+    it("counts each dropped userOp once under its normalized reason", async () => {
+        const inc = vi.fn()
+        const labels = vi.fn(() => ({ inc }))
+        const mempool = new Mempool({
+            config: makeConfig(),
+            metrics: {
+                userOperationsDropped: { labels }
+            } as unknown as Metrics,
+            monitor: {
+                setUserOpStatus: vi.fn(() => Promise.resolve())
+            } as unknown as Monitor,
+            reputationManager: {} as unknown as InterfaceReputationManager,
+            validator: {} as unknown as InterfaceValidator,
+            store: {
+                removeProcessing: vi.fn(() => Promise.resolve()),
+                removeSubmitted: vi.fn(() => Promise.resolve())
+            } as unknown as MempoolStore,
+            eventManager: {
+                emitDropped: vi.fn()
+            } as unknown as EventManager
+        })
+
+        await mempool.dropUserOps(ENTRY_POINT_V06, [
+            { ...makeUserOpInfoV06(1), reason: "AA25 invalid account nonce" },
+            { ...makeUserOpInfoV06(2), reason: MAX_RESUBMITS_REASON }
+        ])
+
+        expect(labels).toHaveBeenCalledWith({ reason: "AA25" })
+        expect(labels).toHaveBeenCalledWith({ reason: MAX_RESUBMITS_REASON })
+        expect(inc).toHaveBeenCalledTimes(2)
+    })
+})
+
+// Fork-only (ADR 0006): a retried userOp is bundled alone, and a userOp whose
+// immediate predecessor in its nonce slot is still processing or submitted
+// waits for a later tick instead of failing AA25.
+describe("isolation and successor hold", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    const sender = senderOf(1)
+
+    // One nonce slot: sender S, nonce key 0.
+    const slotOp = (id: number, nonce: bigint) =>
+        makeUserOpInfoV06(id, { sender, nonce })
+
+    const retried = (id: number, submissionAttempts = 1): UserOpInfo => ({
+        ...makeUserOpInfoV06(id),
+        submissionAttempts
+    })
+
+    // The on-chain nonce the hold reads once the store says the predecessor
+    // is pending: EntryPoint.getNonce, which viem routes to readContract.
+    // Nonce 0 by default, below every held candidate's sequence, so the hold
+    // stands.
+    const chainConfig = (getNonce: () => Promise<bigint> = async () => 0n) => {
+        const readContract = vi.fn(getNonce)
+        return {
+            config: makeConfig({ publicClient: { readContract } }),
+            readContract
+        }
+    }
+
+    // Seeds outstanding, then in-flight predecessors, then clears the mocks
+    // so every call count belongs to getBundles.
+    const harnessWithInFlight = async ({
+        outstanding,
+        processing = [],
+        submitted = [],
+        getNonce
+    }: {
+        outstanding: UserOpInfo[]
+        processing?: UserOpInfo[]
+        submitted?: UserOpInfo[]
+        getNonce?: () => Promise<bigint>
+    }) => {
+        const { config, readContract } = chainConfig(getNonce)
+        const harness = makeHarness({ config })
+        const entryPoint = ENTRY_POINT_V06
+        await seedOutstanding(harness.store, entryPoint, outstanding)
+        for (const userOpInfo of processing) {
+            await harness.store.addProcessing({ entryPoint, userOpInfo })
+        }
+        for (const userOpInfo of submitted) {
+            await harness.store.addSubmitted({ entryPoint, userOpInfo })
+        }
+        vi.clearAllMocks()
+        return { ...harness, readContract }
+    }
+
+    const writesFor = (
+        storeSpies: ReturnType<typeof makeHarness>["storeSpies"],
+        id: number
+    ) =>
+        storeSpies.addOutstanding.mock.calls.filter(
+            ([{ userOpInfo }]) => userOpInfo.userOpHash === hash(id)
+        ).length
+
+    const debugEvents = (event: string) =>
+        debugMock.mock.calls
+            .map(([payload]) => payload as { event?: string })
+            .filter((payload) => payload?.event === event)
+
+    describe("isolation", () => {
+        it("bundles a retried userOp alone between ordinary ones", async () => {
+            const { mempool } = await harnessSeededWith([
+                makeUserOpInfoV06(1),
+                retried(2),
+                makeUserOpInfoV06(3)
+            ])
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1], [2], [3]])
+            expect(debugEvents("userOpIsolated")).toEqual([
+                expect.objectContaining({ userOpHash: hash(2) })
+            ])
+        })
+
+        it("bundles a retried userOp that opens a bundle alone", async () => {
+            const { mempool } = await harnessSeededWith([
+                retried(1),
+                makeUserOpInfoV06(2),
+                makeUserOpInfoV06(3)
+            ])
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1], [2, 3]])
+        })
+
+        it("still packs ordinary userOps together", async () => {
+            const { mempool } = await harnessSeededWith(
+                [1, 2, 3].map((id) => makeUserOpInfoV06(id))
+            )
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+        })
+    })
+
+    describe("successor hold", () => {
+        it("holds a userOp while its predecessor is processing, without ending the pass", async () => {
+            const { mempool, store, storeSpies } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [
+                    slotOp(2, 1n),
+                    makeUserOpInfoV06(5),
+                    makeUserOpInfoV06(6)
+                ]
+            })
+
+            const bundles = await mempool.getBundles()
+
+            // S/nonce 1 pops first (lowest fee) and is held; the senders
+            // behind it are still bundled in the same pass.
+            expect(bundleIds(bundles)).toEqual([[5, 6]])
+            const outstanding = await store.dumpOutstanding(ENTRY_POINT_V06)
+            expect(
+                outstanding.map(({ userOpHash }) => idOf(userOpHash))
+            ).toEqual([2])
+            expect(outstanding[0].reentered).toBe(true)
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+            expect(writesFor(storeSpies, 2)).toBe(1)
+            expect(debugEvents("userOpSuccessorHold")).toEqual([
+                expect.objectContaining({ userOpHash: hash(2) })
+            ])
+        })
+
+        it("holds a userOp while its predecessor is submitted", async () => {
+            const { mempool, store } = await harnessWithInFlight({
+                submitted: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n), makeUserOpInfoV06(5)]
+            })
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[5]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+        })
+
+        it("holds every later nonce of a held slot in the same pass", async () => {
+            const { mempool, store, storeSpies } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n), slotOp(3, 2n)]
+            })
+            const lookups = vi.spyOn(store, "hasPendingPredecessor")
+
+            const bundles = await mempool.getBundles()
+
+            // Nonce 2's own predecessor (nonce 1) is set aside, not in
+            // processing, so only the held slot keeps it out of a bundle.
+            expect(bundles).toEqual([])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2, 3])
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(2)
+            expect(writesFor(storeSpies, 2)).toBe(1)
+            expect(writesFor(storeSpies, 3)).toBe(1)
+            expect(lookups).toHaveBeenCalledTimes(1)
+        })
+
+        it("bundles the userOp once its predecessor has left processing", async () => {
+            const { mempool, store } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [
+                    slotOp(2, 1n),
+                    makeUserOpInfoV06(5),
+                    makeUserOpInfoV06(6)
+                ]
+            })
+            expect(bundleIds(await mempool.getBundles())).toEqual([[5, 6]])
+
+            await store.removeProcessing({
+                entryPoint: ENTRY_POINT_V06,
+                userOpHash: hash(1)
+            })
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[2]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
+        })
+
+        it("does not let a later nonce join its slot when the exact predecessor is in flight", async () => {
+            // Nonce 0 is back in outstanding while nonce 1 is still in
+            // processing: nonce 2 must not ride along with nonce 0.
+            const { mempool, store, storeSpies } = await harnessWithInFlight({
+                outstanding: [slotOp(1, 0n), slotOp(3, 2n)],
+                processing: [slotOp(2, 1n)]
+            })
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([3])
+            expect(writesFor(storeSpies, 3)).toBe(1)
+        })
+
+        it("ends the pass after 256 holds and writes every held userOp back once", async () => {
+            const ids = Array.from({ length: 257 }, (_, i) => i + 1)
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                ids.map((id) => makeUserOpInfoV06(id, { nonce: 1n })),
+                chainConfig().config
+            )
+            vi.spyOn(store, "hasPendingPredecessor").mockResolvedValue(true)
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundles).toEqual([])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual(ids)
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(257)
+            const written = new Set(
+                storeSpies.addOutstanding.mock.calls.map(
+                    ([{ userOpInfo }]) => userOpInfo.userOpHash
+                )
+            )
+            expect(written.size).toBe(257)
+            // The pass ended on the bound, not on an empty queue: no pop
+            // after the 257th.
+            expect(storeSpies.popOutstanding).toHaveBeenCalledTimes(257)
+        })
+
+        it("never looks up a predecessor for sequence 0", async () => {
+            // Includes the first userOp of another nonce key: its sequence is
+            // 0 too, and nonce - 1 would wrap into the previous key.
+            const { mempool, store } = await harnessSeededWith([
+                makeUserOpInfoV06(1),
+                makeUserOpInfoV06(2),
+                makeUserOpInfoV06(3, { nonce: 1n << 64n })
+            ])
+            const lookups = vi.spyOn(store, "hasPendingPredecessor")
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1, 2, 3]])
+            expect(lookups).not.toHaveBeenCalled()
+        })
+
+        it("returns a held userOp to outstanding and still resolves", async () => {
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                [makeUserOpInfoV06(1, { nonce: 1n })],
+                chainConfig().config
+            )
+            // The answer a failed lookup gives.
+            vi.spyOn(store, "hasPendingPredecessor").mockResolvedValue(true)
+
+            await expect(mempool.getBundles()).resolves.toEqual([])
+
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([1])
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+        })
+    })
+
+    // A pod that dies leaves its processing and submitted entries behind
+    // until they are evicted (2 h and 24 h), while the userOp itself usually
+    // lands a block later. The chain has the last word before a hold, but a
+    // pass never waits for it: the read runs in the background and a later
+    // pass acts on its answer.
+    describe("chain-nonce check", () => {
+        // Each read waits on its own deferred, so a test decides when each
+        // one settles. Whatever a test leaves open is settled after it, so no
+        // background read finishes inside the next test.
+        let reads: Deferred<bigint>[] = []
+        const deferredGetNonce = () => {
+            const read = deferred<bigint>()
+            reads.push(read)
+            return read.promise
+        }
+
+        afterEach(async () => {
+            for (const read of reads) {
+                read.resolve(0n)
+            }
+            reads = []
+            await nextTurn()
+            vi.useRealTimers()
+        })
+
+        // One pass, which must be over a turn later even though a read it
+        // started is still open. Throws, since biome keeps expect inside tests.
+        const passWithoutWaiting = async (mempool: Mempool) => {
+            const pass = mempool.getBundles()
+            const passSettled = trackSettled(pass)
+            await nextTurn()
+            if (!passSettled()) {
+                throw new Error("the pass waited for a chain read")
+            }
+            return pass
+        }
+
+        it("holds without waiting for the chain read", async () => {
+            const { mempool, store, storeSpies, readContract } =
+                await harnessWithInFlight({
+                    processing: [slotOp(1, 0n)],
+                    outstanding: [slotOp(2, 1n), makeUserOpInfoV06(5)],
+                    getNonce: deferredGetNonce
+                })
+
+            const bundles = await passWithoutWaiting(mempool)
+
+            expect(bundleIds(bundles)).toEqual([[5]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+            expect(writesFor(storeSpies, 2)).toBe(1)
+            expect(readContract).toHaveBeenCalledTimes(1)
+        })
+
+        // Was "bundles the userOp when the chain shows its predecessor
+        // landed": the release now comes one pass later.
+        it("releases the userOp on a later pass once the read shows the predecessor landed", async () => {
+            // Nonce 0 is an orphaned processing entry; the chain is already
+            // at sequence 1, the candidate's own.
+            const { mempool, store, readContract } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n)],
+                getNonce: deferredGetNonce
+            })
+            expect(await passWithoutWaiting(mempool)).toEqual([])
+            reads[0].resolve(1n)
+            await nextTurn()
+
+            const bundles = await passWithoutWaiting(mempool)
+
+            expect(bundleIds(bundles)).toEqual([[2]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
+            expect(readContract).toHaveBeenCalledTimes(1)
+        })
+
+        it("holds the userOp while the chain is below its sequence", async () => {
+            // Nonce key 1, so a check that compared the full on-chain nonce
+            // instead of its sequence would wave the candidate through.
+            const nonceKey = 1n
+            const { mempool, store, storeSpies, readContract } =
+                await harnessWithInFlight({
+                    processing: [slotOp(1, (nonceKey << 64n) | 0n)],
+                    outstanding: [slotOp(2, (nonceKey << 64n) | 1n)],
+                    getNonce: async () => (nonceKey << 64n) | 0n
+                })
+            expect(await mempool.getBundles()).toEqual([])
+            await nextTurn()
+
+            // The second pass answers from the read the first one started.
+            const bundles = await mempool.getBundles()
+
+            expect(bundles).toEqual([])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+            expect(writesFor(storeSpies, 2)).toBe(2)
+            expect(readContract).toHaveBeenCalledTimes(1)
+            expect(readContract).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    address: ENTRY_POINT_V06,
+                    functionName: "getNonce",
+                    args: [sender, nonceKey],
+                    blockTag: "latest"
+                })
+            )
+        })
+
+        // Was "holds the userOp when the chain read fails".
+        it("keeps holding and retries the read after a failed read", async () => {
+            const { mempool, store, storeSpies, readContract } =
+                await harnessWithInFlight({
+                    processing: [slotOp(1, 0n)],
+                    outstanding: [slotOp(2, 1n)],
+                    getNonce: () => Promise.reject(new Error("rpc down"))
+                })
+
+            await expect(mempool.getBundles()).resolves.toEqual([])
+            await nextTurn()
+
+            expect(readContract).toHaveBeenCalledTimes(1)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+            expect(writesFor(storeSpies, 2)).toBe(1)
+            expect(silentLogger.warn).toHaveBeenCalledTimes(1)
+            expect(silentLogger.warn).toHaveBeenCalledWith(
+                expect.objectContaining({ userOpHash: hash(2) }),
+                expect.stringContaining(hash(2))
+            )
+
+            // A failed read caches nothing, so the next pass holds and reads
+            // again.
+            await expect(mempool.getBundles()).resolves.toEqual([])
+
+            expect(readContract).toHaveBeenCalledTimes(2)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+        })
+
+        it("starts at most one read per nonce slot while one is in flight", async () => {
+            const { mempool, store, readContract } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n)],
+                getNonce: deferredGetNonce
+            })
+
+            expect(await passWithoutWaiting(mempool)).toEqual([])
+            expect(await passWithoutWaiting(mempool)).toEqual([])
+
+            expect(readContract).toHaveBeenCalledTimes(1)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+        })
+
+        it("starts at most 16 reads at once", async () => {
+            // 17 senders, each with its predecessor in flight: 17 nonce slots.
+            const ids = Array.from({ length: 17 }, (_, i) => i + 1)
+            const { config, readContract } = chainConfig(deferredGetNonce)
+            const { mempool, store } = await harnessSeededWith(
+                ids.map((id) => makeUserOpInfoV06(id, { nonce: 1n })),
+                config
+            )
+            vi.spyOn(store, "hasPendingPredecessor").mockResolvedValue(true)
+
+            expect(await passWithoutWaiting(mempool)).toEqual([])
+
+            expect(readContract).toHaveBeenCalledTimes(16)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual(ids)
+        })
+
+        it("re-reads a not-landed answer older than 1 s", async () => {
+            vi.useFakeTimers({ toFake: ["Date"] })
+            const { mempool, readContract } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n)]
+            })
+            expect(await mempool.getBundles()).toEqual([])
+            await nextTurn()
+
+            // Still within 1 s of the read: the cache answers.
+            vi.advanceTimersByTime(999)
+            expect(await mempool.getBundles()).toEqual([])
+            expect(readContract).toHaveBeenCalledTimes(1)
+
+            // Past 1 s: the entry has expired, so the pass reads again.
+            vi.advanceTimersByTime(2)
+            expect(await mempool.getBundles()).toEqual([])
+            expect(readContract).toHaveBeenCalledTimes(2)
+        })
+
+        // The next pass starts about 1 s after this one ends, so a landed
+        // answer that expired after 1 s would be re-read every pass and an
+        // orphan-held userOp would never be released.
+        it("releases on a landed answer older than 1 s without a second read", async () => {
+            vi.useFakeTimers({ toFake: ["Date"] })
+            const { mempool, store, readContract } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n)],
+                getNonce: async () => 1n
+            })
+            expect(await mempool.getBundles()).toEqual([])
+            await nextTurn()
+
+            // Long past 1 s, just under 60 s.
+            vi.advanceTimersByTime(59_999)
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[2]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([])
+            expect(readContract).toHaveBeenCalledTimes(1)
+        })
+
+        it("re-reads a landed answer older than 60 s", async () => {
+            vi.useFakeTimers({ toFake: ["Date"] })
+            const { mempool, store, readContract } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n)],
+                getNonce: async () => 1n
+            })
+            expect(await mempool.getBundles()).toEqual([])
+            await nextTurn()
+
+            vi.advanceTimersByTime(60_001)
+            const bundles = await mempool.getBundles()
+
+            expect(bundles).toEqual([])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+            expect(readContract).toHaveBeenCalledTimes(2)
+        })
+
+        // (guard) Passes before the change too: nothing read the chain then.
+        it("never reads the chain when the store has no pending predecessor", async () => {
+            const { mempool, readContract } = await harnessWithInFlight({
+                outstanding: [slotOp(2, 1n)]
+            })
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[2]])
+            expect(readContract).not.toHaveBeenCalled()
+        })
+    })
+
+    describe("carry and budget", () => {
+        it("sends an isolated userOp in one extra bundle when the budget is spent", async () => {
+            const { mempool } = await harnessSeededWith([
+                makeUserOpInfoV06(1, { sender: senderOf(1) }),
+                {
+                    ...retried(2),
+                    userOp: makeUserOpInfoV06(2, { sender: senderOf(2) }).userOp
+                }
+            ])
+
+            const bundles = await mempool.getBundles(1)
+
+            expect(bundleIds(bundles)).toEqual([[1], [2]])
+        })
+
+        it("allows only one extra bundle per pass", async () => {
+            const { mempool, store } = await harnessSeededWith([
+                makeUserOpInfoV06(1, { sender: senderOf(1) }),
+                {
+                    ...retried(2, 2),
+                    userOp: makeUserOpInfoV06(2, { sender: senderOf(2) }).userOp
+                },
+                {
+                    ...retried(3, 2),
+                    userOp: makeUserOpInfoV06(3, { sender: senderOf(3) }).userOp
+                }
+            ])
+
+            const bundles = await mempool.getBundles(1)
+
+            expect(bundleIds(bundles)).toEqual([[1], [2]])
+            const outstanding = await store.dumpOutstanding(ENTRY_POINT_V06)
+            expect(outstanding).toHaveLength(1)
+            expect(idOf(outstanding[0].userOpHash)).toBe(3)
+            expect(outstanding[0].submissionAttempts).toBe(2)
+        })
+
+        it("does not exceed the budget for a non-retried carry", async () => {
+            const { mempool } = await harnessSeededWith(
+                [1, 2, 3, 4].map((id) => makeByteUserOpInfo(id)),
+                makeConfig({ maxGasPerBundle: 20_000_000n })
+            )
+
+            const bundles = await mempool.getBundles(1)
+
+            expect(bundleIds(bundles)).toEqual([[1, 2]])
+        })
+
+        it("keeps a held overflow userOp's submissionAttempts and pops nothing fresh into its bundle", async () => {
+            // ID 2 is carried for isolation at the budget, opens the extra
+            // bundle, and is held there. IDs 3 and 4 are queued behind it.
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                [
+                    makeUserOpInfoV06(1, { sender: senderOf(1), nonce: 0n }),
+                    {
+                        ...retried(2, 2),
+                        userOp: makeUserOpInfoV06(2, {
+                            sender: senderOf(2),
+                            nonce: 1n
+                        }).userOp
+                    },
+                    makeUserOpInfoV06(3, { sender: senderOf(3), nonce: 0n }),
+                    {
+                        ...retried(4),
+                        userOp: makeUserOpInfoV06(4, {
+                            sender: senderOf(4),
+                            nonce: 0n
+                        }).userOp
+                    }
+                ],
+                chainConfig().config
+            )
+            vi.spyOn(store, "hasPendingPredecessor")
+                .mockResolvedValueOnce(false)
+                .mockResolvedValue(true)
+
+            const bundles = await mempool.getBundles(1)
+
+            expect(bundleIds(bundles)).toEqual([[1]])
+            const outstanding = await store.dumpOutstanding(ENTRY_POINT_V06)
+            expect(outstanding.map((o) => idOf(o.userOpHash)).sort()).toEqual([
+                2, 3, 4
+            ])
+            const held = outstanding.find((o) => idOf(o.userOpHash) === 2)
+            expect(held?.submissionAttempts).toBe(2)
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+        })
+
+        it("writes a carried userOp that is then held back once", async () => {
+            // ID 2 passes its first lookup and is carried for isolation; its
+            // predecessor is in flight by the time it opens the next bundle.
+            // ID 1 has its own sender, so the prior-bundle guard stays out.
+            const { mempool, store, storeSpies } = await harnessSeededWith(
+                [
+                    makeUserOpInfoV06(1, { sender: senderOf(9) }),
+                    { ...retried(2), userOp: slotOp(2, 1n).userOp }
+                ],
+                chainConfig().config
+            )
+            vi.spyOn(store, "hasPendingPredecessor")
+                .mockResolvedValueOnce(false)
+                .mockResolvedValue(true)
+
+            const bundles = await mempool.getBundles()
+
+            expect(bundleIds(bundles)).toEqual([[1]])
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([2])
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(1)
+        })
+
+        it("attempts every write-back before rejecting with the first failure", async () => {
+            const { mempool, store, storeSpies } = await harnessWithInFlight({
+                processing: [slotOp(1, 0n)],
+                outstanding: [slotOp(2, 1n), slotOp(3, 2n)]
+            })
+            const failure = new Error("store down")
+            storeSpies.addOutstanding.mockRejectedValueOnce(failure)
+
+            await expect(mempool.getBundles()).rejects.toBe(failure)
+
+            // The first write failed; the second was still attempted.
+            expect(storeSpies.addOutstanding).toHaveBeenCalledTimes(2)
+            expect(await outstandingIds(store, ENTRY_POINT_V06)).toEqual([3])
+        })
+    })
+
+    // Spec acceptance 2: a reverted pair is retried in isolation, and the
+    // userOp that keeps reverting is dropped at the limit.
+    it("isolates a reverted bundle's userOps and drops the one that keeps reverting", async () => {
+        const entryPoint = ENTRY_POINT_V06
+        const monitor = { setUserOpStatus: vi.fn() } as unknown as Monitor
+        const eventManager = {
+            emitAddedToMempool: vi.fn(),
+            emitDropped: vi.fn()
+        } as unknown as EventManager
+        const { mempool, store } = makeHarness({
+            config: makeConfig({ maxResubmits: 3 }),
+            monitor,
+            eventManager
+        })
+        const dropSpy = vi.spyOn(mempool, "dropUserOps")
+        const senderA = senderOf(1)
+        const senderB = senderOf(2)
+
+        // 1. A and B were sent once (submissionAttempts 1) and reverted.
+        const sent = [1, 2].map((id) => ({
+            ...makeUserOpInfoV06(id),
+            submissionAttempts: 1
+        }))
+        for (const userOpInfo of sent) {
+            await store.addProcessing({ entryPoint, userOpInfo })
+        }
+        await mempool.resubmitUserOps({
+            userOps: sent,
+            entryPoint,
+            reason: "sibling_op_reverted"
+        })
+
+        // 2. add() recomputes the hash, so the records are told apart by
+        // sender.
+        const bundles = await mempool.getBundles()
+        expect(
+            bundles.map((bundle) =>
+                bundle.userOps.map(({ userOp }) => userOp.sender)
+            )
+        ).toEqual([[senderA], [senderB]])
+        expect(
+            bundles.flatMap((bundle) =>
+                bundle.userOps.map(
+                    ({ submissionAttempts }) => submissionAttempts
+                )
+            )
+        ).toEqual([2, 2])
+
+        // 3. A is sent again and reverts again.
+        const [recordA] = bundles[0].userOps
+        recordA.submissionAttempts = 3
+        await mempool.resubmitUserOps({
+            userOps: [recordA],
+            entryPoint,
+            reason: "sibling_op_reverted"
+        })
+        await nextTurn()
+
+        // 4.
+        expect(dropSpy).toHaveBeenCalledTimes(1)
+        expect(dropSpy.mock.calls[0][1]).toEqual([
+            expect.objectContaining({
+                userOpHash: recordA.userOpHash,
+                reason: MAX_RESUBMITS_REASON
+            })
+        ])
+        const outstanding = await store.dumpOutstanding(entryPoint)
+        expect(
+            outstanding.filter(({ userOp }) => userOp.sender === senderA)
+        ).toEqual([])
+    })
+})
+
+describe("MempoolStore.hasPendingPredecessor", () => {
+    const entryPoint = ENTRY_POINT_V06
+    const sender = senderOf(1)
+
+    const at = (
+        id: number,
+        nonce: bigint,
+        overrides: Partial<UserOperation06> = {}
+    ) => makeUserOpInfoV06(id, { sender, nonce, ...overrides })
+
+    const newStore = () =>
+        createMempoolStore({
+            config: makeConfig(),
+            metrics: makeMetricsStub()
+        })
+
+    it("finds a predecessor in processing", async () => {
+        const store = newStore()
+        await store.addProcessing({ entryPoint, userOpInfo: at(1, 1n) })
+
+        expect(
+            await store.hasPendingPredecessor({
+                entryPoint,
+                userOp: at(2, 2n).userOp
+            })
+        ).toBe(true)
+    })
+
+    it("finds a predecessor in submitted", async () => {
+        const store = newStore()
+        await store.addSubmitted({ entryPoint, userOpInfo: at(1, 1n) })
+
+        expect(
+            await store.hasPendingPredecessor({
+                entryPoint,
+                userOp: at(2, 2n).userOp
+            })
+        ).toBe(true)
+    })
+
+    it("ignores the same sequence on a different nonce key", async () => {
+        const store = newStore()
+        await store.addProcessing({
+            entryPoint,
+            userOpInfo: at(1, (1n << 64n) | 1n)
+        })
+
+        expect(
+            await store.hasPendingPredecessor({
+                entryPoint,
+                userOp: at(2, 2n).userOp
+            })
+        ).toBe(false)
+    })
+
+    it("never wraps sequence 0 into the previous key", async () => {
+        const store = newStore()
+        // Exactly nonce - 1 of the candidate below: the last sequence of
+        // key 0.
+        await store.addProcessing({
+            entryPoint,
+            userOpInfo: at(1, (0n << 64n) | 0xffffffffffffffffn)
+        })
+
+        expect(
+            await store.hasPendingPredecessor({
+                entryPoint,
+                userOp: at(2, (1n << 64n) | 0n).userOp
+            })
+        ).toBe(false)
+    })
+
+    it("ignores a same-sender deployment at another nonce", async () => {
+        const store = newStore()
+        await store.addProcessing({
+            entryPoint,
+            userOpInfo: at(1, 5n, { initCode: INIT_CODE })
+        })
+
+        expect(
+            await store.hasPendingPredecessor({
+                entryPoint,
+                userOp: at(2, 2n, { initCode: INIT_CODE }).userOp
+            })
+        ).toBe(false)
     })
 })

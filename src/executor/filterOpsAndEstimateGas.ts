@@ -32,6 +32,7 @@ import type { AltoConfig } from "../createConfig"
 import { pimlicoSimulationsAbi } from "../types/contracts/PimlicoSimulations"
 import { getEip7702DelegationOverrides } from "../utils/eip7702"
 import { getFilterOpsStateOverride } from "../utils/entryPointOverrides"
+import { getEthCallSender } from "./senderManager"
 import {
     calculateAA95GasFloor,
     encodeHandleOpsCalldata,
@@ -247,6 +248,8 @@ const getFilterOpsResult = async ({
     ]
 
     const callResult = await publicClient.call({
+        // Simulate from an executor, not the zero address (upstream Alto #817)
+        account: getEthCallSender({ config }),
         to: pimlicoSimulationContract,
         gas: fixedGasLimitForEstimation,
         data,
