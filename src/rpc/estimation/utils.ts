@@ -140,7 +140,8 @@ export const simulationErrors = parseAbi([
 
 export function decodeSimulateHandleOpError(
     error: unknown,
-    logger: Logger
+    logger: Logger,
+    accountExecutionIsTarget = true
 ): SimulateHandleOpResult {
     // Check if it's a BaseError with ContractFunctionRevertedError
     if (!(error instanceof BaseError)) {
@@ -260,7 +261,11 @@ export function decodeSimulateHandleOpError(
             return {
                 result: "failed",
                 data: args[0] as Hex,
-                code: ValidationErrors.SimulateValidation
+                code: ValidationErrors.SimulateValidation,
+                ...(accountExecutionIsTarget &&
+                    args[0] !== "0x" && {
+                        faultOrigin: "account_execution"
+                    })
             }
 
         case "Error":

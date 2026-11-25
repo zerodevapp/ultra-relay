@@ -196,7 +196,8 @@ describe("GasEstimator07.simulateHandleOp07 call-gas revert flag", () => {
             expect(result).toEqual({
                 result: "failed",
                 data: TRANSFER_FROM_FAILED,
-                code: -32521
+                code: -32521,
+                faultOrigin: "account_execution"
             })
         }
     )

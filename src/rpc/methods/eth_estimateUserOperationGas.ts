@@ -31,6 +31,7 @@ type GasEstimateResult =
           status: "failed"
           error: string
           code?: number
+          faultOrigin?: "account_execution"
       }
 
 function calcVerificationGasAndCallGasLimit(
@@ -161,7 +162,8 @@ const getGasEstimates = async ({
         return {
             status: "failed",
             error: executionResult.data,
-            code: executionResult.code
+            code: executionResult.code,
+            faultOrigin: executionResult.faultOrigin
         }
     }
 
@@ -309,7 +311,14 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
 
         // Validate gas estimation result first
         if (gasEstimateResult.status === "failed") {
-            throw new RpcError(gasEstimateResult.error, gasEstimateResult.code)
+            const { error, code, faultOrigin } = gasEstimateResult
+            const hasStateOverrides =
+                stateOverrides && Object.keys(stateOverrides).length > 0
+            throw new RpcError(
+                error,
+                code,
+                faultOrigin && !hasStateOverrides ? { faultOrigin } : undefined
+            )
         }
 
         // Now calculate execution gas component with the estimated gas values

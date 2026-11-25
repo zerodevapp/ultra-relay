@@ -53,6 +53,15 @@ function searchRevertFailure(data: {
     }
 }
 
+function callGasSearchFailure(
+    data: Parameters<typeof searchRevertFailure>[0]
+): Extract<SimulateHandleOpResult, { result: "failed" }> | null {
+    const failure = searchRevertFailure(data)
+    // Empty return data can also be caused by the simulator running out of gas.
+    if (!failure || data.returnData === "0x") return failure
+    return { ...failure, faultOrigin: "account_execution" }
+}
+
 export class GasEstimator07 {
     private config: AltoConfig
     private logger: Logger
@@ -248,7 +257,11 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(
+                error,
+                this.logger,
+                queuedUserOps.length === 0
+            )
             this.logger.warn(
                 { err: error, data: decodedError.data },
                 "Contract function reverted in executeSimulateHandleOp"
@@ -402,7 +415,11 @@ export class GasEstimator07 {
                 executionResult: simulationResult
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(
+                error,
+                this.logger,
+                queuedUserOps.length === 0
+            )
             this.logger.warn(
                 { err: error, data: decodedError.data },
                 "Contract function reverted in simulateValidation"
@@ -453,7 +470,11 @@ export class GasEstimator07 {
                 data: result
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(
+                error,
+                this.logger,
+                queuedUserOps.length === 0
+            )
             this.logger.warn(
                 { err: error, data: decodedError.data },
                 "Contract function reverted in simulateValidation"
@@ -510,7 +531,11 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(
+                error,
+                this.logger,
+                queuedUserOps.length === 0
+            )
             this.logger.warn(
                 { err: error, data: decodedError.data },
                 "Contract function reverted in validateHandleOpV07"
@@ -594,7 +619,7 @@ export class GasEstimator07 {
             // Empty callData skips the call phase: the search returns
             // success=false with nothing reverted, and callGasLimit stays 0.
             if (userOp.callData !== "0x") {
-                const callGasRevert = searchRevertFailure(bscgl.data)
+                const callGasRevert = callGasSearchFailure(bscgl.data)
                 if (callGasRevert) {
                     return callGasRevert
                 }
@@ -638,7 +663,7 @@ export class GasEstimator07 {
         // Empty callData skips the call phase: the search returns
         // success=false with nothing reverted, and callGasLimit stays 0.
         if (userOp.callData !== "0x") {
-            const callGasRevert = searchRevertFailure(focgl.data)
+            const callGasRevert = callGasSearchFailure(focgl.data)
             if (callGasRevert) {
                 return callGasRevert
             }

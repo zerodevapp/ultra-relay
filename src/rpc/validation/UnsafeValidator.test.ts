@@ -217,6 +217,35 @@ describe("UnsafeValidator.validateHandleOp second validation", () => {
         })
     })
 
+    test.each([false, true])(
+        "final validation trusts the execution marker without caller overrides (overrides=%s)",
+        async (overrides) => {
+            const revert = {
+                result: "failed",
+                data: TRANSFER_FROM_FAILED,
+                code: -32521,
+                faultOrigin: "account_execution"
+            } as const
+            const { validator } = setup([revert, revert])
+
+            await expect(
+                validator.validateHandleOp({
+                    ...argsFor(userOp07),
+                    stateOverrides: overrides
+                        ? { [userOp07.sender]: { code: "0x" } }
+                        : undefined
+                })
+            ).rejects.toMatchObject({
+                code: -32521,
+                message:
+                    "UserOperation reverted during simulation with reason: TRANSFER_FROM_FAILED",
+                data: overrides
+                    ? undefined
+                    : { faultOrigin: "account_execution" }
+            })
+        }
+    )
+
     test("AA23 on both attempts: -32500 with the raw AA23 message, retry used doubled verificationGasLimit", async () => {
         const { validator, spy } = setup([
             FAIL("AA23 reverted 0x"),
@@ -289,7 +318,8 @@ describe("UnsafeValidator.getExecutionResult with the estimator's failed result"
         const validator = stubSimulation({
             result: "failed",
             data: TRANSFER_FROM_FAILED,
-            code: -32521
+            code: -32521,
+            faultOrigin: "account_execution"
         })
 
         const result = await validator.getExecutionResult(argsFor(userOp07))
@@ -297,11 +327,12 @@ describe("UnsafeValidator.getExecutionResult with the estimator's failed result"
         expect(result).toEqual({
             result: "failed",
             data: "UserOperation reverted during simulation with reason: TRANSFER_FROM_FAILED",
-            code: -32521
+            code: -32521,
+            faultOrigin: "account_execution"
         })
     })
 
-    test("formats an empty-bytes revert as -32521 with reason 0x", async () => {
+    test("keeps an ambiguous estimator failure unmarked even when it uses -32521", async () => {
         const validator = stubSimulation({
             result: "failed",
             data: "0x",
