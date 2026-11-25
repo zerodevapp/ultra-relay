@@ -3,6 +3,7 @@ forge-std/=lib/forge-std/src/
 solady/=lib/solady/src/
 
 @openzeppelin-v4.8.3/=lib/openzeppelin-contracts-v4.8.3/
+@openzeppelin/contracts/=lib/openzeppelin-contracts-v5.0.2/contracts/
 @openzeppelin-v5.0.2/=lib/openzeppelin-contracts-v5.0.2/
 @openzeppelin-v5.1.0/=lib/openzeppelin-contracts-v5.1.0/
 
