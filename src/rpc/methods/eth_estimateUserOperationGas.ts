@@ -266,7 +266,7 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
     schema: estimateUserOperationGasSchema,
     handler: async ({ rpcHandler, apiVersion, params }) => {
         const [userOp, entryPoint, stateOverrides] = params
-        rpcHandler.ensureEntryPointIsSupported(entryPoint)
+        rpcHandler.ensureEntryPointIsSupported(entryPoint, userOp)
 
         // Extract all config values at the beginning
         const {
