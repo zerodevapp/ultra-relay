@@ -39,6 +39,7 @@ export class BundleManager {
     private senderManager: SenderManager
     private cachedLatestBlock: { value: bigint; timestamp: number } | null
     private pendingBundles: Map<string, SubmittedBundleInfo> = new Map()
+    private releasedExecutors: Set<string> = new Set()
     private receiptCache: ReceiptCache
     private gasPriceManager: GasPriceManager
 
@@ -146,6 +147,8 @@ export class BundleManager {
         if (failure) {
             throw failure.reason
         }
+
+        this.stopTrackingBundle(submittedBundle)
     }
 
     /**
@@ -170,6 +173,7 @@ export class BundleManager {
         const { blockNumber, transactionHash } = bundleReceipt
 
         await this.freeSubmittedBundle(submittedBundle)
+        this.stopTrackingBundle(submittedBundle)
 
         const networkBaseFee = this.config.legacyTransactions
             ? 0n
@@ -260,19 +264,22 @@ export class BundleManager {
         return latestBlock
     }
 
-    // Free executors and remove userOps from mempool.
+    // Free executors at most once per bundle UID and remove userOps from mempool.
     private async freeSubmittedBundle(submittedBundle: SubmittedBundleInfo) {
-        const { executor, bundle } = submittedBundle
+        const { uid, executor, bundle } = submittedBundle
         const { userOps, entryPoint } = bundle
 
-        this.stopTrackingBundle(submittedBundle)
-        await this.senderManager.markWalletProcessed(executor)
+        if (!this.releasedExecutors.has(uid)) {
+            await this.senderManager.markWalletProcessed(executor)
+            this.releasedExecutors.add(uid)
+        }
         await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
     }
 
-    // Stop tracking bundle in event resubmit fails
+    // Stop tracking bundle once settle completes or resubmit takes ownership
     public stopTrackingBundle(submittedBundle: SubmittedBundleInfo) {
         this.pendingBundles.delete(submittedBundle.uid)
+        this.releasedExecutors.delete(submittedBundle.uid)
     }
 
     private async processIncludedUserOp(
