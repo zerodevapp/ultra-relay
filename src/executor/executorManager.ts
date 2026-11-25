@@ -768,8 +768,9 @@ export class ExecutorManager {
         } catch (err) {
             this.logger.error(
                 { err, transactionHash: receipt.transactionHash },
-                "failed to process the sync send receipt"
+                "failed to process the sync send receipt, falling back to block tracking"
             )
+            return false
         }
         return true
     }
