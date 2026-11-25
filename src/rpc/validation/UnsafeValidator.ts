@@ -192,12 +192,17 @@ export class UnsafeValidator implements InterfaceValidator {
         // 2. AA21 didn't pay prefund
         if (error.result === "failed") {
             const data = error.data.toString()
+            const hasStateOverrides =
+                stateOverrides && Object.keys(stateOverrides).length > 0
 
             if (data.includes("AA31") || data.includes("AA21")) {
                 const decodedReason = decodeRevertReason(data)
                 throw new RpcError(
                     `UserOperation reverted during simulation with reason: ${decodedReason}`,
-                    ExecutionErrors.UserOperationReverted
+                    ExecutionErrors.UserOperationReverted,
+                    error.faultOrigin && !hasStateOverrides
+                        ? { faultOrigin: error.faultOrigin }
+                        : undefined
                 )
             }
 
@@ -261,6 +266,10 @@ export class UnsafeValidator implements InterfaceValidator {
 
             if (retryError.result === "failed") {
                 const retryData = retryError.data.toString()
+                const rpcData =
+                    retryError.faultOrigin && !hasStateOverrides
+                        ? { faultOrigin: retryError.faultOrigin }
+                        : undefined
 
                 this.logger.warn(
                     { data: retryData },
@@ -270,13 +279,15 @@ export class UnsafeValidator implements InterfaceValidator {
                 if (retryData.includes("AA23")) {
                     throw new RpcError(
                         retryData,
-                        ValidationErrors.SimulateValidation
+                        ValidationErrors.SimulateValidation,
+                        rpcData
                     )
                 }
 
                 throw new RpcError(
                     `UserOperation reverted during simulation with reason: ${decodeRevertReason(retryData)}`,
-                    ExecutionErrors.UserOperationReverted
+                    ExecutionErrors.UserOperationReverted,
+                    rpcData
                 )
             }
         }
@@ -318,7 +329,8 @@ export class UnsafeValidator implements InterfaceValidator {
                 return {
                     result: "failed",
                     data: error.data,
-                    code: errorCode
+                    code: errorCode,
+                    ...(error.faultOrigin && { faultOrigin: error.faultOrigin })
                 }
             }
 
@@ -326,7 +338,8 @@ export class UnsafeValidator implements InterfaceValidator {
             return {
                 result: "failed",
                 data: `UserOperation reverted during simulation with reason: ${decodedReason}`,
-                code: errorCode
+                code: errorCode,
+                ...(error.faultOrigin && { faultOrigin: error.faultOrigin })
             }
         }
 

@@ -355,7 +355,7 @@ describe.each([
                     "UserOperation reverted during simulation with reason: "
                 )
             ).toBe(true)
-            expect(rpcError.data).toBeUndefined()
+            expect(rpcError.data).toEqual({ faultOrigin: "account_execution" })
         })
 
         test("Should validate eip7702Auth", async () => {

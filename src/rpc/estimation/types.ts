@@ -11,6 +11,7 @@ export type SimulateHandleOpResult =
           result: "failed"
           data: string
           code: number
+          faultOrigin?: "account_execution"
       }
     | {
           result: "execution"
