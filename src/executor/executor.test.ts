@@ -7,8 +7,11 @@ import {
     ContractFunctionExecutionError,
     HttpRequestError,
     InsufficientFundsError,
+    LimitExceededRpcError,
+    RpcRequestError,
     TimeoutError,
     TransactionExecutionError,
+    UnknownRpcError,
     createPublicClient,
     createWalletClient
 } from "viem"
@@ -330,6 +333,50 @@ describe("Executor.bundle send failure classification", () => {
     const http413 = () =>
         new HttpRequestError({ url: "http://node", status: 413 })
     const timeout = () => new TimeoutError({ url: "http://node", body: {} })
+    const httpStatus = (status: number) => () =>
+        new HttpRequestError({ url: "http://node", status })
+    // How viem surfaces a JSON-RPC error body: the RpcRequestError keeps the
+    // provider's code, wrapped in a typed error (LimitExceededRpcError for
+    // -32005, UnknownRpcError for codes it has no class for).
+    const rpcError = (code: number) =>
+        new RpcRequestError({
+            body: {},
+            error: { code, message: "provider error" },
+            url: "http://node"
+        })
+
+    it.each([
+        ["a bare HttpRequestError 429", httpStatus(429)],
+        [
+            "an execution error wrapping HttpRequestError 429",
+            () => executionError(httpStatus(429)())
+        ],
+        ["a bare HttpRequestError 408", httpStatus(408)],
+        [
+            "an execution error wrapping JSON-RPC code 429",
+            () => executionError(new UnknownRpcError(rpcError(429)))
+        ],
+        [
+            "an execution error wrapping LimitExceededRpcError (-32005)",
+            () => executionError(new LimitExceededRpcError(rpcError(-32005)))
+        ],
+        [
+            "an execution error wrapping JSON-RPC code -32007",
+            () => executionError(new UnknownRpcError(rpcError(-32007)))
+        ]
+    ])("returns send_transport_error for a rate limit: %s", async (_, make) => {
+        expect(await run(make())).toMatchObject({
+            success: false,
+            reason: "send_transport_error",
+            recoverableOps: userOpsToBundle
+        })
+    })
+
+    it("keeps generic_error for a JSON-RPC rejection that is not a rate limit", async () => {
+        expect(
+            await run(executionError(new UnknownRpcError(rpcError(-32000))))
+        ).toMatchObject({ reason: "generic_error" })
+    })
 
     it.each([
         [

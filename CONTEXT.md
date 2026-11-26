@@ -73,7 +73,7 @@ that it is mined instead of the original. Avoid: **resubmit** for this.
 ### Infrastructure failure
 A failed bundle attempt caused by the relay's own dependencies: fetching the
 nonce or fees, acquiring an executor wallet, an executor wallet without funds,
-a transport failure while sending the bundle transaction, a mempool store
+a transport failure or rate limit while sending the bundle transaction, a mempool store
 write, or the internal bundle hand-off. It never counts
 against a user operation.
 

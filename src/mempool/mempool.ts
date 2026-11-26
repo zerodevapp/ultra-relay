@@ -69,7 +69,8 @@ export const INFRASTRUCTURE_FAILURE_REASONS: ReadonlySet<string> = new Set([
     "stuck_bundle_detach_failed",
     // Mempool.process, onBundle hand-off threw
     "bundle_handoff_failed",
-    // Executor.bundle send catch, HttpRequestError/TimeoutError in the cause chain
+    // Executor.bundle send catch: a transport failure or rate limit in the
+    // cause chain (see isSendTransportError)
     "send_transport_error"
 ])
 

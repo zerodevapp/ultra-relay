@@ -64,9 +64,13 @@ uncapped. It sends no transaction, burns no gas, and fails every bundle equally
 instead of trapping specific user operations.
 
 `send_transport_error` is returned when the send fails with a `TimeoutError`,
-or with an `HttpRequestError` that has no status (a network failure) or a
-status of 500 or more. A 4xx (for example a gateway 413) stays `generic_error`
-and counts, so a deterministic rejection is still bounded.
+with an `HttpRequestError` that has no status (a network failure), a status of
+500 or more, or a status of 408 or 429, or with a JSON-RPC rate-limit code
+(429, `-32005` from `LimitExceededRpcError`, or QuickNode's `-32007`). These
+are the same codes viem's own retry logic treats as transient. A rejected send
+spends no gas, so counting a rate limit would only drop valid user operations.
+Any other 4xx (for example a gateway 413) stays `generic_error` and counts, so
+a deterministic rejection is still bounded.
 
 `oversized_bundle` counts, because isolation re-packs the user operation and a
 lone user operation over the cap is already dropped.
@@ -235,7 +239,10 @@ executors would pass simulation from key 0 while a bundle from another key
 reverts. Our pods share one key list, so allowlists cover all our executors or
 none, and the limit and isolation bound the damage in the remaining case. Key 0
 is always a wallet this pod can send from: the sender manager trims the list to
-`maxExecutors` from the front.
+`maxExecutors` from the front. An empty key list can only come from a config
+file (the CLI flag is required and its comma-separated form needs at least one
+key); the bundler logs a warning at startup in that case, because no bundle
+can be sent and simulation would run without a sender.
 
 ### M2. The counter: mirror upstream
 
@@ -257,8 +264,16 @@ cycles instead of the count since the last re-add.
 `--max-resubmits`, as upstream, in the executor options group next to
 `max-stuck-attempts-before-rotation` (as upstream does). It is an integer with
 a minimum of 0; 0 drops a user operation at its first counted failure.
-Divergence: the default is 3, where upstream's is unset (unlimited), as
-ZER-1010 asks. The help text states that only counted failures count.
+Divergence: the default is 7, where upstream's is unset (unlimited), as
+ZER-1010 asks for a bound. It sits just above a full stuck-bundle cycle: 1 send,
+4 fee bumps and 1 rotation send make 6 attempts with the default
+`max-stuck-attempts-before-rotation` of 5, so a user operation that went
+through that cycle still gets one retry before the limit drops it. We keep
+upstream's single counter rather than adding a separate failure counter, to
+keep the diff against upstream small so later upstream merges stay easy; the
+higher default is how we absorb fee bumps instead. The help text states that
+only counted failures count and that the value should stay above
+`max-stuck-attempts-before-rotation` + 1.
 
 ### M4. The drop metric: mirror upstream
 
@@ -284,7 +299,7 @@ label. The drop emits the existing `dropped` event and the client status
 | Flag name | `max-resubmits` | mirrored | |
 | Drop reason string | `max resubmits reached` | mirrored | |
 | Drop counter | generic, in `dropUserOps` | mirrored | |
-| Flag default | unset (unlimited) | 3 | ZER-1010 asks for a bound |
+| Flag default | unset (unlimited) | 7 | ZER-1010 asks for a bound; above a full stuck-bundle cycle |
 | Failures counted | every reason | all but infrastructure failures | valid user operations must survive our own outage |
 | Isolation | none | retried user operations go alone | one bad user operation must not fail its bundle-mates |
 | Successor hold | none | every nonce sequence above 0 | isolation would otherwise cause `AA25` drops |
@@ -292,20 +307,21 @@ label. The drop emits the existing `dropped` event and the client status
 | Re-add order | parallel | nonce order per nonce slot | the hold cannot see a user operation in no store |
 | Metric label | raw reason | AA code, limit reason or `other` | bounded label set |
 
-## Worked numbers for the default of 3
+## Worked numbers for the default of 7
 
 Submission attempts is "sends + replacements + counted failures", not a plain
-attempt count, so the limit acts earlier than 3 tries.
+attempt count, so the limit acts earlier than 7 tries.
 
-- **Reverts on-chain every time:** send makes it 1, the revert resubmit sees
-  1 < 3 and re-adds at 2, the next send makes it 3, the second revert sees
-  3 >= 3 and drops. Dropped at the second on-chain revert.
-- **Send rejected every time (`generic_error`, no successful send):** 0, 1, 2,
-  3, then the fourth rejection sees 3 >= 3 and drops. Dropped at the fourth
-  rejection.
-- **Stuck, then replaced several times:** each replacement adds 1, so a user
-  operation can reach 3 from fee bumps alone and be dropped at its first
-  counted failure.
+- **Reverts on-chain every time:** each send adds 1 and each revert resubmit
+  adds 1, so the reverts happen at 1, 3, 5 and 7; the fourth revert sees
+  7 >= 7 and drops. Dropped at the fourth on-chain revert.
+- **Send rejected every time (`generic_error`, no successful send):** 0, 1, …,
+  6, then the eighth rejection sees 7 >= 7 and drops. Dropped at the eighth
+  rejection. Transport failures and rate limits never count.
+- **Stuck, then replaced:** a full stuck-bundle cycle (send, 4 fee bumps,
+  rotation send) reaches 6. The first counted failure after it re-adds at 7
+  and the user operation gets one isolated retry; a second counted failure
+  drops it.
 
 ## Relationship to ADR 0001
 
@@ -337,13 +353,17 @@ sum by (instance) (rate(ultra_relay_user_operations_dropped_total{reason="max re
   `send_bundle_unexpected_error`.
 - **Arrival validation still simulates without a sender.** Upstream #826 moved
   v0.6 validation to an executor sender. Consider mirroring it separately.
-- **No stale-user-operation expiry.** The limit does not cover an empty
-  executor wallet, and some keepers may want an age limit.
+- **No stale-user-operation expiry, and `insufficient_funds` is never
+  counted.** That is right for an empty wallet, but the same error also occurs
+  when one user operation makes a bundle cost more than the wallet holds. Such
+  a bundle is put back whole, uncounted and not isolated, so the user operation
+  retries without limit and can keep its bundle-mates in the loop with it. This
+  predates this change. Follow-up: an age limit, and an alert such as
+  `sum by (instance) (rate(ultra_relay_user_operations_resubmitted_total{reason="insufficient_funds"}[5m])) > 0`
+  sustained for several minutes.
 - **Bound wallet waiters across ticks.** Isolation increases the bundle count
   while wallets are busy, so waiters for a wallet can pile up across ticks.
 - **A resend after a cap drop gets a fresh budget.** By design, as upstream: a
   dropped user operation that the client sends again starts at 0.
-- **A plain-text 429 counts as `generic_error`.** Only transport failures are
-  classified as infrastructure failures.
 - **ZER-1350's operational items** are not code here: the gateway block, more
   executor wallets, top-up, and low-balance and failed-bundle alerts.

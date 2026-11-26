@@ -26,8 +26,10 @@ import {
     HttpRequestError,
     InsufficientFundsError,
     IntrinsicGasTooLowError,
+    LimitExceededRpcError,
     NonceTooHighError,
     NonceTooLowError,
+    RpcRequestError,
     TimeoutError,
     TransactionExecutionError
 } from "viem"
@@ -54,19 +56,37 @@ import {
 // "replacement transaction underpriced".
 const REPLACEMENT_MIN_BUMP_PERCENT = 113n
 
-// The node that takes the bundle transaction failed at the transport level:
-// a timeout, no response at all (status undefined), or a 5xx. Walks the cause
-// chain so it matches a bare error and one wrapped in a
-// TransactionExecutionError alike. A 4xx is the node or gateway refusing this
-// transaction (for example a 413), so it must count toward the resubmit cap
-// and falls through to the normal classification.
+// HTTP statuses that mean the endpoint could not take the request right now
+// (request timeout, rate limit), not that it refused this transaction.
+const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429])
+
+// JSON-RPC codes providers use for rate limiting: 429 (e.g. Alchemy),
+// LimitExceededRpcError (-32005) and QuickNode's -32007. viem's own retry
+// logic (shouldRetry in utils/buildRequest) treats the same codes as transient.
+const RATE_LIMIT_RPC_CODES: ReadonlySet<number> = new Set([
+    429,
+    LimitExceededRpcError.code,
+    -32007
+])
+
+// The node that takes the bundle transaction failed at the transport level or
+// rate-limited us: a timeout, no response at all (status undefined), a 5xx,
+// an HTTP 408 or 429, or a JSON-RPC rate-limit code. A rejected send spends no
+// gas, so counting it toward the resubmit cap would only drop valid userOps.
+// Walks the cause chain so it matches a bare error and one wrapped in a
+// TransactionExecutionError alike. Any other 4xx is the node or gateway
+// refusing this transaction (for example a 413), so it must count toward the
+// resubmit cap and falls through to the normal classification.
 const isSendTransportError = (err: unknown): boolean =>
     err instanceof BaseError &&
     err.walk(
         (e) =>
             e instanceof TimeoutError ||
             (e instanceof HttpRequestError &&
-                (e.status === undefined || e.status >= 500))
+                (e.status === undefined ||
+                    e.status >= 500 ||
+                    TRANSIENT_HTTP_STATUSES.has(e.status))) ||
+            (e instanceof RpcRequestError && RATE_LIMIT_RPC_CODES.has(e.code))
     ) !== null
 
 type HandleOpsTxParams = {

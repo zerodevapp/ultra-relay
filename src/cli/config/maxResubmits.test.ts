@@ -5,8 +5,10 @@ import { executorArgsSchema } from "./bundler"
 describe("max-resubmits option", () => {
     const maxResubmits = executorArgsSchema.shape["max-resubmits"]
 
-    it("defaults to 3", () => {
-        expect(maxResubmits.parse(undefined)).toBe(3)
+    // 7 sits just above a full stuck-bundle cycle (1 send + 4 fee bumps + 1
+    // rotation send = 6 attempts), so such a userOp still gets one retry.
+    it("defaults to 7", () => {
+        expect(maxResubmits.parse(undefined)).toBe(7)
     })
 
     it("accepts 0", () => {
