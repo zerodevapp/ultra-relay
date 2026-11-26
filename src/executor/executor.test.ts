@@ -3,12 +3,36 @@ import type { AddressInfo } from "node:net"
 import type { AltoConfig } from "@alto/cli"
 import type { EventManager } from "@alto/handlers"
 import type { Logger } from "@alto/utils"
-import { createPublicClient, createWalletClient } from "viem"
+import {
+    ContractFunctionExecutionError,
+    HttpRequestError,
+    InsufficientFundsError,
+    LimitExceededRpcError,
+    RpcRequestError,
+    TimeoutError,
+    TransactionExecutionError,
+    UnknownRpcError,
+    createPublicClient,
+    createWalletClient
+} from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { foundry } from "viem/chains"
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import {
+    afterAll,
+    beforeAll,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    vi
+} from "vitest"
 import { customTransport } from "../cli/customTransport"
 import { Executor } from "./executor"
+import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
+
+vi.mock("./filterOpsAndEstimateGas", () => ({
+    filterOpsAndEstimateGas: vi.fn()
+}))
 
 vi.hoisted(() => {
     process.env.BETTER_STACK_TOKEN = ""
@@ -234,5 +258,186 @@ describe("getBundleGasPrice on arbitrum", () => {
             maxFeePerGas: 220_000_000n,
             maxPriorityFeePerGas: 200_000_000n
         })
+    })
+})
+
+describe("Executor.bundle send failure classification", () => {
+    const logger = {
+        isLevelEnabled: () => false,
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+        child: () => logger
+    } as unknown as Logger
+    const userOpInfo = {
+        userOp: { sender: "0x1111111111111111111111111111111111111111" },
+        userOpHash: `0x${"11".repeat(32)}`,
+        addedToMempool: 0,
+        submissionAttempts: 0
+    }
+    const userOpsToBundle = [userOpInfo, { ...userOpInfo, userOpHash: "0x22" }]
+    const account = privateKeyToAccount(
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    )
+    const executionError = (cause: Error) =>
+        new TransactionExecutionError(
+            cause as never,
+            {
+                account,
+                chain: foundry
+            } as never
+        )
+
+    const run = async (sendError: unknown) => {
+        const executor = new Executor({
+            config: {
+                getLogger: () => logger,
+                chainType: "default",
+                legacyTransactions: false,
+                bundlerInitialCommission: 0n,
+                resubmitMultiplierCeiling: 0n
+            } as unknown as AltoConfig,
+            eventManager: {} as EventManager
+        })
+        vi.spyOn(executor, "sendHandleOpsTransaction").mockRejectedValue(
+            sendError
+        )
+        return executor.bundle({
+            executor: account,
+            userOpBundle: {
+                entryPoint: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+                version: "0.6",
+                userOps: userOpsToBundle,
+                submissionAttempts: 0
+            } as never,
+            networkGasPrice: { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n },
+            networkBaseFee: 1n,
+            nonce: 0
+        })
+    }
+
+    beforeEach(() => {
+        vi.mocked(filterOpsAndEstimateGas).mockResolvedValue({
+            status: "success",
+            userOpsToBundle,
+            rejectedUserOps: [],
+            bundleGasUsed: 1n,
+            bundleGasLimit: 1n,
+            totalBeneficiaryFees: 0n
+        } as never)
+    })
+
+    const http503 = () =>
+        new HttpRequestError({ url: "http://node", status: 503 })
+    const http413 = () =>
+        new HttpRequestError({ url: "http://node", status: 413 })
+    const timeout = () => new TimeoutError({ url: "http://node", body: {} })
+    const httpStatus = (status: number) => () =>
+        new HttpRequestError({ url: "http://node", status })
+    // How viem surfaces a JSON-RPC error body: the RpcRequestError keeps the
+    // provider's code, wrapped in a typed error (LimitExceededRpcError for
+    // -32005, UnknownRpcError for codes it has no class for).
+    const rpcError = (code: number) =>
+        new RpcRequestError({
+            body: {},
+            error: { code, message: "provider error" },
+            url: "http://node"
+        })
+
+    it.each([
+        ["a bare HttpRequestError 429", httpStatus(429)],
+        [
+            "an execution error wrapping HttpRequestError 429",
+            () => executionError(httpStatus(429)())
+        ],
+        ["a bare HttpRequestError 408", httpStatus(408)],
+        [
+            "an execution error wrapping JSON-RPC code 429",
+            () => executionError(new UnknownRpcError(rpcError(429)))
+        ],
+        [
+            "an execution error wrapping LimitExceededRpcError (-32005)",
+            () => executionError(new LimitExceededRpcError(rpcError(-32005)))
+        ],
+        [
+            "an execution error wrapping JSON-RPC code -32007",
+            () => executionError(new UnknownRpcError(rpcError(-32007)))
+        ]
+    ])("returns send_transport_error for a rate limit: %s", async (_, make) => {
+        expect(await run(make())).toMatchObject({
+            success: false,
+            reason: "send_transport_error",
+            recoverableOps: userOpsToBundle
+        })
+    })
+
+    it("keeps generic_error for a JSON-RPC rejection that is not a rate limit", async () => {
+        expect(
+            await run(executionError(new UnknownRpcError(rpcError(-32000))))
+        ).toMatchObject({ reason: "generic_error" })
+    })
+
+    it.each([
+        [
+            "an execution error wrapping HttpRequestError 503",
+            () => executionError(http503())
+        ],
+        [
+            "an execution error wrapping TimeoutError",
+            () => executionError(timeout())
+        ],
+        ["a bare HttpRequestError", http503],
+        ["a bare TimeoutError", timeout],
+        [
+            "an HttpRequestError with no status",
+            () => new HttpRequestError({ url: "http://node" })
+        ]
+    ])("returns send_transport_error for %s", async (_, make) => {
+        expect(await run(make())).toMatchObject({
+            success: false,
+            reason: "send_transport_error",
+            recoverableOps: userOpsToBundle
+        })
+    })
+
+    it("keeps generic_error for a contract execution revert", async () => {
+        const err = new ContractFunctionExecutionError(
+            new Error("execution reverted") as never,
+            { abi: [], functionName: "handleOps" } as never
+        )
+        expect(await run(err)).toMatchObject({ reason: "generic_error" })
+    })
+
+    it.each([
+        ["a bare HttpRequestError 413", () => http413()],
+        [
+            "an execution error wrapping HttpRequestError 413",
+            () => executionError(http413())
+        ]
+    ])("keeps generic_error for %s", async (_, make) => {
+        expect(await run(make())).toMatchObject({ reason: "generic_error" })
+    })
+
+    it("keeps generic_error for an unknown non-viem error", async () => {
+        expect(await run(new Error("boom"))).toMatchObject({
+            reason: "generic_error"
+        })
+    })
+
+    it("keeps oversized_bundle for an oversize rejection", async () => {
+        expect(
+            await run(executionError(new Error("oversized data")))
+        ).toMatchObject({ reason: "oversized_bundle" })
+    })
+
+    it("keeps insufficient_funds for InsufficientFundsError", async () => {
+        expect(
+            await run(
+                executionError(
+                    new InsufficientFundsError({ cause: new Error("x") })
+                )
+            )
+        ).toMatchObject({ reason: "insufficient_funds" })
     })
 })

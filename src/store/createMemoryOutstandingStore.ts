@@ -196,13 +196,13 @@ export class MemoryOutstanding implements OutstandingStore {
         // Note: the userOpInfo is always added to backlogOps, because we are pushing to a reference
         backlogOps.push(userOpInfo)
 
-        backlogOps
-            .map((sop) => sop.userOp)
-            .sort((a, b) => {
-                const [, aNonceSeq] = getNonceKeyAndSequence(a.nonce)
-                const [, bNonceSeq] = getNonceKeyAndSequence(b.nonce)
-                return Number(aNonceSeq) - Number(bNonceSeq)
-            })
+        // mirrors upstream src/store/outstanding/memory.ts; the old code sorted a mapped copy and kept insertion order
+        backlogOps.sort((a, b) => {
+            const [, aNonceSeq] = getNonceKeyAndSequence(a.userOp.nonce)
+            const [, bNonceSeq] = getNonceKeyAndSequence(b.userOp.nonce)
+            if (aNonceSeq === bNonceSeq) return 0
+            return aNonceSeq < bNonceSeq ? -1 : 1
+        })
 
         const lowestUserOpHash = backlogOps[0].userOpHash
 

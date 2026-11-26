@@ -8,6 +8,7 @@ import type {
 import type { Hex } from "viem"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { BundleManager } from "./bundleManager"
+import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import type { BundleStatus, BundleTransactionReceipt } from "./getBundleStatus"
 
 // See executorManager.test.ts: keeps utils/logger from opening a Logtail
@@ -26,6 +27,10 @@ const { redisSetex, FakeRedis } = vi.hoisted(() => {
     }
     return { redisSetex, FakeRedis }
 })
+
+vi.mock("./filterOpsAndEstimateGas", () => ({
+    filterOpsAndEstimateGas: vi.fn()
+}))
 
 vi.mock("ioredis", () => ({ default: FakeRedis, Redis: FakeRedis }))
 
@@ -644,5 +649,53 @@ describe("BundleManager.processIncludedBundle", () => {
         expect(run.state.error).toBeInstanceOf(TypeError)
         expect(calledHashes(h.emitIncludedOnChain)).toEqual(hashes([op1, op3]))
         expect(h.updateUserOpIncludedStatus).toHaveBeenCalledTimes(2)
+    })
+})
+
+describe("BundleManager.processRevertedBundle", () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it("resubmits the userOps that pass re-simulation with their submissionAttempts, as sibling_op_reverted", async () => {
+        const h = createHarness()
+        const resubmitUserOps = vi.fn().mockResolvedValue(undefined)
+        Object.assign(
+            (h.bundleManager as unknown as { mempool: object }).mempool,
+            { resubmitUserOps }
+        )
+        const opB = makeUserOpInfo(2)
+        vi.mocked(filterOpsAndEstimateGas).mockResolvedValueOnce({
+            status: "success",
+            userOpsToBundle: [opB],
+            rejectedUserOps: []
+        } as unknown as Awaited<ReturnType<typeof filterOpsAndEstimateGas>>)
+
+        const submittedBundle = makeSubmittedBundle([makeUserOpInfo(1), opB])
+        const inner = await h.bundleManager.processRevertedBundle({
+            submittedBundle,
+            blockReceivedTimestamp: 5000,
+            bundleReceipt: {
+                status: "reverted",
+                transactionHash: TX,
+                blockNumber: 2n
+            } as unknown as BundleStatus<"reverted">,
+            block: { baseFeePerGas: 1n } as never
+        })
+        await inner
+
+        expect(resubmitUserOps.mock.calls).toEqual([
+            [
+                {
+                    userOps: [opB],
+                    entryPoint: ENTRY_POINT,
+                    reason: "sibling_op_reverted"
+                }
+            ]
+        ])
+        // The mempool, not the bundle manager, increments the count.
+        expect(
+            resubmitUserOps.mock.calls[0][0].userOps[0].submissionAttempts
+        ).toBe(1)
     })
 })

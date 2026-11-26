@@ -32,7 +32,7 @@ Resolved per chain (chainId, then chain family, then a conservative default).
 ### Oversized bundle
 A bundle whose handleOps transaction would exceed a bundle cap (gas or bytes)
 and so be rejected by the node before inclusion. The bundler avoids forming
-one, and recovers any that slip through rather than resubmitting it unchanged.
+one, and recovers any that slip through rather than sending it again unchanged.
 
 ### Deployment operation
 A user operation that deploys its smart account as part of execution (carries
@@ -51,6 +51,57 @@ The observable journey of a user operation through the bundler: received →
 validated → mempool stages (outstanding → processing → submitted) → a terminal
 outcome (included, frontran, reverted, or dropped). Each arrow is a lifecycle
 transition.
+
+### Rejected
+Refused at ingress: the user operation is never accepted into the mempool and
+gets no hash.
+
+### Dropped
+Removed from the mempool after acceptance without being included. A terminal
+outcome. The client-facing status of a dropped user operation reads
+`rejected`; that API value predates this term.
+
+### Resubmit
+Returning the user operations of a failed bundle attempt from processing or
+submitted to outstanding, so that a later bundle can carry them. Avoid:
+**requeue**.
+
+### Replacement
+Re-sending a stuck bundle transaction with the same nonce and higher fees, so
+that it is mined instead of the original. Avoid: **resubmit** for this.
+
+### Infrastructure failure
+A failed bundle attempt caused by the relay's own dependencies: fetching the
+nonce or fees, acquiring an executor wallet, an executor wallet without funds,
+a transport failure or rate limit while sending the bundle transaction, a mempool store
+write, or the internal bundle hand-off. It never counts
+against a user operation.
+
+### Counted failure
+Any failed bundle attempt that is not an infrastructure failure, such as an
+on-chain revert or a send the node refused. It uses up part of the user
+operation's submission attempts.
+
+### Submission attempts
+How many times the bundler has tried to land one user operation: each send of
+a bundle carrying it, each replacement, and each counted failure, kept across
+resubmits. A user operation whose submission attempts reach the resubmit limit
+is dropped at its next counted failure.
+
+### Nonce slot
+One sender together with one nonce key. User operations in the same nonce slot
+must land in nonce order.
+
+### Retried user operation
+An outstanding user operation with at least one submission attempt.
+
+### Isolation
+Carrying a retried user operation in a bundle of its own, so that a bad user
+operation cannot keep failing its bundle-mates. Avoid: **solo bundle**.
+
+### Successor hold
+Keeping a user operation out of bundles while the previous nonce in its nonce
+slot is still processing or submitted. Avoid: **nonce hold**.
 
 ### Mempool restoration
 Carrying the mempool's contents across a graceful termination so a restarted

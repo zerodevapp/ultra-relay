@@ -1,4 +1,4 @@
-import type { Address, HexData32, UserOpInfo } from "@alto/types"
+import type { Address, HexData32, UserOpInfo, UserOperation } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import pino from "pino"
@@ -9,15 +9,20 @@ import { createMempoolStore } from "./createMempoolStore"
 
 const processingAdd = vi.fn<Store["add"]>()
 const submittedAdd = vi.fn<Store["add"]>()
+const processingFindConflicting = vi.fn<Store["findConflicting"]>()
+const submittedFindConflicting = vi.fn<Store["findConflicting"]>()
 
 const redisStoreArgs = vi.hoisted(() => [] as Record<string, unknown>[])
 
 vi.mock("./createRedisStore", () => ({
     createRedisStore: (args: { storeType: string }) => {
         redisStoreArgs.push(args)
-        return {
-            add: args.storeType === "processing" ? processingAdd : submittedAdd
-        }
+        return args.storeType === "processing"
+            ? {
+                  add: processingAdd,
+                  findConflicting: processingFindConflicting
+              }
+            : { add: submittedAdd, findConflicting: submittedFindConflicting }
     }
 }))
 
@@ -118,6 +123,30 @@ describe.each([
         await expect(
             store[method]({ entryPoint, userOpInfo })
         ).resolves.toBeUndefined()
+        expect(sentry.captureException).toHaveBeenCalledWith(failure)
+    })
+})
+
+describe("hasPendingPredecessor", () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+    })
+
+    it("holds when the lookup throws", async () => {
+        const failure = new Error("redis lookup failed")
+        processingFindConflicting.mockRejectedValue(failure)
+        submittedFindConflicting.mockResolvedValue(undefined)
+        const store = newMempoolStore()
+
+        await expect(
+            store.hasPendingPredecessor({
+                entryPoint,
+                userOp: { sender: entryPoint, nonce: 2n } as UserOperation
+            })
+        ).resolves.toBe(true)
+        expect(processingFindConflicting).toHaveBeenCalledWith(
+            expect.objectContaining({ nonce: 1n })
+        )
         expect(sentry.captureException).toHaveBeenCalledWith(failure)
     })
 })

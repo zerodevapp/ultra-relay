@@ -23,10 +23,14 @@ import {
     ContractFunctionExecutionError,
     FeeCapTooLowError,
     type Hex,
+    HttpRequestError,
     InsufficientFundsError,
     IntrinsicGasTooLowError,
+    LimitExceededRpcError,
     NonceTooHighError,
     NonceTooLowError,
+    RpcRequestError,
+    TimeoutError,
     TransactionExecutionError
 } from "viem"
 import type { SendTransactionErrorType } from "viem"
@@ -51,6 +55,39 @@ import {
 // 13% to keep rounding headroom so resubmissions are never rejected with
 // "replacement transaction underpriced".
 const REPLACEMENT_MIN_BUMP_PERCENT = 113n
+
+// HTTP statuses that mean the endpoint could not take the request right now
+// (request timeout, rate limit), not that it refused this transaction.
+const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429])
+
+// JSON-RPC codes providers use for rate limiting: 429 (e.g. Alchemy),
+// LimitExceededRpcError (-32005) and QuickNode's -32007. viem's own retry
+// logic (shouldRetry in utils/buildRequest) treats the same codes as transient.
+const RATE_LIMIT_RPC_CODES: ReadonlySet<number> = new Set([
+    429,
+    LimitExceededRpcError.code,
+    -32007
+])
+
+// The node that takes the bundle transaction failed at the transport level or
+// rate-limited us: a timeout, no response at all (status undefined), a 5xx,
+// an HTTP 408 or 429, or a JSON-RPC rate-limit code. A rejected send spends no
+// gas, so counting it toward the resubmit cap would only drop valid userOps.
+// Walks the cause chain so it matches a bare error and one wrapped in a
+// TransactionExecutionError alike. Any other 4xx is the node or gateway
+// refusing this transaction (for example a 413), so it must count toward the
+// resubmit cap and falls through to the normal classification.
+const isSendTransportError = (err: unknown): boolean =>
+    err instanceof BaseError &&
+    err.walk(
+        (e) =>
+            e instanceof TimeoutError ||
+            (e instanceof HttpRequestError &&
+                (e.status === undefined ||
+                    e.status >= 500 ||
+                    TRANSIENT_HTTP_STATUSES.has(e.status))) ||
+            (e instanceof RpcRequestError && RATE_LIMIT_RPC_CODES.has(e.code))
+    ) !== null
 
 type HandleOpsTxParams = {
     gas: bigint
@@ -655,12 +692,33 @@ export class Executor {
         } catch (err: unknown) {
             const { rejectedUserOps, userOpsToBundle } = filterOpsResult
 
+            const sendTransportErrorResult = (e: unknown): BundleResult => {
+                childLogger.warn(
+                    { err: jsonStringifyWithBigint(e) },
+                    "transport error submitting bundle transaction"
+                )
+                return {
+                    success: false,
+                    reason: "send_transport_error",
+                    rejectedUserOps,
+                    recoverableOps: userOpsToBundle
+                }
+            }
+
             const isViemExecutionError =
                 err instanceof ContractFunctionExecutionError ||
                 err instanceof TransactionExecutionError
 
+            // Send endpoint outage: infrastructure failure, never counts toward
+            // the resubmit cap (the userOps themselves are fine).
+            const transportError = isSendTransportError(err)
+
             // Unknown error, return INTERNAL FAILURE.
             if (!isViemExecutionError) {
+                if (transportError) {
+                    return sendTransportErrorResult(err)
+                }
+
                 sentry.captureException(err)
                 childLogger.error(
                     { err: JSON.stringify(err) },
@@ -735,6 +793,10 @@ export class Executor {
                     rejectedUserOps,
                     recoverableOps: userOpsToBundle
                 }
+            }
+
+            if (transportError) {
+                return sendTransportErrorResult(err)
             }
 
             childLogger.error(

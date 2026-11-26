@@ -53,6 +53,7 @@ export type BundleResult =
               | "insufficient_funds"
               | "generic_error"
               | "oversized_bundle"
+              | "send_transport_error"
           rejectedUserOps: RejectedUserOp[]
           recoverableOps: UserOpInfo[]
       }

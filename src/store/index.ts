@@ -68,6 +68,9 @@ export type MempoolStore = {
     validateSubmittedOrProcessing: (
         args: EntryPointUserOpParam
     ) => Promise<ValidationResult>
+    // Successor hold: whether the userOp's immediate predecessor in its nonce
+    // slot is still processing or submitted. Answers true if the lookup fails.
+    hasPendingPredecessor: (args: EntryPointUserOpParam) => Promise<boolean>
     validateSenderLimits: (args: {
         entryPoint: Address
         userOp: UserOperation

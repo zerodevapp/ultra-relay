@@ -127,6 +127,15 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         : initDebugLogger(args.logLevel)
     setNetworkName(args.networkName)
 
+    // Bundle simulation sends from the first executor key (getEthCallSender).
+    // Only a config file with an empty key list can reach this: the CLI flag is
+    // required and its comma-separated form needs at least one key.
+    if (args.executorPrivateKeys.length === 0) {
+        logger.warn(
+            "no executor private keys configured: no bundle can be sent, and bundle simulation runs without a sender (tx.origin)"
+        )
+    }
+
     // 5-min heartbeat: current + peak "requests awaiting a socket" per origin
     startFetchDispatcherHeartbeat(logger.child({ module: "fetch_dispatcher" }))
 

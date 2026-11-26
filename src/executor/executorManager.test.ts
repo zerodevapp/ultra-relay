@@ -1663,6 +1663,7 @@ const makeSend = () => {
     )
     const markWalletProcessed = vi.fn().mockResolvedValue(undefined)
     const resubmitUserOps = vi.fn().mockResolvedValue(undefined)
+    const dropUserOps = vi.fn()
     const requestShutdown = vi.fn()
     const tryGetNetworkGasPrice = vi.fn(async () => ({
         maxFeePerGas: 1n,
@@ -1705,6 +1706,7 @@ const makeSend = () => {
         getWallet,
         markWalletProcessed,
         resubmitUserOps,
+        dropUserOps,
         requestShutdown,
         tryGetNetworkGasPrice,
         getTransactionCount,
@@ -1736,11 +1738,12 @@ const makeSend = () => {
             startWatchingBlocks: vi.fn(),
             mempool: {
                 markUserOpsAsSubmitted,
-                dropUserOps: vi.fn(),
+                dropUserOps,
                 resubmitUserOps: resubmitUserOps as RecoveryCall
             },
             metrics: {
-                bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) }
+                bundlesSubmitted: { labels: () => ({ inc: vi.fn() }) },
+                userOperationsSubmitted: { labels: () => ({ inc: vi.fn() }) }
             },
             getBaseFee: ExecutorManager.prototype.getBaseFee,
             acquireWallet: (
@@ -2133,6 +2136,28 @@ describe("sendBundleToExecutor failure recovery", () => {
             })
             return { unhandled, outcomes: await Promise.allSettled(dispatched) }
         }
+
+        it("drops a userOp that fails simulation on its first attempt and resubmits nothing", async () => {
+            const send = makeSend()
+            const userOps = makeUserOps()
+            const rejected = { ...userOps[0], reason: "AA33 reverted" }
+            send.bundle.mockResolvedValueOnce({
+                success: false,
+                reason: "filterops_failed",
+                rejectedUserOps: [rejected],
+                recoverableOps: []
+            } as never)
+
+            expect(await run(send, userOps)).toEqual(RESOLVED_QUIETLY)
+
+            expect(send.dropUserOps.mock.calls).toEqual([
+                [ENTRY_POINT, [rejected]]
+            ])
+            expect(send.resubmitUserOps).toHaveBeenCalledWith(
+                expect.objectContaining({ userOps: [] })
+            )
+            expect(send.markWalletProcessed).toHaveBeenCalledTimes(1)
+        })
 
         it("requeues a bundle whose wallet wait failed, freeing nothing", async () => {
             const send = makeSend()

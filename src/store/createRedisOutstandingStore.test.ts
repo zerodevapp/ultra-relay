@@ -112,3 +112,33 @@ describe("RedisOutstandingQueue.remove", () => {
         expect(await redis.hexists(userOpHashLookupKey, userOpHash)).toBe(0)
     })
 })
+
+describe("RedisOutstandingQueue round-trip", () => {
+    const redis = new Redis(redisEndpoint)
+
+    beforeEach(async () => {
+        await redis.flushall()
+    })
+
+    // A resubmitted record carries its submissionAttempts into the outstanding
+    // store, and the resubmit limit reads it back after the next pop. Read
+    // back with peek(): ioredis-mock's Lua VM has no cjson, so pop()'s script
+    // cannot run here. pop() returns the stored member unchanged and parses
+    // it with the same deserializeUserOpInfo, so the round-trip is the same.
+    it("keeps submissionAttempts through add and read-back", async () => {
+        const store = createRedisOutstandingQueue({
+            config,
+            entryPoint,
+            redisEndpoint
+        })
+        const userOpHash = `0x${"33".repeat(32)}` as HexData32
+
+        await store.add({
+            ...makeUserOpInfo({ userOpHash }),
+            submissionAttempts: 2
+        })
+        const readBack = await store.peek()
+
+        expect(readBack?.submissionAttempts).toBe(2)
+    })
+})

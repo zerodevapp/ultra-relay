@@ -31,7 +31,7 @@ import {
     scaleBigIntByPercent,
     stampLatest
 } from "@alto/utils"
-import { type Hex, getAddress, getContract, size } from "viem"
+import { type Hex, getAddress, getContract, size, toHex } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import type { AltoConfig } from "../createConfig"
 import { bundleByteThreshold, getBundleCaps } from "../executor/bundleCaps"
@@ -41,6 +41,68 @@ import {
     type InterfaceReputationManager,
     ReputationStatuses
 } from "./reputationManager"
+
+// Upstream #617's exact drop reason.
+export const MAX_RESUBMITS_REASON = "max resubmits reached"
+
+// The drop reasons we pass around carry revert data, so the metric label is
+// reduced to a bounded set: the cap reason, an AAxx code, or "other" (ADR 0006).
+export const dropReasonLabel = (reason: string): string =>
+    reason === MAX_RESUBMITS_REASON
+        ? MAX_RESUBMITS_REASON
+        : (getAAError(reason) ?? "other")
+
+// Resubmit reasons that are infrastructure failures: they never count toward
+// max-resubmits and never drop a userOp. Every other reason is a counted
+// failure. Upstream #617 counts every reason; we exempt our own outages
+// because the 100 ms-1 s tick would otherwise drop every queued userOp within
+// seconds of an RPC blip (see ADR 0006). Each string must match its call site
+// exactly.
+export const INFRASTRUCTURE_FAILURE_REASONS: ReadonlySet<string> = new Set([
+    // executorManager.ts sendBundleToExecutor, nonce/gas fetch failed
+    "Failed to get nonce and gas parameters for bundling",
+    // executorManager.ts recoverFailedSend, no wallet acquired
+    "wallet_acquisition_failed",
+    // Executor.bundle result (send path and replacement)
+    "insufficient_funds",
+    // executorManager.ts rotateStuckBundle, detach write failed
+    "stuck_bundle_detach_failed",
+    // Mempool.process, onBundle hand-off threw
+    "bundle_handoff_failed",
+    // Executor.bundle send catch: a transport failure or rate limit in the
+    // cause chain (see isSendTransportError)
+    "send_transport_error"
+])
+
+// Held userOps make no bundles, so a pass ends at the first successor hold past
+// this many, and the finally writes them all back.
+// ponytail: a fixed count per pass; a time budget per pass is the upgrade path
+// if held slots ever delay bundling noticeably.
+const MAX_HELD_USEROPS_PER_PASS = 256
+
+// How long a "not landed" chain-nonce answer (chain sequence below the
+// candidate's) holds before the slot is read again.
+// ponytail: a fixed age; refreshing on each new block is the upgrade path if
+// held userOps wait noticeably longer than their predecessor's block.
+const CHAIN_NONCE_CACHE_TTL_MS = 1_000
+
+// How long a "landed" chain-nonce answer (chain sequence at or past the
+// candidate's) releases the candidate without a new read. Far longer than one
+// pass, so an orphan-held userOp is released on the next pass instead of being
+// re-read every pass.
+// ponytail: a fixed age rather than reorg-aware invalidation; tying entries to
+// a block hash is the upgrade path if reorgs cause AA25 rejections.
+const CHAIN_NONCE_LANDED_TTL_MS = 60_000
+
+// Background getNonce reads in flight at once, across all nonce slots.
+// ponytail: a fixed count; a multicall batch per pass is the upgrade path if
+// held slots outnumber it for long.
+const MAX_CONCURRENT_CHAIN_NONCE_READS = 16
+
+// Cached on-chain nonce reads; past this, the oldest entry is evicted.
+// ponytail: a fixed count with insertion-order eviction; an LRU is the upgrade
+// path if hot slots get evicted while still held.
+const MAX_CHAIN_NONCE_CACHE_ENTRIES = 1_024
 
 export class Mempool {
     private config: AltoConfig
@@ -52,6 +114,13 @@ export class Mempool {
     private logger: Logger
     private validator: InterfaceValidator
     private eventManager: EventManager
+    // Successor hold's on-chain nonce reads, keyed by entry point, sender and
+    // nonce key. Kept across passes: the Mempool lives as long as the process.
+    private chainNonceCache = new Map<
+        string,
+        { sequence: bigint; fetchedAt: number }
+    >()
+    private chainNonceReadsInFlight = new Set<string>()
 
     constructor({
         config,
@@ -135,57 +204,136 @@ export class Mempool {
         entryPoint: Address
         reason: string
     }) {
-        await Promise.all(
-            userOps.map(async (userOpInfo) => {
-                const { userOpHash, userOp } = userOpInfo
-                this.logger.warn(
-                    {
-                        userOpHash,
-                        reason
-                    },
-                    `resubmitting userOp ${userOpHash} back to outstanding mempool: ${reason}`
-                )
-                await this.store.removeProcessing({ entryPoint, userOpHash })
-                await this.store.removeSubmitted({ entryPoint, userOpHash })
-                // Keep the original receivedAt so the inclusion log's totalMs
-                // spans the op's whole life across retries; validationMs is
-                // suppressed for reentered records (the record's addedToMempool
-                // is restamped, so that delta would span the prior cycle).
-                const [success, failureReason] = await this.add(
-                    userOp,
-                    entryPoint,
-                    {
-                        receivedAt: userOpInfo.receivedAt,
-                        reentry: true
-                    }
-                )
+        const counted = !INFRASTRUCTURE_FAILURE_REASONS.has(reason)
+        const maxResubmits = this.config.maxResubmits
 
-                if (!success) {
-                    this.logger.error(
-                        { userOpHash, failureReason },
-                        `failed to re-add userOp ${userOpHash} during resubmission, dropping it`
-                    )
-                    const rejectedUserOp = {
-                        ...userOpInfo,
-                        reason: failureReason
+        // Re-add each nonce slot one userOp at a time in nonce order, so nonce
+        // N is back in outstanding before N+1 can be popped. Slots run in
+        // parallel.
+        const nonceSlots = new Map<string, UserOpInfo[]>()
+        for (const userOpInfo of userOps) {
+            const { sender, nonce } = userOpInfo.userOp
+            const [nonceKey] = getNonceKeyAndSequence(nonce)
+            const slot = `${sender}-${nonceKey}`
+            nonceSlots.set(slot, [...(nonceSlots.get(slot) ?? []), userOpInfo])
+        }
+
+        // A failed userOp does not stop the rest of its slot. The first error
+        // is rethrown once every slot has settled.
+        const errors: unknown[] = []
+        await Promise.all(
+            [...nonceSlots.values()].map(async (slotUserOps) => {
+                slotUserOps.sort((a, b) => {
+                    const [, aNonceSeq] = getNonceKeyAndSequence(a.userOp.nonce)
+                    const [, bNonceSeq] = getNonceKeyAndSequence(b.userOp.nonce)
+                    if (aNonceSeq === bNonceSeq) {
+                        return 0
                     }
-                    // Deliberately not awaited, so every caller keeps the
-                    // resolve/reject behavior it has today; the catch keeps a
-                    // failed drop from escaping as an unhandled rejection.
-                    this.dropUserOps(entryPoint, [rejectedUserOp]).catch(
-                        (err) =>
-                            this.logger.error(
-                                { err, userOpHash },
-                                `failed to drop userOp ${userOpHash} after its re-add was refused`
-                            )
-                    )
+                    return aNonceSeq < bNonceSeq ? -1 : 1
+                })
+
+                for (const userOpInfo of slotUserOps) {
+                    try {
+                        await this.resubmitUserOp({
+                            userOpInfo,
+                            entryPoint,
+                            reason,
+                            counted,
+                            maxResubmits
+                        })
+                    } catch (err) {
+                        errors.push(err)
+                    }
                 }
             })
         )
+        if (errors.length > 0) {
+            throw errors[0]
+        }
 
         this.metrics.userOperationsResubmitted
             .labels({ reason })
             .inc(userOps.length)
+    }
+
+    private async resubmitUserOp({
+        userOpInfo,
+        entryPoint,
+        reason,
+        counted,
+        maxResubmits
+    }: {
+        userOpInfo: UserOpInfo
+        entryPoint: Address
+        reason: string
+        counted: boolean
+        maxResubmits: number
+    }) {
+        const { userOpHash, userOp, submissionAttempts } = userOpInfo
+
+        // Mirrors upstream #617: check, then increment. Infrastructure
+        // failures are exempt, which upstream does not do: they are our own
+        // outages, and counting them would drop queued userOps within seconds
+        // of an RPC blip (see ADR 0006).
+        if (counted && submissionAttempts >= maxResubmits) {
+            this.logger.warn(
+                { userOpHash, submissionAttempts, maxResubmits, reason },
+                `userOp ${userOpHash} dropped: max resubmits reached after ${reason}`
+            )
+            const rejectedUserOp = {
+                ...userOpInfo,
+                reason: MAX_RESUBMITS_REASON
+            }
+            // Not awaited, like the refused re-add drop below.
+            this.dropUserOps(entryPoint, [rejectedUserOp]).catch((err) =>
+                this.logger.error(
+                    { err, userOpHash },
+                    `failed to drop userOp ${userOpHash} after max resubmits reached`
+                )
+            )
+            return
+        }
+
+        this.logger.warn(
+            {
+                userOpHash,
+                reason
+            },
+            `resubmitting userOp ${userOpHash} back to outstanding mempool: ${reason}`
+        )
+        await this.store.removeProcessing({ entryPoint, userOpHash })
+        await this.store.removeSubmitted({ entryPoint, userOpHash })
+        // Keep the original receivedAt so the inclusion log's totalMs
+        // spans the op's whole life across retries; validationMs is
+        // suppressed for reentered records (the record's addedToMempool
+        // is restamped, so that delta would span the prior cycle).
+        const [success, failureReason] = await this.add(userOp, entryPoint, {
+            receivedAt: userOpInfo.receivedAt,
+            reentry: true,
+            submissionAttempts: counted
+                ? submissionAttempts + 1
+                : submissionAttempts
+        })
+
+        if (!success) {
+            this.logger.error(
+                { userOpHash, failureReason },
+                `failed to re-add userOp ${userOpHash} during resubmission, dropping it`
+            )
+            const rejectedUserOp = {
+                ...userOpInfo,
+                reason: failureReason
+            }
+            // Deliberately not awaited, so every caller keeps the
+            // resolve/reject behavior it has today; the catch keeps a
+            // failed drop from escaping as an unhandled rejection.
+            this.dropUserOps(entryPoint, [rejectedUserOp]).catch((err) =>
+                this.logger.error(
+                    { err, userOpHash },
+                    `failed to drop userOp ${userOpHash} after its re-add was refused`
+                )
+            )
+        }
     }
 
     async dropUserOps(entryPoint: Address, rejectedUserOps: RejectedUserOp[]) {
@@ -199,6 +347,9 @@ export class Mempool {
                     reason,
                     getAAError(reason)
                 )
+                this.metrics.userOperationsDropped
+                    .labels({ reason: dropReasonLabel(reason) })
+                    .inc()
                 await this.monitor.setUserOpStatus(userOpHash, {
                     status: "rejected",
                     transactionHash: null
@@ -364,11 +515,13 @@ export class Mempool {
         {
             referencedContracts,
             receivedAt,
-            reentry
+            reentry,
+            submissionAttempts = 0
         }: {
             referencedContracts?: ReferencedCodeHashes
             receivedAt?: number
             reentry?: boolean
+            submissionAttempts?: number
         } = {}
     ): Promise<[boolean, string]> {
         const userOpHash = await getUserOpHash({
@@ -472,7 +625,7 @@ export class Mempool {
                 referencedContracts,
                 receivedAt,
                 addedToMempool: Date.now(),
-                submissionAttempts: 0,
+                submissionAttempts,
                 ...(reentry ? { reentered: true } : {})
             }
         })
@@ -836,6 +989,20 @@ export class Mempool {
         // predecessor has had a block.
         const slotsInPriorBundles = new Set<string>()
 
+        // Successor hold and isolation are fork-only; upstream has neither
+        // (see ADR 0006). A userOp whose immediate predecessor in its nonce
+        // slot is still processing or submitted would fail AA25 if simulated
+        // before that predecessor lands, so it waits for a later tick. A held
+        // userOp is set aside here and written back once by the finally, not
+        // at once: a write-back would let the store hand it back in this same
+        // pass and trip the repeat guard below, so a sender with a chain in
+        // flight would end every pass and stall every other sender until its
+        // predecessor lands. Setting it aside also stops the later nonce the
+        // store promotes when the held op is popped from slipping past: its
+        // nonce slot stays held for the rest of the pass.
+        const heldSlots = new Set<string>()
+        const heldUserOps: UserOpInfo[] = []
+
         // A userOp deferred by a bundle cap is held here rather than written
         // back to outstanding: its hash is already in seenOps, so re-popping it
         // would trip the repeat guard below and end the whole pass with the
@@ -844,13 +1011,30 @@ export class Mempool {
         // returns anything still held, so an early exit or a throw in between
         // cannot drop it.
         let carriedUserOpInfo: UserOpInfo | undefined
+        let isolationOverflowUsed = false
+        // True once the extra bundle is open: it holds only the isolated
+        // userOp, so nothing fresh is popped into it.
+        let inOverflowBundle = false
 
         try {
             // Process operations until no more are available or we hit maxBundleCount
             while (carriedUserOpInfo || !outstandingEmpty) {
                 // If maxBundles is set and we reached the limit, break
                 if (maxBundleCount && bundles.length >= maxBundleCount) {
-                    break
+                    // Fork-only: a retried userOp carried for isolation gets
+                    // one extra bundle per pass. A single-wallet relay
+                    // (budget 1) would otherwise push it back every tick and
+                    // never send it. Cost: that bundle waits for a wallet.
+                    // The extra bundle holds only the isolated userOp: if it
+                    // is released unaccepted, the pass ends. See ADR 0006.
+                    const isolatedCarry =
+                        carriedUserOpInfo !== undefined &&
+                        carriedUserOpInfo.submissionAttempts > 0
+                    if (!isolatedCarry || isolationOverflowUsed) {
+                        break
+                    }
+                    isolationOverflowUsed = true
+                    inOverflowBundle = true
                 }
 
                 if (breakLoop) {
@@ -885,7 +1069,9 @@ export class Mempool {
                 let senders = new Set<string>()
                 let knownEntities = await this.getKnownEntities(entryPoint)
                 let storageMap: StorageMap = {}
-                const currentBundleSlots = new Set<string>()
+                // Nonce slot -> highest nonce sequence in this bundle. A slot
+                // pops in nonce order, so the latest accepted is the highest.
+                const currentBundleSlots = new Map<string, bigint>()
 
                 // A carried userOp is no longer in outstanding, so the snapshot
                 // above no longer lists its entities. Put them back so this
@@ -936,6 +1122,10 @@ export class Mempool {
                         userOpInfo = carriedUserOpInfo
                         fromCarry = true
                     } else {
+                        if (inOverflowBundle) {
+                            breakLoop = true
+                            break
+                        }
                         const poppedUserOpInfo =
                             await this.store.popOutstanding(entryPoint)
                         if (!poppedUserOpInfo) {
@@ -959,7 +1149,9 @@ export class Mempool {
 
                     const { userOp } = userOpInfo
 
-                    const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)
+                    const [nonceKey, nonceSequence] = getNonceKeyAndSequence(
+                        userOp.nonce
+                    )
                     const nonceSlot = `${userOp.sender}-${nonceKey}`
                     if (slotsInPriorBundles.has(nonceSlot)) {
                         // Its predecessor sits in an earlier bundle of this
@@ -974,6 +1166,52 @@ export class Mempool {
                             userOpInfo
                         })
                         break
+                    }
+
+                    // Successor hold, for popped and carried candidates alike.
+                    // A predecessor in the bundle being built does not hold,
+                    // so consecutive nonces still pack together: their
+                    // processing writes are not awaited until the bundle
+                    // closes, so a lookup could see the predecessor and hold
+                    // its own bundle-mate. It must be the exact predecessor:
+                    // nonce N can be back in outstanding while N+1 is still
+                    // processing, and N+2 must not join N's bundle then.
+                    let isHeld = heldSlots.has(nonceSlot)
+                    if (
+                        !isHeld &&
+                        nonceSequence > 0n &&
+                        currentBundleSlots.get(nonceSlot) !== nonceSequence - 1n
+                    ) {
+                        isHeld = await this.isPredecessorPending({
+                            entryPoint,
+                            userOpInfo
+                        })
+                    }
+                    if (isHeld) {
+                        // The held list owns the op from here, so release the
+                        // carry first: the finally must not write it twice.
+                        carriedUserOpInfo = undefined
+                        userOpInfo.reentered = true
+                        heldUserOps.push(userOpInfo)
+
+                        // Past the bound, end the pass like the bundle budget.
+                        // This op is written back with the held ones.
+                        if (heldUserOps.length > MAX_HELD_USEROPS_PER_PASS) {
+                            breakLoop = true
+                            break
+                        }
+
+                        heldSlots.add(nonceSlot)
+                        this.logger.debug(
+                            {
+                                event: "userOpSuccessorHold",
+                                userOpHash: userOpInfo.userOpHash,
+                                sender: userOp.sender,
+                                nonce: toHex(userOp.nonce)
+                            },
+                            `Holding userOp ${userOpInfo.userOpHash} until its predecessor in nonce slot ${nonceSlot} lands.`
+                        )
+                        continue
                     }
 
                     // Check if we should skip this operation
@@ -1084,6 +1322,25 @@ export class Mempool {
                         break
                     }
 
+                    // Isolation: a retried userOp goes out in a bundle of its
+                    // own, so a bad userOp cannot keep failing its
+                    // bundle-mates. Carried like a bundle-cap deferral, it
+                    // opens the next bundle, which closes right after it.
+                    const isRetried = userOpInfo.submissionAttempts > 0
+                    if (isRetried && currentBundle.userOps.length > 0) {
+                        this.logger.debug(
+                            {
+                                event: "userOpIsolated",
+                                userOpHash: userOpInfo.userOpHash,
+                                submissionAttempts:
+                                    userOpInfo.submissionAttempts
+                            },
+                            `Isolating retried userOp ${userOpInfo.userOpHash} in a bundle of its own.`
+                        )
+                        carriedUserOpInfo = userOpInfo
+                        break
+                    }
+
                     // Update state based on skip result
                     paymasterDeposit = skipResult.paymasterDeposit
                     stakedEntityCount = skipResult.stakedEntityCount
@@ -1102,7 +1359,12 @@ export class Mempool {
 
                     // Add op to current bundle
                     currentBundle.userOps.push(userOpInfo)
-                    currentBundleSlots.add(nonceSlot)
+                    currentBundleSlots.set(nonceSlot, nonceSequence)
+
+                    // Isolation: nothing joins a retried userOp's bundle.
+                    if (isRetried) {
+                        break
+                    }
                 }
 
                 // Land every processing write before the bundle is handed
@@ -1115,7 +1377,7 @@ export class Mempool {
                     // userOpInfoSchema.
                     stampLatest(currentBundle.userOps, "bundledAt", Date.now())
                     bundles.push(currentBundle)
-                    for (const slot of currentBundleSlots) {
+                    for (const slot of currentBundleSlots.keys()) {
                         slotsInPriorBundles.add(slot)
                     }
 
@@ -1154,13 +1416,128 @@ export class Mempool {
         } finally {
             // Anything still held is ours to return: normal completion with a
             // carry, a maxBundleCount exit, or a throw from bundle setup or
-            // candidate evaluation. Exactly one write, and never a return from
-            // finally, so the original result or exception stands.
-            if (carriedUserOpInfo) {
-                const userOpInfo = carriedUserOpInfo
-                carriedUserOpInfo = undefined
-                await this.store.addOutstanding({ entryPoint, userOpInfo })
+            // candidate evaluation. Exactly one write for the carried op and
+            // one for each successor hold, and never a return from finally. A
+            // rejected write becomes the failure.
+            const userOpInfos = carriedUserOpInfo
+                ? [carriedUserOpInfo, ...heldUserOps]
+                : heldUserOps
+            carriedUserOpInfo = undefined
+            await this.writeBackToOutstanding({ entryPoint, userOpInfos })
+        }
+    }
+
+    // Successor hold: whether the userOp's immediate predecessor is still
+    // processing or submitted. The store answers first. The chain is checked
+    // only when the store says pending, because a pod that dies leaves its
+    // entries behind until they are evicted (2 h processing, 24 h submitted)
+    // while the predecessor itself usually lands a block later (see ADR 0006).
+    // A pass never waits for the chain: a cached read answers while it is
+    // fresh (a "landed" answer for CHAIN_NONCE_LANDED_TTL_MS, a "not landed"
+    // one for CHAIN_NONCE_CACHE_TTL_MS), otherwise the userOp is held and a
+    // background read refreshes the cache for a later pass. The chain nonce
+    // only grows except under a chain reorganization, so a stale "not landed"
+    // answer can only hold a userOp longer. A stale "landed" answer could
+    // release one early only after a reorg, and bundle simulation then rejects
+    // it with AA25.
+    private async isPredecessorPending({
+        entryPoint,
+        userOpInfo
+    }: {
+        entryPoint: Address
+        userOpInfo: UserOpInfo
+    }): Promise<boolean> {
+        const { userOp } = userOpInfo
+        if (!(await this.store.hasPendingPredecessor({ entryPoint, userOp }))) {
+            return false
+        }
+
+        const [nonceKey, nonceSequence] = getNonceKeyAndSequence(userOp.nonce)
+        const cacheKey = `${entryPoint}-${userOp.sender}-${nonceKey}`
+        const cached = this.chainNonceCache.get(cacheKey)
+        if (cached) {
+            const landed = cached.sequence >= nonceSequence
+            const ttl = landed
+                ? CHAIN_NONCE_LANDED_TTL_MS
+                : CHAIN_NONCE_CACHE_TTL_MS
+            if (Date.now() - cached.fetchedAt < ttl) {
+                return !landed
             }
+        }
+
+        if (
+            !this.chainNonceReadsInFlight.has(cacheKey) &&
+            this.chainNonceReadsInFlight.size < MAX_CONCURRENT_CHAIN_NONCE_READS
+        ) {
+            const { userOpHash } = userOpInfo
+            this.chainNonceReadsInFlight.add(cacheKey)
+            // Not awaited: this pass holds, and a later one reads the cache.
+            this.cacheChainNonce({ entryPoint, userOp, cacheKey })
+                .catch((err) =>
+                    this.logger.warn(
+                        { err, userOpHash },
+                        `failed to read the on-chain nonce for userOp ${userOpHash}, holding it`
+                    )
+                )
+                .finally(() => this.chainNonceReadsInFlight.delete(cacheKey))
+        }
+        return true
+    }
+
+    // Reads EntryPoint.getNonce at latest, as rpcHandler.getNonceSeq does, and
+    // caches the slot's sequence. A failed read rejects and caches nothing.
+    private async cacheChainNonce({
+        entryPoint,
+        userOp,
+        cacheKey
+    }: {
+        entryPoint: Address
+        userOp: UserOperation
+        cacheKey: string
+    }): Promise<void> {
+        const [nonceKey] = getNonceKeyAndSequence(userOp.nonce)
+        const entryPointContract = getContract({
+            address: entryPoint,
+            abi: isVersion06(userOp) ? EntryPointV06Abi : EntryPointV07Abi,
+            client: {
+                public: this.config.publicClient
+            }
+        })
+        const chainNonce = await entryPointContract.read.getNonce(
+            [userOp.sender, nonceKey],
+            { blockTag: "latest" }
+        )
+        const [, sequence] = getNonceKeyAndSequence(chainNonce)
+
+        // Deleted first so Map order stays oldest fetch first.
+        this.chainNonceCache.delete(cacheKey)
+        this.chainNonceCache.set(cacheKey, { sequence, fetchedAt: Date.now() })
+        if (this.chainNonceCache.size > MAX_CHAIN_NONCE_CACHE_ENTRIES) {
+            const [oldestKey] = this.chainNonceCache.keys()
+            this.chainNonceCache.delete(oldestKey)
+        }
+    }
+
+    // One write per userOp, in order: held userOps are in pop order, so each
+    // nonce slot goes back in nonce order. Every write is attempted, then the
+    // first error is rethrown.
+    private async writeBackToOutstanding({
+        entryPoint,
+        userOpInfos
+    }: {
+        entryPoint: Address
+        userOpInfos: UserOpInfo[]
+    }) {
+        const errors: unknown[] = []
+        for (const userOpInfo of userOpInfos) {
+            try {
+                await this.store.addOutstanding({ entryPoint, userOpInfo })
+            } catch (err) {
+                errors.push(err)
+            }
+        }
+        if (errors.length > 0) {
+            throw errors[0]
         }
     }
 

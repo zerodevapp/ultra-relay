@@ -158,6 +158,14 @@ export const executorArgsSchema = z.object({
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3),
     "max-stuck-attempts-before-rotation": z.number().int().min(1).default(5),
+    // Same name and counter as upstream #617, which leaves it unset (no limit)
+    // and counts every failure. Default 7 because an uncapped loop drained an
+    // executor wallet (ZER-1350, ZER-1010), set just above a full stuck-bundle
+    // cycle (1 send + 4 fee bumps + 1 rotation send = 6 attempts with the
+    // default max-stuck-attempts-before-rotation of 5) so such a userOp still
+    // gets one retry. Infrastructure failures are exempt so an RPC blip cannot
+    // drop the queue. See ADR 0006.
+    "max-resubmits": z.number().int().min(0).default(7),
     "max-bundling-gas-price": z.preprocess(
         (v) => (v === "" ? undefined : v),
         z
